@@ -22,7 +22,6 @@ import copy
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -710,69 +709,49 @@ seven seconds is a verdict about the harness rather than about the product.
 
 
 
-def capture_setup_proof(
-    aua_command: str, setup_proof: tuple[str, str, str], serial: str | None = None
+async def capture_setup_proof(
+    call: Callable[[str, dict[str, Any], str], Awaitable[dict[str, Any]]],
+    setup_proof: tuple[str, str, str],
 ) -> dict[str, Any] | None:
-    """Whether a caller-supplied pattern appears in the device log right now.
+    """Whether a caller-supplied pattern is in the device log, read through this session.
 
     A precondition a caller must be able to *prove* rather than infer from the screen. The
     pattern and the value it stands for belong to the caller: this engine is app-agnostic and
-    must not know what any product calls its account tiers or entitlements.
+    must not know what any product calls its tiers or entitlements.
 
-    Only the boolean and the caller's own label come back. **The matching line is never
-    returned or stored** -- a response body carrying this kind of field usually carries the
-    account address beside it, and setup evidence is copied into published reports.
+    Read over the session's own tool channel, never a second `aua` process. A subprocess derives
+    its own worker scope and is refused with `device_leased` against the very device this session
+    holds -- which is why an earlier subprocess version worked when a scenario ran alone and
+    returned nothing under the panel's parallel workers, silently failing a row whose login had
+    succeeded.
 
-    Returns ``None`` when the log could not be read at all, so the caller records nothing and
-    keeps whatever it already does about an unproved precondition. A capture that cannot run
-    must never be mistaken for a precondition that failed, and must never invent one that held.
+    The proving line is written once, moments after the step that causes it, so a single look can
+    miss it while the response is still in flight; this polls briefly and stops the moment it is
+    proved. Only the boolean and the caller's label come back. **The matching line is never
+    returned or stored** -- a body carrying this kind of field usually carries the account address
+    beside it, and setup evidence is copied into published reports.
+
+    Returns ``None`` when the log cannot be read at all, so the caller records nothing and keeps
+    whatever it already does about an unproved precondition. A capture that cannot run must not be
+    mistaken for a precondition that failed, nor invent one that held.
     """
     _, pattern, value = setup_proof
-    # The evidence is usually a single line, written once, moments after the step that caused it.
-    # A single immediate look can miss it by a second while the response is still in flight --
-    # measured on 2026-09-15, where the line was present and stable when read by hand but absent
-    # to a one-shot capture taken the instant a login flow returned. Poll briefly instead.
     deadline = time.monotonic() + 12
-    outcome: dict[str, Any] | None = None
     while True:
-        outcome = _read_setup_proof(aua_command, pattern, value, serial)
-        if outcome is None or outcome.get("verified") or time.monotonic() >= deadline:
-            return outcome
-        time.sleep(2)
-
-
-def _read_setup_proof(
-    aua_command: str, pattern: str, value: str, serial: str | None
-) -> dict[str, Any] | None:
-    try:
-        # Filter on the device. Pulling the whole buffer and searching here timed out on a
-        # longer run -- an 11-criterion scenario produced enough log to exceed the budget, and
-        # the capture then reported nothing on a session that was perfectly fine. `--grep` is a
-        # regex, so the substring is re-checked below: a loose pattern must not be able to
-        # manufacture a positive.
-        argv = [aua_command]
-        if serial:
-            # Name the session's own device. Without it the lookup resolves by lease scope, and
-            # on a host running several emulators it can land on a different one -- observed on
-            # 2026-09-15, where the session held emulator-5560 and the capture came back empty
-            # on a run whose login had plainly succeeded.
-            argv += ["--serial", serial]
-        argv += ["logcat", "--json", "--grep", pattern, "--lines", "5"]
-        completed = subprocess.run(
-            argv, capture_output=True, text=True, timeout=90, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    try:
-        lines = json.loads(completed.stdout).get("lines")
-    except ValueError:
-        return None
-    if not isinstance(lines, list):
-        return None
-    matched = any(pattern in str(line) for line in lines)
-    return {"verified": matched, "actual": value if matched else None, "source": "logcat"}
+        try:
+            payload = await call("logcat_dump", {"grep": pattern, "lines": 5}, "setup")
+        except Exception:
+            return None
+        lines = payload.get("lines") if isinstance(payload, dict) else None
+        if not isinstance(lines, list):
+            return None
+        # `grep` is a regex on AUA's side, so the substring is re-checked here: a loose pattern
+        # must not be able to manufacture a positive.
+        matched = any(pattern in str(line) for line in lines)
+        if matched or time.monotonic() >= deadline:
+            return {"verified": matched, "actual": value if matched else None,
+                    "source": "logcat"}
+        await asyncio.sleep(2)
 
 
 async def replay_setup_flow(
@@ -839,7 +818,6 @@ async def run_realapp(
     flags: dict[str, str] | None = None,
     prelaunch_setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
-    aua_command: str = "aua",
     setup_proof: tuple[str, str, str] | None = None,
     contract: str | None = None,
     authored_context: str | None = None,
@@ -1177,7 +1155,7 @@ async def run_realapp(
         # After every setup flow, while the session is still live: a precondition the caller
         # must be able to prove rather than infer from the screen.
         if setup_proof is not None:
-            proved = capture_setup_proof(aua_command, setup_proof, result.get("serial"))
+            proved = await capture_setup_proof(call, setup_proof)
             if proved is not None:
                 result[setup_proof[0]] = proved
         if flags or setup_flows or observation_frame(launched) is None:
@@ -1568,7 +1546,7 @@ async def run_realapp(
         # simply had not been produced yet when the first look happened. Only retried when the
         # first attempt did not already prove it, so a proved precondition is never re-litigated.
         if setup_proof is not None and not (result.get(setup_proof[0]) or {}).get("verified"):
-            retried = capture_setup_proof(aua_command, setup_proof, result.get("serial"))
+            retried = await capture_setup_proof(call, setup_proof)
             if retried is not None and retried.get("verified"):
                 result[setup_proof[0]] = retried
 
@@ -1913,7 +1891,6 @@ def main() -> int:
                     flags=parse_pairs(args.flags, what="--flags"),
                     prelaunch_setup_flows=prelaunch_setup_flows,
                     setup_flows=setup_flows,
-                    aua_command=args.aua_command,
                     setup_proof=setup_proof,
                     contract=args.contract.read_text(encoding="utf-8") if args.contract else None,
                     authored_context=(
