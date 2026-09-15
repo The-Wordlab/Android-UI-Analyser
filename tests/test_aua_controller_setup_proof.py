@@ -22,11 +22,18 @@ PROOF = ("setup_tier", '"tier":"premium"', "premium")
 SECRET = '{"email":"someone@example.test","tier":"premium"}'
 
 
+seen_argv: list[list[str]] = []
+
+
 def _logcat(monkeypatch, *, lines=None, returncode=0, stdout=None, raises=None):
+    seen_argv.clear()
     def fake_run(argv, **kwargs):
         if raises is not None:
             raise raises
-        assert argv[1:] == ["logcat", "--since", "1", "--json"], argv
+        # Filtered on the device: pulling the whole buffer timed out on a longer run.
+        assert "logcat" in argv and "--grep" in argv, argv
+        assert argv[argv.index("--grep") + 1] == PROOF[1], argv
+        seen_argv.append(argv)
         body = stdout if stdout is not None else json.dumps({"lines": lines or []})
         return subprocess.CompletedProcess(argv, returncode, body, "")
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -43,6 +50,14 @@ def test_the_matching_line_is_never_returned(monkeypatch):
     """The body that carries the field carries the account address beside it."""
     _logcat(monkeypatch, lines=["D/Net: " + SECRET])
     assert "someone@example.test" not in json.dumps(capture_setup_proof("aua", PROOF))
+
+
+def test_a_loose_device_filter_cannot_manufacture_a_positive(monkeypatch):
+    """`--grep` is a regex, so the substring is re-checked against what came back."""
+    _logcat(monkeypatch, lines=['D/Net: {"tier":"premium-trial-expired"}'.replace("premium", "prem")])
+    assert capture_setup_proof("aua", PROOF) == {
+        "verified": False, "actual": None, "source": "logcat"
+    }
 
 
 def test_an_absent_pattern_is_an_unproved_precondition_not_a_proved_one(monkeypatch):
@@ -68,3 +83,24 @@ def test_a_capture_that_cannot_run_records_nothing(monkeypatch, broken):
     """
     _logcat(monkeypatch, **broken)
     assert capture_setup_proof("aua", PROOF) is None
+
+
+def test_the_capture_targets_the_sessions_own_device(monkeypatch):
+    """Without a serial the lookup resolves by lease scope and can pick another emulator.
+
+    Seen on 2026-09-15: the session held emulator-5560 while several emulators were up, and the
+    capture came back empty on a run whose login had plainly succeeded, so a passing row was
+    reported as having no tier proof.
+    """
+    _logcat(monkeypatch, lines=["D/Net: " + SECRET])
+    capture_setup_proof("aua", PROOF, "emulator-5560")
+    argv = seen_argv[0]
+    assert "--serial" in argv, argv
+    assert argv[argv.index("--serial") + 1] == "emulator-5560", argv
+    assert argv.index("--serial") < argv.index("logcat"), "--serial is a global option"
+
+
+def test_no_serial_still_works_for_a_single_target_host(monkeypatch):
+    _logcat(monkeypatch, lines=["D/Net: " + SECRET])
+    assert capture_setup_proof("aua", PROOF)["verified"] is True
+    assert "--serial" not in seen_argv[0]

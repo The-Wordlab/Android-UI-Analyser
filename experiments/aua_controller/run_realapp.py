@@ -711,7 +711,7 @@ seven seconds is a verdict about the harness rather than about the product.
 
 
 def capture_setup_proof(
-    aua_command: str, setup_proof: tuple[str, str, str]
+    aua_command: str, setup_proof: tuple[str, str, str], serial: str | None = None
 ) -> dict[str, Any] | None:
     """Whether a caller-supplied pattern appears in the device log right now.
 
@@ -729,9 +729,21 @@ def capture_setup_proof(
     """
     _, pattern, value = setup_proof
     try:
+        # Filter on the device. Pulling the whole buffer and searching here timed out on a
+        # longer run -- an 11-criterion scenario produced enough log to exceed the budget, and
+        # the capture then reported nothing on a session that was perfectly fine. `--grep` is a
+        # regex, so the substring is re-checked below: a loose pattern must not be able to
+        # manufacture a positive.
+        argv = [aua_command]
+        if serial:
+            # Name the session's own device. Without it the lookup resolves by lease scope, and
+            # on a host running several emulators it can land on a different one -- observed on
+            # 2026-09-15, where the session held emulator-5560 and the capture came back empty
+            # on a run whose login had plainly succeeded.
+            argv += ["--serial", serial]
+        argv += ["logcat", "--json", "--grep", pattern, "--lines", "5"]
         completed = subprocess.run(
-            [aua_command, "logcat", "--since", "1", "--json"],
-            capture_output=True, text=True, timeout=90, check=False,
+            argv, capture_output=True, text=True, timeout=90, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1149,7 +1161,7 @@ async def run_realapp(
         # After every setup flow, while the session is still live: a precondition the caller
         # must be able to prove rather than infer from the screen.
         if setup_proof is not None:
-            proved = capture_setup_proof(aua_command, setup_proof)
+            proved = capture_setup_proof(aua_command, setup_proof, result.get("serial"))
             if proved is not None:
                 result[setup_proof[0]] = proved
         if flags or setup_flows or observation_frame(launched) is None:
@@ -1533,6 +1545,17 @@ async def run_realapp(
                     result["warnings"].append(
                         message + "; product judgement continues from AUA frame evidence."
                     )
+        # Last chance while the session is still live. The first attempt runs straight after the
+        # setup flows, which is right for a precondition the login itself establishes -- but an
+        # app may not make the call that proves it until later. On 2026-09-15 a scenario whose
+        # login had plainly succeeded still recorded `verified: false`, because the evidence
+        # simply had not been produced yet when the first look happened. Only retried when the
+        # first attempt did not already prove it, so a proved precondition is never re-litigated.
+        if setup_proof is not None and not (result.get(setup_proof[0]) or {}).get("verified"):
+            retried = capture_setup_proof(aua_command, setup_proof, result.get("serial"))
+            if retried is not None and retried.get("verified"):
+                result[setup_proof[0]] = retried
+
         if session_id and finish_session:
             try:
                 finish_arguments: dict[str, Any] = {
