@@ -140,6 +140,13 @@ MCP_SCHEMAS = {
     "input_and_analyze": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"},
                                                            "submit": {"type": "boolean"}}, "required": ["text"]},
     "swipe_and_analyze": {"type": "object", "properties": {"direction": {"type": "string"}}, "required": ["direction"]},
+    # Mirrors the server's `scroll` tool: a direction plus an optional percent of the scrollable
+    # container. That container is why a scroll replays and a raw swipe does not.
+    "scroll_and_analyze": {"type": "object",
+                           "properties": {"direction": {"type": "string",
+                                                        "enum": ["up", "down", "left", "right"]},
+                                          "percent": {"type": "integer"}},
+                           "required": ["direction"]},
     "wait_and_analyze": {"type": "object", "properties": {"for_": {"type": "string"}, "idle": {"type": "boolean"},
                                                           "timeout": {"type": "integer"}}},
     "key_and_analyze": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},

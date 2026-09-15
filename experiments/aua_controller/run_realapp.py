@@ -79,6 +79,11 @@ CONTROLLER_TOOLS = (
 REALAPP_COMPACT_PROPERTIES = {
     "long_press_and_analyze": frozenset({"id"}),
     "back_gesture_and_analyze": frozenset(),
+    # Scroll takes a direction and nothing else. `percent` is deliberately withheld: a scroll that
+    # names only its direction replays against whatever the container is, while a baked percentage
+    # is the same positional trap that makes a raw swipe unsaveable -- and the promoter has already
+    # refused flows carrying a fixed scroll distance (the same carousel needed 7, then 12, then 17).
+    "scroll_and_analyze": frozenset({"direction"}),
 }
 #: The one extra tool a contract-driven run needs. A checkpoint completes only on fresh
 #: assertion proof, so without a way to assert, a loaded contract can never be satisfied and
