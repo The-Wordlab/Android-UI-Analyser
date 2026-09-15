@@ -64,6 +64,12 @@ from android_ui_analyser.errors import UsageError
 FORMAT = "aua-realapp-run-v1"
 CONTROLLER_TOOLS = (
     "analyze_screen", "tap_and_analyze", "long_press_and_analyze", "input_and_analyze",
+    # scroll sits beside swipe because the engine refuses to save a flow containing a raw swipe:
+    # "swipe capture omits coordinates/container/percentage; author `scroll: up` by hand instead -
+    # a scroll names its container and replays, where a raw swipe is positional" (flows.py). With
+    # swipe as the only way to move the screen, a controller could only produce routes this engine
+    # would not save, so any journey needing to scroll could never leave a replayable flow behind.
+    "scroll_and_analyze",
     "swipe_and_analyze", "back_gesture_and_analyze", "wait_and_analyze",
     "key_and_analyze", "session_progress", "session_finish",
 )
@@ -73,6 +79,11 @@ CONTROLLER_TOOLS = (
 REALAPP_COMPACT_PROPERTIES = {
     "long_press_and_analyze": frozenset({"id"}),
     "back_gesture_and_analyze": frozenset(),
+    # Scroll takes a direction and nothing else. `percent` is deliberately withheld: a scroll that
+    # names only its direction replays against whatever the container is, while a baked percentage
+    # is the same positional trap that makes a raw swipe unsaveable -- and the promoter has already
+    # refused flows carrying a fixed scroll distance (the same carousel needed 7, then 12, then 17).
+    "scroll_and_analyze": frozenset({"direction"}),
 }
 #: The one extra tool a contract-driven run needs. A checkpoint completes only on fresh
 #: assertion proof, so without a way to assert, a loaded contract can never be satisfied and
