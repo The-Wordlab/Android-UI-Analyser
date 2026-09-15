@@ -100,6 +100,31 @@ def test_decide_repairs_once_then_fails(tmp_path):
             role="r", instructions="i", question="q", context={}, schema=OUTCOME_SCHEMA, name="record_verdict"))
 
 
+def test_decider_drops_forced_tool_choice_when_no_rung_can_honour_it():
+    """Forcing the tool is an optimisation, not a requirement -- do not lose a row over routing.
+
+    On 2026-09-15 `threads-new-chat-from-character-card` died with "No endpoints found that
+    support the provided 'tool_choice' value" after the ladder was exhausted, and the whole
+    scenario was recorded as a provider failure. A model that chooses the tool itself answers
+    exactly the same, and a reply without the call already falls into the repair loop.
+    """
+    route_missing = RuntimeError(
+        "HTTP 404: No endpoints found that support the provided 'tool_choice' value"
+    )
+    sender = Sender([route_missing, tool_reply("record_verdict", verdict("pass"))])
+    judge = decider(sender)  # single rung: nothing to escalate to
+
+    result = asyncio.run(judge.decide(
+        role="outcome judge", instructions="decide", question="done?",
+        context={"goal": "g"}, schema=OUTCOME_SCHEMA, name="record_verdict",
+    ))
+
+    assert result["result"]["verdict"] == "pass", "the row must still get its verdict"
+    assert sender.payloads[0]["tool_choice"] != "auto", "the first attempt still forces it"
+    assert sender.payloads[1]["tool_choice"] == "auto", "the retry lets the model choose"
+    assert len(sender.payloads) == 2, "and it retries the same rung, not a new one"
+
+
 def test_decider_uses_its_fallback_when_the_tool_choice_route_stays_unavailable():
     route_missing = RuntimeError(
         "HTTP 404: No endpoints found that support the provided 'tool_choice' value"

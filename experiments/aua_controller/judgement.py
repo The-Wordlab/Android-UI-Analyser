@@ -409,6 +409,7 @@ class Decider:
         result: dict[str, Any] | None = None
         error: str | None = None
         rung = 0
+        forced_choice = True
         attempts = (self.repair_budget + 1) * len(self.ladder)
         for attempt in range(attempts):
             # Each rung gets the full repair budget before the next one is asked at all.
@@ -422,7 +423,8 @@ class Decider:
             rung_model, rung_settings = self.ladder[rung]
             payload: dict[str, Any] = {
                 "model": rung_model, "messages": copy.deepcopy(messages), "tools": [tool],
-                "tool_choice": {"type": "function", "function": {"name": name}},
+                "tool_choice": ({"type": "function", "function": {"name": name}}
+                                if forced_choice else "auto"),
                 "parallel_tool_calls": False, "stream": False,
                 "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
             }
@@ -440,13 +442,26 @@ class Decider:
                 # retries. If no endpoint on that route can honour forced tool choice, asking it
                 # again cannot repair the schema; move immediately to the configured stronger
                 # judge. Controller calls do not use Decider and are unaffected.
-                if tool_choice_route_missing(exc) and rung + 1 < len(self.ladder):
-                    rung += 1
-                    self.escalations += 1
-                    record["escalations"] = rung
-                    record["escalated_to"] = self.ladder[rung][0]
-                    record.setdefault("route_failures", []).append(str(exc)[:400])
-                    continue
+                if tool_choice_route_missing(exc):
+                    if rung + 1 < len(self.ladder):
+                        rung += 1
+                        self.escalations += 1
+                        record["escalations"] = rung
+                        record["escalated_to"] = self.ladder[rung][0]
+                        record.setdefault("route_failures", []).append(str(exc)[:400])
+                        continue
+                    if forced_choice:
+                        # Every rung is exhausted and none can honour a *forced* tool choice.
+                        # Forcing it is an optimisation -- it guarantees the schema in one
+                        # round-trip -- not a requirement: a model that chooses the tool itself
+                        # answers exactly the same, and a reply without the call already falls
+                        # into the repair loop below. Dying here instead threw away a whole row
+                        # for a routing detail, which is what happened to
+                        # threads-new-chat-from-character-card on 2026-09-15.
+                        forced_choice = False
+                        record.setdefault("route_failures", []).append(str(exc)[:400])
+                        record["tool_choice_relaxed"] = True
+                        continue
                 raise
             elapsed = (time.monotonic() - tick) * 1000
             self.request_ms.append(elapsed)
