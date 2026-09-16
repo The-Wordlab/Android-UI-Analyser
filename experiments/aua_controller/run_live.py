@@ -83,6 +83,17 @@ COMPACT_SYSTEM = """
 The compact-v1 profile intentionally offers a restricted tool subset. Analyze returns the whole
 screen; filtered queries, observation projections, has, and expect are unavailable. Tap a button
 using only its current observation id. Use input only on editable fields, never to click a button.
+For a requested chat/message send, target the app's editable composer by its fresh id and use
+input_and_analyze with submit=true, or type then tap the real semantic app Send control.
+submit=false (the default) only types a draft. The submit boolean IS offered in the input schema.
+IME Enter and hardware Enter are not the app Send control and can merely insert a newline.
+CANCEL, Close, Clear Text, and text-selection controls are not send affordances. Keyboard letters
+and attachment buttons are not editable composers. Never guess a send target from its position.
+Inspect the returned screen and submitted status: submitted=false means it did not submit.
+Do not type the same text again or repeat Enter. Use a fresh visible semantic app Send control;
+if the keyboard/selection UI obscures it, dismiss that UI once and inspect the returned screen.
+After an input error, inspect fresh field state before retrying; it may have partially typed.
+Confirm a sent message and the requested reply; ok=true alone proves neither.
 Tool results are serialized JSON text; interpret the JSON fields as the observation or error,
 including when your native tool-response wrapper places that text inside a value field.
 Verify the observed UI and host progress. You must navigate back to the requested home state using
@@ -298,6 +309,22 @@ def compact_schema(name: str, actual: dict[str, Any]) -> dict[str, Any]:
     if name == "tap_and_analyze":
         schema.pop("oneOf", None)
         schema["required"] = ["id"]
+    if name == "input_and_analyze" and "submit" in schema["properties"]:
+        schema["properties"]["submit"] = {
+            **schema["properties"]["submit"],
+            "description": "True requests the IME action after typing; false only types a draft. "
+                           "For a requested send use true, then verify submitted and the returned UI.",
+        }
+        schema["description"] = (
+            "Type into a fresh editable app field. To send, set submit=true (IME action), "
+            "then verify submitted/UI; otherwise tap the real semantic app Send control. "
+            "Keyboard Enter, CANCEL and Close are not app Send controls."
+        )
+    if name == "key_and_analyze":
+        schema["description"] = (
+            "Press a hardware/navigation key and observe. Enter is not a chat-send shortcut: "
+            "use input_and_analyze submit=true or the real semantic app Send control."
+        )
     if set(schema.get("required", [])) - schema["properties"].keys():
         raise RunError("public tool schema requires an argument outside compact-v1")
     return schema

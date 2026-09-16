@@ -432,6 +432,17 @@ def realapp_compact_schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def controller_observation_arguments(
+    name: str, arguments: dict[str, Any], schemas: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Request action semantics before MCP's default projection can discard them."""
+    if "observe_fields" not in schemas.get(name, {}).get("properties", {}):
+        return arguments
+    return {**arguments, "observe_fields": (
+        "id,type,text,desc,resource_id,window,clickable,enabled,focused,checked,selected,scrollable"
+    )}
+
+
 def realapp_tools(
     schemas: dict[str, dict[str, Any]],
     *,
@@ -452,7 +463,7 @@ def realapp_tools(
             parameters = contract_tool_schema(schemas[name])
         else:
             parameters = realapp_compact_schema(name, schemas[name])
-        description = str(schemas[name].get("description") or "")[:300]
+        description = str(parameters.get("description") or schemas[name].get("description") or "")[:300]
         if name == "session_finish":
             description = "Claim the goal is finished (or blocked) with an outcome and a short note."
         elif name == "long_press_and_analyze":
@@ -1125,6 +1136,7 @@ async def run_realapp(
     setup_log = output / "setup-calls.jsonl"
 
     raw_call_tool = call_tool
+    schemas: dict[str, dict[str, Any]] = {}
 
     async def guarded_call_tool(name: str, arguments: dict[str, Any]) -> Any:
         # All setup, direct controller and final observations cross this same boundary.
@@ -1132,7 +1144,7 @@ async def run_realapp(
         if (arguments.get("package") in forbidden_foreground_packages
                 and name not in {"app_status", "session_finish"}):
             raise RunError("action targets a forbidden foreground package")
-        raw = await raw_call_tool(name, arguments)
+        raw = await raw_call_tool(name, controller_observation_arguments(name, arguments, schemas))
         if forbidden_foreground_packages:
             identity = forbidden_foreground(tool_result(raw), forbidden_foreground_packages)
             if identity:

@@ -55,6 +55,36 @@ def test_compact_frame_keeps_actionable_fields_and_drops_noise():
         assert noise not in text
 
 
+def test_compaction_preserves_input_semantics_without_inventing_editable_buttons():
+    raw = frame(elements=[
+        {"id": "composer", "type": "EditText", "text": "Message", "resource_id": "message_input",
+         "window": "app", "clickable": True},
+        {"id": "attach", "type": "Button", "text": "+", "window": "app", "clickable": True},
+        {"id": "keyboard", "type": "Text", "text": "Q", "window": "ime"},
+        {"id": "send", "type": "Button", "resource_id": "send_message", "clickable": True},
+        {"id": "readonly", "type": "EditText", "editable": False, "text": "Read only"},
+    ], submitted=False, verified=True)
+    before = copy.deepcopy(raw)
+    out = compact_frame(raw)
+    by_id = {e["id"]: e for e in out["observation"]["elements"]}
+    assert by_id["composer"]["editable"] is True
+    assert by_id["composer"]["resource_id"] == "message_input"
+    assert by_id["composer"]["window"] == "app"
+    assert by_id["keyboard"]["window"] == "ime"
+    for name in ("attach", "keyboard", "send", "readonly"):
+        assert not by_id[name].get("editable")
+    assert out["submitted"] is False and out["verified"] is True
+    assert raw == before
+    repeated = compact_frame(raw, previous_fingerprint="fp-1")
+    assert repeated["submitted"] is False
+    assert next(e for e in repeated["observation"]["elements"] if e["id"] == "composer")["editable"]
+
+
+def test_unlabelled_editable_type_survives_compaction_without_clickable_flag():
+    out = compact_frame(frame(elements=[{"id": "input", "type": "android.widget.EditText"}]))
+    assert out["observation"]["elements"] == [{"id": "input", "editable": True}]
+
+
 def test_compact_frame_caps_elements_preferring_interactive_ones():
     elements = [element(i, text=f"Label {i}") for i in range(80)]
     elements[70]["clickable"] = True

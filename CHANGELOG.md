@@ -13,6 +13,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Compact real-app controllers retain editable-field, resource-ID and window semantics across
+  post-action observations, plus input verification/submission status. Sending guidance now
+  distinguishes an IME submit action or actual app Send control from keyboard Enter and
+  text-selection controls, avoiding draft/retype loops without automatically sending content.
+
 - A confirmed pre-dispatch selector miss can recover without invalidating an evidence-valid
   scenario: it requires AUA's no-action refusal with a fresh observation, zero unknown outcomes
   and a later matching host terminal claim. Such journals never produce a replay candidate.

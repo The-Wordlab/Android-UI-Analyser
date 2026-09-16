@@ -114,11 +114,23 @@ Roles built on it:
 ## Compaction (`compaction.py`)
 
 Applied after the hosted privacy projection, before the model reads a result. Per element it
-keeps `id`, `text`, `desc`, `resource_id` and positive state flags; it drops bounds, centres,
+keeps `id`, `text`, `desc`, `resource_id`, window origin and positive state flags; it drops bounds, centres,
 depth, class, false flags, empty containers and status-bar chrome. Frames are capped at 60
 elements with interactive ones preferred and an `elided_elements` count. Text is trimmed to
 120 characters. When a frame's fingerprint equals the previous one, only interactive handles
 are repeated under `unchanged: true`. Goal progress keeps status and objectives, not ledgers.
+
+The host requests a narrow semantic field set on public tools supporting `observe_fields`,
+before MCP's default post-action projection can discard type/resource ID/window information.
+Known editable types become `editable: true`; keyboard labels and attachment buttons do not.
+An explicit `editable: false` is respected. The model cannot change this observation budget.
+Input `verified` and `submitted` feedback survives compaction, including false values.
+
+For an authorized message send, the compact instructions and input schema describe
+`input_and_analyze(..., submit=true)` or a fresh semantic app Send control. Keyboard Enter,
+CANCEL and Close are not substitutes. A retained draft is not retyped or repeatedly Entered;
+the controller must inspect the returned screen and prove the sent message/reply. No action is
+automatically changed into a send, and non-send text entry keeps its existing default.
 
 Measured on 12 real frames captured earlier: 342 KB projected → 59 KB compact, 17% of the
 size, 5.8× smaller. Raw evidence under `controller/evidence/` is untouched; only the model's

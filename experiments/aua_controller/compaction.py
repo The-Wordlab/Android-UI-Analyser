@@ -15,11 +15,12 @@ from typing import Any
 
 ELEMENT_FIELDS = (
     "id", "text", "desc", "content_desc", "resource_id", "rid",
-    "clickable", "editable", "checked", "selected", "scrollable", "focused",
+    "clickable", "editable", "checked", "selected", "scrollable", "focused", "window",
 )
 STATE_FLAGS = ("clickable", "editable", "scrollable")
 META_FIELDS = ("fingerprint", "stale_risk", "changed", "known_screen", "arrival_state")
-TOP_FIELDS = ("ok", "code", "error", "errors", "warnings", "finished", "terminated")
+TOP_FIELDS = ("ok", "code", "error", "errors", "warnings", "finished", "terminated",
+              "submitted", "verified")
 PROGRESS_FIELDS = ("completed", "total", "done", "status", "terminated")
 CURRENT_FIELDS = ("id", "objective", "kind", "status")
 CONTRACT_FIELDS = ("reusable", "analyze_needed", "stale_risk", "evidence_fresh")
@@ -36,8 +37,17 @@ def _label(element: dict[str, Any]) -> str | None:
     return None
 
 
+def _editable(element: dict[str, Any]) -> bool:
+    if isinstance(element.get("editable"), bool):
+        return element["editable"] is True
+    # AUA's normalized hierarchy exposes a type, not necessarily an editable flag.
+    # Never infer this from a label: a keyboard letter and an attachment button are not fields.
+    kind = str(element.get("type") or "").rsplit(".", 1)[-1]
+    return kind in {"EditText", "TextField", "SecureTextField", "TextArea"}
+
+
 def _interactive(element: dict[str, Any]) -> bool:
-    return any(element.get(flag) is True for flag in STATE_FLAGS) or element.get("checked") is True
+    return _editable(element) or any(element.get(flag) is True for flag in STATE_FLAGS) or element.get("checked") is True
 
 
 def _chrome(element: dict[str, Any]) -> bool:
@@ -77,6 +87,8 @@ def compact_element(element: dict[str, Any], *, max_text: int = 120, keep_id: bo
         out[key] = _trim(value, max_text)
     if "content_desc" in out and "desc" not in out:
         out["desc"] = out.pop("content_desc")
+    if _editable(element):
+        out["editable"] = True
     return out
 
 

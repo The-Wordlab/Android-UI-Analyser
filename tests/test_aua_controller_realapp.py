@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from experiments.aua_controller.agent_loop import run_agent
-from experiments.aua_controller.run_live import RunError
+from experiments.aua_controller.run_live import COMPACT_SYSTEM, RunError
 from experiments.aua_controller.run_realapp import (
     ASYNC_UI_WAIT_MAX_SECONDS,
     ASYNC_UI_WAIT_TOOL,
@@ -18,6 +18,7 @@ from experiments.aua_controller.run_realapp import (
     WALL_CLOCK_WAIT_SECONDS,
     WALL_CLOCK_WAIT_TOOL,
     async_ui_wait_spec,
+    controller_observation_arguments,
     controller_tool_timeouts,
     normalize_element_id_argument,
     realapp_tools,
@@ -257,6 +258,31 @@ def test_realapp_tools_offer_compact_schemas_plus_an_outcome_claim():
     assert "session_id" not in json.dumps(by_name)
     with pytest.raises(RunError):
         realapp_tools({name: schema for name, schema in MCP_SCHEMAS.items() if name != "session_finish"})
+
+
+def test_compact_input_guidance_distinguishes_typing_submit_and_app_send():
+    tools = {t["function"]["name"]: t["function"] for t in realapp_tools(MCP_SCHEMAS)}
+    schema = tools["input_and_analyze"]["parameters"]
+    assert schema["properties"]["submit"]["type"] == "boolean"
+    assert "IME action" in schema["properties"]["submit"]["description"]
+    assert "submit=true" in tools["input_and_analyze"]["description"]
+    assert "not a chat-send shortcut" in tools["key_and_analyze"]["description"]
+    for phrase in ("submit=true", "CANCEL", "Close", "Do not type the same text again",
+                   "submitted=false", "editable", "IME Enter"):
+        assert phrase in COMPACT_SYSTEM
+    assert "send_key" not in schema["properties"], "Do not advertise unsupported compact arguments"
+
+
+def test_controller_requests_semantic_fields_only_when_public_schema_supports_it():
+    from android_ui_analyser.mcp_server import _tool_definitions
+
+    schemas = {tool.name: dict(tool.inputSchema) for tool in _tool_definitions()}
+    args = {"id": "current"}
+    result = controller_observation_arguments("tap_and_analyze", args, schemas)
+    assert {"id", "type", "resource_id", "window", "focused"} <= set(result["observe_fields"].split(","))
+    assert args == {"id": "current"}, "Never mutate model arguments or its action journal"
+    assert controller_observation_arguments("session_finish", {}, schemas) == {}
+    assert controller_observation_arguments("unknown", args, schemas) == args
 
 
 def test_realapp_tools_accept_the_current_public_mcp_schemas():
