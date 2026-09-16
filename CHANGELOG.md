@@ -13,6 +13,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A confirmed pre-dispatch selector miss can recover without invalidating an evidence-valid
+  scenario: it requires AUA's no-action refusal with a fresh observation, zero unknown outcomes
+  and a later matching host terminal claim. Such journals never produce a replay candidate.
+  Caller-owned terminal claims are not mistaken for failed cleanup; uncertain actions, missing
+  claims and actual cleanup failures remain blocking.
 - Judge evidence selection now preserves observed screen families, selection/checkpoint
   changes and post-restart provenance instead of silently truncating to eight text frames.
   Four bounded images prioritize a same-screen state pair and omit redundant final captures;

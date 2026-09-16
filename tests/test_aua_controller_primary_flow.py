@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from experiments.aua_controller.run_realapp import (
     ControllerJournalError,
+    PrimaryFlowUnavailable,
     RunError,
     export_primary_flow,
 )
@@ -82,3 +83,73 @@ def test_malformed_journal_is_execution_error_not_optional_export_failure(tmp_pa
     (tmp_path / "controller/tool-calls.jsonl").write_text("not JSON\n")
     with pytest.raises(ControllerJournalError):
         asyncio.run(export_primary_flow(None, tmp_path))
+
+
+def _recovered_journal(tmp_path):
+    miss = {"step": 0, "tool": "tap_and_analyze", "executed": True, "dispatch_started": True,
+            "result": {"error": {"code": "element_not_found", "hint": "No action was sent. Inspect the observation.",
+                "observation_present": True, "observation": {"screen": {"package": "example.app"},
+                "elements": [], "meta": {"fingerprint": "fresh-frame"}}}}}
+    success = {"step": 1, "tool": "tap_and_analyze", "executed": True, "result": {"ok": True}}
+    back = {"step": 2, "tool": "back_gesture_and_analyze", "executed": True, "result": {"ok": True}}
+    terminal = {"step": 3, "tool": "session_finish", "executed": True, "evidence_ref": "E4",
+                "result": {"ok": False, "finished": False, "claim_recorded": True}}
+    report = {"stop_reason": "terminal_claimed", "unknown_tool_outcomes": 0,
+              "terminal_submission": {"tool": "session_finish", "evidence_ref": "E4",
+                                      "result": terminal["result"]}}
+    entries = [miss, success, back, terminal]
+    _journal(tmp_path, entries)
+    (tmp_path / "controller/controller-result.json").write_text(json.dumps(report))
+    return entries, report
+
+
+def test_definitive_unsent_miss_then_successful_route_and_terminal_claim_only_omit_flow(tmp_path):
+    _recovered_journal(tmp_path)
+
+    async def forbidden(*args):
+        pytest.fail("a recovered journal is not a clean replay suffix")
+
+    with pytest.raises(PrimaryFlowUnavailable) as error:
+        asyncio.run(export_primary_flow(forbidden, tmp_path))
+    assert error.value.route_action_count == 2
+    assert error.value.recovered_no_action == 1
+    assert not (tmp_path / "flow.yaml").exists()
+
+
+@pytest.mark.parametrize("corruption", ["unknown", "no_claim", "no_report", "unrecovered", "ambiguous",
+                                       "no_observation", "possibly_sent", "cleanup", "entry_unknown", "sent_evidence"])
+def test_recovered_selector_exception_refuses_any_unproved_execution(tmp_path, corruption):
+    entries, report = _recovered_journal(tmp_path)
+    if corruption == "unknown":
+        report["unknown_tool_outcomes"] = 1
+    elif corruption == "no_claim":
+        entries.pop()
+    elif corruption == "no_report":
+        report = {}
+    elif corruption == "unrecovered":
+        entries = [entries[-1], entries[0]]
+    elif corruption == "ambiguous":
+        entries[0]["result"]["error"]["code"] = "device_error"
+    elif corruption == "no_observation":
+        entries[0]["result"]["error"].pop("observation")
+    elif corruption == "possibly_sent":
+        entries[0]["result"]["error"]["hint"] = "Action may have been sent."
+    elif corruption == "cleanup":
+        entries[-1]["result"] = {"ok": False, "finished": False, "error": "cleanup failed"}
+    elif corruption == "sent_evidence":
+        entries[0]["result"]["capture_evidence"] = {"action": "tap"}
+    else:
+        entries[0]["execution_outcome"] = "unknown"
+    (tmp_path / "controller/tool-calls.jsonl").write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+    (tmp_path / "controller/controller-result.json").write_text(json.dumps(report))
+    with pytest.raises(ControllerJournalError):
+        asyncio.run(export_primary_flow(None, tmp_path))
+
+
+def test_confirmed_no_action_then_terminal_claim_has_exact_zero_action_count(tmp_path):
+    entries, _ = _recovered_journal(tmp_path)
+    (tmp_path / "controller/tool-calls.jsonl").write_text(
+        "".join(json.dumps(entry) + "\n" for entry in (entries[0], entries[-1])))
+    with pytest.raises(PrimaryFlowUnavailable) as error:
+        asyncio.run(export_primary_flow(None, tmp_path))
+    assert error.value.route_action_count == 0 and error.value.recovered_no_action == 1

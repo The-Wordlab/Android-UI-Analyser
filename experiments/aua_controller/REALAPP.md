@@ -172,6 +172,13 @@ proof_unavailable}` warning and saves no candidate; the evidence verdict is unch
 Missing, corrupt, incomplete or failed execution journals remain execution errors, and
 real recording/session cleanup failures still invalidate the run independently.
 
+An `element_not_found` refusal is recoverable only when AUA explicitly says no action was
+sent, attaches its current observation, reports zero unknown outcomes and later records a
+matching terminal submission. A caller-owned `session_finish` with `claim_recorded=true`
+is a claim for the independent judge, not session cleanup. A recovered journal counts only
+successful actions and emits an optional-export warning; it never creates a replay candidate.
+Possibly dispatched actions, missing terminal claims and failed real cleanup remain strict.
+
 Judge validation may truncate only oversized optional `satisfied`/`unsatisfied` narrative
 arrays to their advertised item count, after validating every item (including the discarded
 tail). Diagnostics contain field names and counts, never narrative content. Required

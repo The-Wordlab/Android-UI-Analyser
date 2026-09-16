@@ -639,9 +639,49 @@ class ControllerJournalError(RunError):
 
 
 class PrimaryFlowUnavailable(RunError):
-    def __init__(self, count: int):
+    def __init__(self, count: int, recovered_no_action: int = 0):
         super().__init__("primary flow preview could not prove the exact clean controller action suffix")
         self.route_action_count = count
+        self.recovered_no_action = recovered_no_action
+
+
+def definitive_selector_miss(result: Any) -> bool:
+    """Recognize only AUA's pre-dispatch addressing refusal with a recovery observation."""
+    if (not isinstance(result, dict) or result.get("ok") is True or result.get("mcp_is_error")
+            or result.get("action") or result.get("capture_evidence") or result.get("action_sent") is True):
+        return False
+    error = result.get("error")
+    if not isinstance(error, dict):
+        return False
+    observation = error.get("observation")
+    return (error.get("code") == "element_not_found"
+            and error.get("action_sent") is not True
+            and str(error.get("hint") or "").startswith("No action was sent")
+            and error.get("observation_present") is True and isinstance(observation, dict)
+            and isinstance(observation.get("screen"), dict)
+            and isinstance(observation.get("elements"), list)
+            and isinstance(observation.get("meta"), dict)
+            and bool(observation["meta"].get("fingerprint")))
+
+
+def journal_terminal_claim(entries: list[Any], report: Any) -> bool:
+    """A claim is not cleanup; require its exact later host-recorded terminal submission."""
+    if (not entries or not isinstance(report, dict)
+            or type(report.get("unknown_tool_outcomes")) is not int or report["unknown_tool_outcomes"] != 0
+            or report.get("stop_reason") not in {"terminal_claimed", "terminal_tool"}):
+        return False
+    last = entries[-1]
+    submission = report.get("terminal_submission")
+    if (not isinstance(last, dict) or last.get("tool") != "session_finish"
+            or last.get("executed") is not True or last.get("error")
+            or not isinstance(submission, dict) or submission.get("tool") != "session_finish"
+            or not last.get("evidence_ref") or submission.get("evidence_ref") != last["evidence_ref"]):
+        return False
+    result = last.get("result")
+    if not isinstance(result, dict) or submission.get("result") != result or result.get("error") or result.get("mcp_is_error"):
+        return False
+    return ((result.get("ok") is False and result.get("finished") is False and result.get("claim_recorded") is True)
+            or (result.get("ok") is True and result.get("finished") is True))
 
 
 async def export_primary_flow(call, output: Path) -> dict[str, Any]:
@@ -658,26 +698,45 @@ async def export_primary_flow(call, output: Path) -> dict[str, Any]:
         raise ControllerJournalError("primary flow requires the controller action journal")
     try:
         entries = _load_jsonl(path)
+        report_path = output / "controller/controller-result.json"
+        report = json.loads(report_path.read_text()) if report_path.is_file() else {}
+        if not isinstance(report, dict):
+            raise ControllerJournalError("controller report is malformed")
     except (OSError, ValueError):
         raise ControllerJournalError("controller action journal is unreadable") from None
     count = 0
+    recovered_misses = 0
+    terminal_claim = journal_terminal_claim(entries, report)
+    if isinstance(report, dict) and report.get("unknown_tool_outcomes") not in (None, 0):
+        raise ControllerJournalError("controller reported unknown execution outcomes")
     for entry in entries:
         if not isinstance(entry, dict):
             raise ControllerJournalError("primary flow action journal is malformed")
-        if entry.get("dispatch_started") and entry.get("executed") is not True:
+        if (entry.get("execution_outcome") == "unknown" or entry.get("error")
+                or (entry.get("dispatch_started") and entry.get("executed") is not True)):
             raise ControllerJournalError("primary flow has an action with unknown execution outcome")
         if entry.get("executed") is not True:
             continue
         name = entry.get("tool")
+        action = entry.get("result")
+        if name == "session_finish" and (not isinstance(action, dict) or action.get("ok") is not True
+                or action.get("error") or action.get("mcp_is_error") or action.get("finished") is False):
+            if not terminal_claim or entry is not entries[-1]:
+                raise ControllerJournalError("controller terminal claim is missing or unproved")
+            continue
         if name in read_tools:
             continue
         if name not in action_tools:
             raise ControllerJournalError("primary flow contains an unsupported controller action")
-        action = entry.get("result")
         if (not isinstance(action, dict) or action.get("ok") is not True
                 or action.get("error") or action.get("mcp_is_error")):
+            if definitive_selector_miss(action) and terminal_claim:
+                recovered_misses += 1
+                continue
             raise ControllerJournalError("primary flow contains a failed or unverified controller action")
         count += 1
+    if recovered_misses:
+        raise PrimaryFlowUnavailable(count, recovered_misses)
     if count == 0:
         return {"route_action_count": 0, "flow_not_applicable_reason": "observation_only_no_actions"}
     try:
@@ -1729,6 +1788,9 @@ async def run_realapp(
                 result["verdict"].setdefault("reasons", []).append(message)
             except PrimaryFlowUnavailable as exc:
                 message = "Optional primary flow export unavailable; no replayable flow was proved or saved."
+                if exc.recovered_no_action:
+                    message = "Optional primary flow export unavailable after recovered no-action selector misses; no flow saved."
+                    result["execution_recoveries"] = {"definitive_no_action": exc.recovered_no_action}
                 result["route_action_count"] = exc.route_action_count
                 result["primary_flow_warning"] = message
                 result["primary_flow_export"] = {"status": "unavailable", "reason": "proof_unavailable"}
