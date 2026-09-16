@@ -84,9 +84,10 @@ CONTROLLER_TOOLS = (
 )
 # Real-app-only additions to compact-v1. Keep them here rather than widening run_live's fixed
 # comparison profile: these close product-scenario capability gaps without changing an existing
-# model benchmark. Long-press accepts only a fresh AUA id; edge-back accepts no geometry at all.
+# model benchmark. Presses accept IDs or observed semantic selectors; no geometry is offered.
 REALAPP_COMPACT_PROPERTIES = {
-    "long_press_and_analyze": frozenset({"id"}),
+    "tap_and_analyze": frozenset({"id", "rid", "text", "desc", "index"}),
+    "long_press_and_analyze": frozenset({"id", "rid", "text", "desc", "index"}),
     "back_gesture_and_analyze": frozenset(),
     # Scroll takes a direction and nothing else. `percent` is deliberately withheld: a scroll that
     # names only its direction replays against whatever the container is, while a baked percentage
@@ -427,6 +428,25 @@ def realapp_compact_schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
     compact["properties"] = {
         key: value for key, value in compact["properties"].items() if key in allowed
     }
+    if name in {"tap_and_analyze", "long_press_and_analyze"}:
+        properties = compact["properties"]
+        selectors = [key for key in ("rid", "text", "desc") if key in properties]
+        if selectors:
+            compact.pop("required", None)
+            compact["oneOf"] = [{"required": [key]} for key in ["id", *selectors]]
+            compact.setdefault("allOf", []).append({"not": {"required": ["id", "index"]}})
+            for key in selectors:
+                properties[key] = {**properties[key], "minLength": 1, "maxLength": 512, "pattern": r"\S"}
+            if "index" in properties:
+                properties["index"] = {**properties["index"], "minimum": 0, "maximum": 255}
+        else:
+            compact.pop("oneOf", None)
+            compact["required"] = ["id"]
+        compact["description"] = (
+            "Prefer the current observed id. If that handle expires, use one observed text/rid/desc "
+            "selector; index is a 0-based occurrence among matching rows in the observed order. "
+            "Never guess an index or coordinates. Ambiguous selectors without an index fail closed."
+        )
     if set(compact.get("required", ())) - compact["properties"].keys():
         raise RunError(f"{name} requires an argument outside the real-app compact schema")
     return compact
@@ -1612,7 +1632,9 @@ async def run_realapp(
         compactor = FrameCompactor(max_elements=max_elements)
         report = await run_agent(
             send=send, call_tool=controller_call, tools=tools,
-            system_prompt=SYSTEM + compact_system_prompt(preserve_end_state=preserve_end_state) + (
+            system_prompt=SYSTEM + compact_system_prompt(
+                preserve_end_state=preserve_end_state, semantic_selectors=True,
+            ) + (
                 CONTRACT_SYSTEM if session_contract else REALAPP_SYSTEM
             ),
             user_prompt=goal_prompt(

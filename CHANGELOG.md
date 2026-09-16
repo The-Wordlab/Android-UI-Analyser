@@ -13,6 +13,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Public MCP long-press exposes its existing fresh semantic selector path. Real-app compact tap
+  and long-press retain ID-first guidance but also allow one observed text/resource-ID/description
+  selector and a bounded occurrence index for duplicate rows. Ambiguous selections remain refused;
+  coordinates, first-match guessing and selector/ID combinations are not exposed by the controller.
+
 - Finishing an unattended session now retires its registered teardown watchdog after the
   exact owned virtual-target boot stops and before lease release. An old boot's unreplayable
   undo records remain available for deliberate recovery without an orphan polling process;

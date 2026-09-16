@@ -230,8 +230,14 @@ A second audit of the final selection/provenance prompt repeated that exact crit
 in 6.270s/$0.00301560 and 7.501s/$0.00301755, again with zero repairs/reasoning tokens.
 
 The real-app compact surface adds two navigation actions without widening the fixed fixture
-comparison profile. `long_press_and_analyze` accepts only a fresh element id from the current AUA
-observation, so pin, unpin and rename menus retain AUA's stale-selector refusal. The separate
+comparison profile. Tap and `long_press_and_analyze` prefer the fresh observed element id. If that
+handle expires, both also accept one observed `text`, `rid` or `desc` selector (1–512 characters)
+and optional `index` (0–255, zero-based among matching rows in reading order). AUA resolves the
+selector on a fresh capture at dispatch. Use an index only when the intended duplicate's order
+was observed; reobserve if it changed or is unclear. Multiple selectors, guessed coordinates,
+`first`, index-only and id-plus-index calls are not offered. Ambiguous or out-of-range selectors
+send no action. Public MCP long-press now advertises the selector path already shared by Engine
+and CLI; the fixed `run_live` fixture benchmark keeps its original ID-only schema/prompt. The separate
 `back_gesture_and_analyze` action accepts no arguments: Android derives the left-edge swipe inside
 its platform adapter instead of giving the controller arbitrary coordinates.
 

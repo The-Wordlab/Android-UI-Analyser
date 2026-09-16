@@ -974,6 +974,39 @@ def test_mcp_long_press_drives_device() -> None:
     assert any(c[0] == "long_click" for c in eng.device.calls)  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("tool,gesture", [("tap_and_analyze", "click"), ("long_press_and_analyze", "long_click")])
+@pytest.mark.parametrize("index", [None, 1, 99])
+def test_mcp_press_resolves_duplicate_rows_fresh_without_caller_coordinates(tool, gesture, index):
+    eng = _engine()
+    device = eng.device
+    server = build_server(eng)
+    duplicate_rows = """<hierarchy>
+      <node class="android.widget.Button" text="Synthetic note" resource-id="example:id/row"
+            content-desc="Open note" clickable="true" long-clickable="true" enabled="true" bounds="[40,200][1040,320]"/>
+      <node class="android.widget.Button" text="Synthetic note" resource-id="example:id/row"
+            content-desc="Open note" clickable="true" long-clickable="true" enabled="true" bounds="[40,400][1040,520]"/>
+    </hierarchy>"""
+
+    async def run():
+        async with create_connected_server_and_client_session(server) as client:
+            await client.call_tool("analyze_screen", {"source": "hierarchy"})
+            device._xml = duplicate_rows  # selector dispatch must refresh the old cached screen
+            arguments = {"text": "Synthetic note"}
+            if index is not None:
+                arguments["index"] = index
+            result = await client.call_tool(tool, arguments)
+            return json.loads(_first_text(result))
+
+    data = anyio.run(run)
+    gestures = [call for call in device.calls if call[0] in {"click", "long_click"}]
+    if index == 1:
+        assert data.get("ok") is True, data
+        assert len(gestures) == 1 and gestures[0][0] == gesture and gestures[0][1][:2] == (540, 460)
+    else:
+        assert data.get("error"), data
+        assert gestures == [], "Ambiguity or missing occurrence must never guess a target"
+
+
 def test_mcp_back_gesture_uses_android_owned_geometry() -> None:
     eng = _engine()
     server = build_server(eng)

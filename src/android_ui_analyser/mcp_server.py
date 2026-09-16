@@ -1370,16 +1370,18 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="long_press",
-            description="Long-press the element with the given id (context menus).",
+            description="Long-press a current element id or a fresh semantic selector (context menus).",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "id": {"type": ["integer", "string"]},
+                    **{key: value for key, value in _SELECTOR_PROPS.items()
+                       if key in {"rid", "text", "desc", "index"}},
                     "ms": {"type": "integer", "default": 600},
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                 },
-                "required": ["id"],
+                "oneOf": [{"required": [key]} for key in ("id", "rid", "text", "desc")],
                 "additionalProperties": False,
             },
         ),

@@ -343,9 +343,63 @@ def test_realapp_tools_accept_the_current_public_mcp_schemas():
         for tool in realapp_tools(schemas)
     }
 
-    assert set(offered["long_press_and_analyze"]["properties"]) == {"id"}
-    assert offered["long_press_and_analyze"]["required"] == ["id"]
+    for name in ("tap_and_analyze", "long_press_and_analyze"):
+        assert set(offered[name]["properties"]) == {"id", "rid", "text", "desc", "index"}
+        assert "required" not in offered[name]
     assert offered["back_gesture_and_analyze"]["properties"] == {}
+
+
+@pytest.mark.parametrize("tool", ["tap_and_analyze", "long_press_and_analyze"])
+def test_realapp_semantic_selector_schema_is_bounded_and_fail_closed(tool):
+    import jsonschema
+    from experiments.aua_controller.run_live import compact_schema, compact_system_prompt
+
+    from android_ui_analyser.mcp_server import _tool_definitions
+
+    public = {t.name: dict(t.inputSchema) for t in _tool_definitions()}
+    offered = {t["function"]["name"]: t["function"]["parameters"] for t in realapp_tools(public)}[tool]
+    for arguments in ({"id": "el:current"}, {"text": "Synthetic note", "index": 1},
+                      {"rid": "threadRow", "index": 0}, {"desc": "Open note"}):
+        jsonschema.validate(arguments, offered)
+        jsonschema.validate(arguments, public[tool])
+    for arguments in ({}, {"index": 1}, {"text": ""}, {"text": "   "}, {"text": "x" * 513},
+                      {"text": "note", "index": -1}, {"text": "note", "index": 256},
+                      {"text": "note", "index": True}, {"text": "note", "rid": "row"},
+                      {"id": "el:x", "index": 0}, {"id": "el:x", "text": "note", "index": 0},
+                      {"text": "note", "coords": [1, 2]}, {"text": "note", "first": True},
+                      {"text": "note", "phase_done": {}}, {"text": "note", "bounds": [0, 0, 1, 1]}):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(arguments, offered)
+    assert compact_schema("tap_and_analyze", public["tap_and_analyze"])["required"] == ["id"]
+    prompt = compact_system_prompt(semantic_selectors=True)
+    assert "using only its current observation id" not in prompt
+    assert "Prefer the target's current observation id" in prompt
+    assert "0-based among matches" in prompt
+
+
+@pytest.mark.parametrize("tool", ["tap_and_analyze", "long_press_and_analyze"])
+def test_realapp_dispatch_preserves_duplicate_selector_arguments(tmp_path, tool):
+    from android_ui_analyser.mcp_server import _tool_definitions
+
+    class SelectorAua(FakeAua):
+        async def list_tools(self):
+            return {t.name: dict(t.inputSchema) for t in _tool_definitions()}
+
+        async def call_tool(self, name, arguments):
+            if name == tool:
+                self.calls.append((name, copy.deepcopy(arguments)))
+                self.screen = frame("fp-selected", ("Selected second note",))
+                return copy.deepcopy(self.screen)
+            return await super().call_tool(name, arguments)
+
+    aua = SelectorAua()
+    model = FakeModel([model_call(tool, {"text": "Synthetic note", "index": 1}),
+                       model_call("session_finish", {"outcome": "achieved"})], {})
+    result = run(tmp_path, aua, model, judge=False)
+    assert result["controller"]["terminal_claims"] == 1
+    args = next(arguments for name, arguments in aua.calls if name == tool)
+    assert args["text"] == "Synthetic note" and args["index"] == 1
+    assert not {"id", "coords", "first", "bounds"} & args.keys()
 
 
 def test_bare_element_uuid_is_repaired_without_rewriting_labels_or_stable_keys():

@@ -106,10 +106,18 @@ If a tool argument is rejected, read the bounded error and repair the call using
 """
 
 
-def compact_system_prompt(*, preserve_end_state: bool = False) -> str:
+def compact_system_prompt(*, preserve_end_state: bool = False, semantic_selectors: bool = False) -> str:
     """Caller-owned continuation changes navigation guidance, never lifecycle authority."""
-    return (COMPACT_SYSTEM.replace(HOME_FINISH_INSTRUCTION, PRESERVE_FINISH_INSTRUCTION)
-            if preserve_end_state else COMPACT_SYSTEM)
+    prompt = (COMPACT_SYSTEM.replace(HOME_FINISH_INSTRUCTION, PRESERVE_FINISH_INSTRUCTION)
+              if preserve_end_state else COMPACT_SYSTEM)
+    if semantic_selectors:
+        prompt = prompt.replace("Tap a button\nusing only its current observation id.",
+            "Prefer the target's current observation id for tap/long-press. If an observed handle "
+            "expires, use one offered text/rid/desc selector resolved on a fresh screen by AUA. "
+            "For duplicate rows use index only when their matching order was observed: it is "
+            "0-based among matches, not a global element ordinal. Never guess index or coordinates; "
+            "if rows reorder or the intended occurrence is unclear, observe again.")
+    return prompt
 
 
 HIDDEN_KEYS = {
