@@ -616,6 +616,50 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+async def export_primary_flow(call, output: Path) -> dict[str, Any]:
+    """Export only a clean controller action suffix, never write shared flow memory."""
+    action_tools = {
+        "tap_and_analyze", "long_press_and_analyze", "input_and_analyze",
+        "scroll_and_analyze", "swipe_and_analyze", "back_gesture_and_analyze",
+        "key_and_analyze", "open_link_and_analyze", "app_force_stop",
+        "app_relaunch_and_analyze",
+    }
+    read_tools = {"analyze_screen", "wait_and_analyze", "session_progress", "session_finish"}
+    path = output / "controller/tool-calls.jsonl"
+    if not path.is_file():
+        raise RunError("primary flow requires the controller action journal")
+    count = 0
+    for entry in _load_jsonl(path):
+        if not isinstance(entry, dict):
+            raise RunError("primary flow action journal is malformed")
+        if entry.get("dispatch_started") and entry.get("executed") is not True:
+            raise RunError("primary flow has an action with unknown execution outcome")
+        if entry.get("executed") is not True:
+            continue
+        name = entry.get("tool")
+        if name in read_tools:
+            continue
+        if name not in action_tools:
+            raise RunError("primary flow contains an unsupported controller action")
+        action = entry.get("result")
+        if (not isinstance(action, dict) or action.get("ok") is not True
+                or action.get("error") or action.get("mcp_is_error")):
+            raise RunError("primary flow contains a failed or unverified controller action")
+        count += 1
+    if count == 0:
+        return {"route_action_count": 0, "flow_not_applicable_reason": "observation_only_no_actions"}
+    preview = await call("flow_save", {"name": "controller-route", "last": count, "save": False}, "evidence")
+    scope = preview.get("scope") or {}
+    body = preview.get("preview")
+    if (preview.get("ok") is not True or preview.get("steps") != count
+            or scope.get("requested_last") != count or scope.get("selected") != count
+            or scope.get("boundary_omitted") not in (0, None)
+            or not isinstance(body, str) or not body.strip()):
+        raise RunError("primary flow preview could not prove the exact clean controller action suffix")
+    (output / "flow.yaml").write_text(body.rstrip() + "\n", encoding="utf-8")
+    return {"route_action_count": count, "primary_flow": "flow.yaml"}
+
+
 def controller_cost(report: dict[str, Any]) -> float:
     accounting = report.get("cost_accounting") or {}
     if isinstance(accounting.get("reported_usd"), (int, float)):
@@ -725,6 +769,7 @@ seven seconds is a verdict about the harness rather than about the product.
 async def capture_setup_proof(
     call: Callable[[str, dict[str, Any], str], Awaitable[dict[str, Any]]],
     setup_proof: tuple[str, str, str],
+    *, regex: bool = False, since: str | None = None,
 ) -> dict[str, Any] | None:
     """Whether a caller-supplied pattern is in the device log, read through this session.
 
@@ -749,18 +794,28 @@ async def capture_setup_proof(
     mistaken for a precondition that failed, nor invent one that held.
     """
     _, pattern, value = setup_proof
+    matcher = re.compile(pattern if regex else re.escape(pattern))
     deadline = time.monotonic() + 12
     while True:
         try:
-            payload = await call("logcat_dump", {"grep": pattern, "lines": 5}, "setup")
+            arguments: dict[str, Any] = {"grep": matcher.pattern, "lines": 20}
+            if since is not None:
+                arguments["since"] = since
+            payload = await call("logcat_dump", arguments, "setup")
         except Exception:
             return None
-        lines = payload.get("lines") if isinstance(payload, dict) else None
+        lines = (payload.get("lines") if isinstance(payload, dict)
+                 and payload.get("ok") is not False else None)
         if not isinstance(lines, list):
             return None
-        # `grep` is a regex on AUA's side, so the substring is re-checked here: a loose pattern
-        # must not be able to manufacture a positive.
-        matched = any(pattern in str(line) for line in lines)
+        matches = [match for line in lines for match in matcher.finditer(str(line))]
+        matched = bool(matches)
+        if matches and "value" in matcher.groupindex:
+            matched = matches[-1].group("value") == value
+            # A later negative state overrides an earlier positive one. Never return the
+            # captured text: only the caller-supplied expected label is safe to publish.
+            return {"verified": matched, "actual": value if matched else None,
+                    "source": "logcat"}
         if matched or time.monotonic() >= deadline:
             return {"verified": matched, "actual": value if matched else None,
                     "source": "logcat"}
@@ -832,6 +887,8 @@ async def run_realapp(
     prelaunch_setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     setup_proof: tuple[str, str, str] | None = None,
+    setup_proof_regex: bool = False,
+    save_primary_flow: bool = False,
     contract: str | None = None,
     authored_context: str | None = None,
     session_contract: str | None = None,
@@ -915,13 +972,13 @@ async def run_realapp(
         try:
             decoded = tool_result(await call_tool(name, arguments))
             record["ok"] = decoded.get("ok")
-            if decoded.get("ok") is not True:
+            if decoded.get("ok") is not True and name != "logcat_dump":
                 # A failing AUA call does not always populate `error`; keep a bounded copy of the
                 # payload so the reason survives in the log instead of reading as `error: null`.
                 record["payload"] = json.dumps(decoded, ensure_ascii=False, default=str)[:2000]
             return decoded
         except Exception as exc:
-            record["error"] = _error_text(exc)
+            record["error"] = "logcat proof unavailable" if name == "logcat_dump" else _error_text(exc)
             raise
         finally:
             record["duration_ms"] = (time.monotonic() - tick) * 1000
@@ -952,6 +1009,7 @@ async def run_realapp(
             await asyncio.sleep(1.0)
 
     session_id: str | None = None
+    proof_mark: str | None = None
     setup_notes: list[str] = []
     setup_facts: list[str] = [str(item) for item in inherited_setup_facts]
     recording_started = False
@@ -1057,6 +1115,16 @@ async def run_realapp(
             else:
                 recording_started = True
                 result["recording"] = {"path": str(recording_path), "started": True, "stop_ok": None}
+        if setup_proof is not None:
+            # Device-clock mark excludes old-account log lines on a reused emulator. Failure
+            # leaves proof unavailable rather than silently searching the entire log buffer.
+            mark_name = "harness-setup-" + str(time.monotonic_ns())
+            try:
+                marked = await call("logcat_mark", {"name": mark_name}, "setup")
+                if marked.get("ok") is True:
+                    proof_mark = mark_name
+            except Exception:
+                pass
         for index, (flow_yaml, flow_params) in enumerate(prelaunch_setup_flows):
             flow, resumes = await replay_setup_flow(call, flow_yaml, flow_params)
             result["setup"].append({"prelaunch_setup_flow": index,
@@ -1167,8 +1235,10 @@ async def run_realapp(
                 })
         # After every setup flow, while the session is still live: a precondition the caller
         # must be able to prove rather than infer from the screen.
-        if setup_proof is not None:
-            proved = await capture_setup_proof(call, setup_proof)
+        if setup_proof is not None and proof_mark is not None:
+            proved = await capture_setup_proof(
+                call, setup_proof, regex=setup_proof_regex, since=proof_mark,
+            )
             if proved is not None:
                 result[setup_proof[0]] = proved
         if flags or setup_flows or observation_frame(launched) is None:
@@ -1487,6 +1557,13 @@ async def run_realapp(
             reason = report.get("error") or f"controller stopped with {stop}"
             result["verdict"] = {"oracle": "none", "verified": False, "verdict": "unverified",
                                  "reasons": [str(reason)[:300]], "controller_stop_reason": stop}
+        if save_primary_flow and (result.get("verdict") or {}).get("verdict") in {"pass", "pass_with_warning"}:
+            try:
+                result.update(await export_primary_flow(call, output))
+            except Exception:
+                message = "Primary flow export could not prove a clean replayable controller route."
+                result["primary_flow_error"] = message
+                _mark_cleanup_failure(result, message)
         if result.get("recording_cleanup_error"):
             _mark_cleanup_failure(result, str(result["recording_cleanup_error"]))
         if name_screens:
@@ -1552,16 +1629,13 @@ async def run_realapp(
                     result["warnings"].append(
                         message + "; product judgement continues from AUA frame evidence."
                     )
-        # Last chance while the session is still live. The first attempt runs straight after the
-        # setup flows, which is right for a precondition the login itself establishes -- but an
-        # app may not make the call that proves it until later. On 2026-09-15 a scenario whose
-        # login had plainly succeeded still recorded `verified: false`, because the evidence
-        # simply had not been produced yet when the first look happened. Only retried when the
-        # first attempt did not already prove it, so a proved precondition is never re-litigated.
-        if setup_proof is not None and not (result.get(setup_proof[0]) or {}).get("verified"):
-            retried = await capture_setup_proof(call, setup_proof)
-            if retried is not None and retried.get("verified"):
-                result[setup_proof[0]] = retried
+        # Refresh while the session is still live: a later state change must supersede setup
+        # proof. Missing/unreadable evidence cannot preserve an earlier positive attestation.
+        if setup_proof is not None and proof_mark is not None:
+            retried = await capture_setup_proof(
+                call, setup_proof, regex=setup_proof_regex, since=proof_mark,
+            )
+            result[setup_proof[0]] = retried
 
         if session_id and finish_session:
             try:
@@ -1704,12 +1778,18 @@ def main() -> int:
                         help="Feature flag K=V applied and verified before the setup flows; repeatable")
     parser.add_argument("--setup-proof-name",
                         help="Result key to record a proved setup precondition under "
-                             "(e.g. a persona tier). Requires --setup-proof-grep and "
+                             "(e.g. a persona tier). Requires --setup-proof-grep or --setup-proof-regex and "
                              "--setup-proof-value.")
     parser.add_argument("--setup-proof-grep",
                         help="Substring searched in the device log after the setup flows. Only "
                              "whether it matched is recorded -- never the matching line, which "
                              "may carry account data.")
+    parser.add_argument("--setup-proof-regex",
+                        help="Regex alternative to --setup-proof-grep. A named 'value' group "
+                             "compares the latest matching value with --setup-proof-value; "
+                             "captured text is never returned.")
+    parser.add_argument("--save-primary-flow", action="store_true",
+                        help="Export a proved controller journal suffix to output/flow.yaml; never save globally")
     parser.add_argument("--setup-proof-value",
                         help="Value recorded as `actual` when --setup-proof-grep matches.")
     parser.add_argument("--contract", type=Path,
@@ -1762,10 +1842,18 @@ def main() -> int:
         args.prelaunch_setup_flow, args.prelaunch_setup_params
     )
     setup_flows = build_setup_flows(args.setup_flow, args.setup_params)
-    proof_parts = (args.setup_proof_name, args.setup_proof_grep, args.setup_proof_value)
+    if args.setup_proof_grep and args.setup_proof_regex:
+        parser.error("use only one of --setup-proof-grep and --setup-proof-regex")
+    proof_parts = (args.setup_proof_name, args.setup_proof_regex or args.setup_proof_grep,
+                   args.setup_proof_value)
     if any(proof_parts) and not all(proof_parts):
-        parser.error("--setup-proof-name, --setup-proof-grep and --setup-proof-value go together")
+        parser.error("--setup-proof-name, one proof pattern, and --setup-proof-value go together")
     setup_proof = tuple(proof_parts) if all(proof_parts) else None
+    if args.setup_proof_regex:
+        try:
+            re.compile(args.setup_proof_regex)
+        except re.error:
+            parser.error("--setup-proof-regex is not a valid regular expression")
     manifest = json.loads(args.manifest.read_text())
     candidate = next((item for item in manifest["models"] if args.model in {item["id"], item["repository"]}), None)
     if candidate is None:
@@ -1905,6 +1993,8 @@ def main() -> int:
                     prelaunch_setup_flows=prelaunch_setup_flows,
                     setup_flows=setup_flows,
                     setup_proof=setup_proof,
+                    setup_proof_regex=bool(args.setup_proof_regex),
+                    save_primary_flow=args.save_primary_flow,
                     contract=args.contract.read_text(encoding="utf-8") if args.contract else None,
                     authored_context=(
                         args.context.read_text(encoding="utf-8") if args.context else None

@@ -9,6 +9,7 @@ returns only whether that string was there.
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from pathlib import Path
 
@@ -44,7 +45,7 @@ def test_a_present_pattern_proves_the_precondition():
     call, seen = _calls({"lines": ["D/Net: " + SECRET]})
     assert _run(call) == {"verified": True, "actual": "premium", "source": "logcat"}
     assert seen[0][0] == "logcat_dump"
-    assert seen[0][1]["grep"] == PROOF[1]
+    assert seen[0][1]["grep"] == re.escape(PROOF[1])
 
 
 def test_it_reads_over_the_session_channel_not_a_second_process():
@@ -107,3 +108,23 @@ def test_a_read_that_cannot_run_records_nothing(monkeypatch, payload):
     monkeypatch.setattr(run_realapp.asyncio, "sleep", _nosleep)
     call, _ = _calls(payload)
     assert _run(call) is None
+
+
+@pytest.mark.parametrize("latest,expected", [("premium", True), ("free", False)])
+def test_regex_reads_latest_state_in_current_session_without_exposing_capture(latest, expected):
+    call, seen = _calls({"lines": [SECRET, '{"tier": "' + latest + '"}']})
+    result = asyncio.run(capture_setup_proof(
+        call, ("setup_tier", r'"tier"\s*:\s*"(?P<value>[^"]+)"', "premium"),
+        regex=True, since="this-session",
+    ))
+    assert seen[0][1]["since"] == "this-session"
+    assert result == {"verified": expected, "actual": "premium" if expected else None,
+                      "source": "logcat"}
+    assert "someone@example.test" not in repr(result)
+
+
+def test_literal_pattern_does_not_treat_regex_metacharacters_as_a_filter():
+    call, seen = _calls({"lines": ["access [premium]"]})
+    result = asyncio.run(capture_setup_proof(call, ("proof", "[premium]", "yes")))
+    assert seen[0][1]["grep"] == r"\[premium\]"
+    assert result["verified"] is True

@@ -16,6 +16,12 @@ notes, so you can check for a newer version — and read what changed — withou
 - Explicit teardown discard can archive a lost target's undo records while its own process-bound
   lease is still alive, allowing cleanup and release without reconnecting to the missing target.
   Other owners and sibling worker scopes remain protected.
+- The real-app harness can prove setup from a current-run log mark with whitespace-tolerant
+  regular expressions and latest-value comparison, without exposing captured log fields. It
+  rechecks before cleanup so later state changes cannot inherit an earlier positive proof.
+- Opt-in primary-flow export previews the exact clean controller action suffix into the run's
+  output directory. Incomplete or unsaveable journals cannot produce a passing export, and
+  observation-only runs never borrow setup actions or write global flow memory.
 
 ## [0.26.1] - 2026-09-14
 

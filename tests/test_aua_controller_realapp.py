@@ -586,6 +586,66 @@ def test_realapp_claim_stops_the_loop_and_two_judges_decide(tmp_path):
     assert not (output / "screens.json").exists(), "map building is opt-in"
 
 
+def test_setup_proof_uses_run_mark_and_rechecks_latest_state_before_cleanup(tmp_path):
+    class ProofAua(FakeAua):
+        reads = 0
+
+        async def call_tool(self, name, arguments):
+            if name == "logcat_mark":
+                self.calls.append((name, copy.deepcopy(arguments)))
+                return {"ok": True}
+            if name == "logcat_dump":
+                self.calls.append((name, copy.deepcopy(arguments)))
+                self.reads += 1
+                return {"ok": True, "lines": ['{"tier": "premium"}' if self.reads == 1
+                                               else '{"tier": "free"}']}
+            return await super().call_tool(name, arguments)
+
+    aua = ProofAua()
+    model = FakeModel(
+        controller=[model_call("session_finish", {"outcome": "achieved", "note": "observed"})],
+        judgements={"record_verdict": [verdict("pass", "observed"), verdict("pass", "observed")]},
+    )
+    result = run(tmp_path, aua, model, setup_proof=(
+        "setup_tier", r'"tier"\s*:\s*"(?P<value>[^"]+)"', "premium"), setup_proof_regex=True)
+    assert result["setup_tier"] == {"verified": False, "actual": None, "source": "logcat"}
+    names = [name for name, _ in aua.calls]
+    assert names.index("session_start") < names.index("logcat_mark") < names.index("app_launch_and_analyze")
+    marker = next(args["name"] for name, args in aua.calls if name == "logcat_mark")
+    assert all(args["since"] == marker for name, args in aua.calls if name == "logcat_dump")
+    assert names[-1] == "session_finish"
+
+
+@pytest.mark.parametrize("saveable", [True, False])
+def test_primary_flow_preview_runs_before_cleanup_and_cannot_hide_failure(tmp_path, saveable):
+    class FlowAua(FakeAua):
+        async def call_tool(self, name, arguments):
+            if name == "flow_save":
+                self.calls.append((name, copy.deepcopy(arguments)))
+                return {"ok": saveable, "steps": 1, "scope": {"requested_last": 1,
+                        "selected": 1, "boundary_omitted": 0},
+                        "preview": "schema_version: 1\nsteps: []\n"}
+            return await super().call_tool(name, arguments)
+
+    aua = FlowAua()
+    model = FakeModel(
+        controller=[model_call("tap_and_analyze", {"id": "el:fp-home-1"}),
+                    model_call("session_finish", {"outcome": "achieved", "note": "observed"})],
+        judgements={"record_verdict": [verdict("pass", "observed"), verdict("pass", "observed")]},
+    )
+    result = run(tmp_path, aua, model, save_primary_flow=True)
+    names = [name for name, _ in aua.calls]
+    assert names.index("flow_save") < names.index("session_finish")
+    if saveable:
+        assert result["primary_flow"] == "flow.yaml"
+        assert result["route_action_count"] == 1
+        assert (tmp_path / "run/flow.yaml").is_file()
+    else:
+        assert result["verdict"]["verdict"] == "unverified"
+        assert result["primary_flow_error"]
+        assert not (tmp_path / "run/flow.yaml").exists()
+
+
 def test_realapp_puts_host_knowledge_into_the_first_user_message(tmp_path):
     """A live run started with three accurate facts in the store and re-derived all of them by hand."""
     fact = {"id": "knowledge_theme", "kind": "claim", "name": None, "aliases": ["switch theme"], "score": 70,
