@@ -5,6 +5,7 @@ import copy
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -126,6 +127,66 @@ def test_decider_drops_forced_tool_choice_when_no_rung_can_honour_it():
     assert sender.payloads[0]["tool_choice"] != "auto", "the first attempt still forces it"
     assert sender.payloads[1]["tool_choice"] == "auto", "the retry lets the model choose"
     assert len(sender.payloads) == 2, "and it retries the same rung, not a new one"
+
+
+@pytest.mark.parametrize("decision_seconds,expected_budget", [(90, 45), (50, 20)])
+def test_rejected_tool_probe_does_not_consume_relaxed_answer_budget(
+    tmp_path, monkeypatch, decision_seconds, expected_budget,
+):
+    from experiments.aua_controller import judgement as module
+
+    clock = [100.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    real_timeout = asyncio.timeout
+    budgets = []
+
+    def capture_timeout(delay):
+        budgets.append(delay)
+        return real_timeout(delay)
+
+    monkeypatch.setattr(module.asyncio, "timeout", capture_timeout)
+
+    async def send(payload):
+        if payload["tool_choice"] != "auto":
+            clock[0] += 30  # deterministic transport latency, without a real sleep
+            raise RuntimeError("HTTP 404: No endpoints found that support the provided 'tool_choice' value")
+        return tool_reply("record_verdict", verdict("pass"), cost=0.002)
+
+    subject = decider(send, route_timeout_s=45, decision_timeout_s=decision_seconds, output=tmp_path)
+    result = asyncio.run(subject.decide(role="judge", instructions="i", question="q", context={},
+                                       schema=OUTCOME_SCHEMA, name="record_verdict"))
+    assert budgets == [45, expected_budget]
+    assert result["cost"] == pytest.approx(0.002)
+    assert subject.requests == 2
+    events = [json.loads(line) for line in (tmp_path / "judge-events.jsonl").read_text().splitlines()]
+    relaxed = next(item for item in events if item.get("event") == "tool_choice_relaxed")
+    assert relaxed["request_budget_s"] == expected_budget
+    assert relaxed["decision_remaining_s"] == decision_seconds - 30
+
+
+def test_relaxed_answer_is_still_cancellable_without_retry_or_lost_diagnostics(tmp_path):
+    async def exercise():
+        relaxed = asyncio.Event()
+
+        async def send(payload):
+            if payload["tool_choice"] != "auto":
+                raise RuntimeError("HTTP 404: No endpoints found that support the provided 'tool_choice' value")
+            relaxed.set()
+            await asyncio.Event().wait()
+
+        subject = decider(send, output=tmp_path)
+        task = asyncio.create_task(subject.decide(role="judge", instructions="i", question="q", context={},
+                                                  schema=OUTCOME_SCHEMA, name="record_verdict"))
+        await asyncio.wait_for(relaxed.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert subject.requests == 2
+        assert subject.report()["unreported_cost_requests"] == 1
+
+    asyncio.run(exercise())
+    logs = (tmp_path / "judge-events.jsonl").read_text()
+    assert "tool_choice_relaxed" in logs and "decision_cancelled" in logs
 
 
 def test_decider_uses_its_fallback_when_the_tool_choice_route_stays_unavailable():

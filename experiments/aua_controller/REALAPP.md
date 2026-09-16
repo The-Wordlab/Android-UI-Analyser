@@ -48,6 +48,10 @@ schema before restoring labels. It never extracts JSON from prose or reasoning, 
 objects/duplicate keys, or overrides a native call with content. Native calls remain preferred;
 this recovery is disabled while forced tool choice is active. Sanitized `schema_repair` entries
 in `judge-events.jsonl` identify the failing field/constraint without recording the answer text.
+An explicit forced-tool capability rejection is a probe, not an answer: the subsequent relaxed
+request receives a renewed allowance of up to 45 seconds, capped by the same absolute 90-second
+vote deadline. `tool_choice_relaxed` diagnostics record both that allowance and the remaining
+vote time. Ordinary schema repairs and transport backoffs do not renew the absolute deadline.
 
 Judge latency is bounded independently of the controller: `Decider` defaults to 45 seconds per
 provider/model route (including every transport retry, backoff and schema repair), and 90 seconds

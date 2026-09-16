@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- An explicit forced-tool capability rejection no longer consumes the relaxed answer's time
+  allowance. The relaxed request receives up to 45 seconds, still capped by the unchanged
+  absolute vote deadline, with renewed-budget diagnostics and normal cancellation handling.
 - After a provider forces relaxed tool choice, judges may recover a single strict JSON object
   from message content (optionally one JSON fence), under the same compact schema and evidence
   validation. Prose/ambiguous output is rejected, native calls take precedence, and sanitized

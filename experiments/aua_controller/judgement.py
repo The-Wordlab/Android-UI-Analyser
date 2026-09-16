@@ -648,6 +648,15 @@ class Decider:
                         forced_choice = False
                         record.setdefault("route_failures", []).append(str(exc)[:400])
                         record["tool_choice_relaxed"] = True
+                        # A rejected capability probe produced no answer to repair. Give the
+                        # relaxed request its own bounded allowance instead of subtracting
+                        # probe latency, but never extend this vote's absolute deadline.
+                        now = time.monotonic()
+                        route_deadline = min(decision_deadline, now + self.route_timeout_s)
+                        self._log({**record, "event": "tool_choice_relaxed", "route_index": rung,
+                                   "route_model": rung_model,
+                                   "request_budget_s": max(0.0, route_deadline - now),
+                                   "decision_remaining_s": max(0.0, decision_deadline - now)})
                         continue
                 # Transport already applied its own bounded retries. A broken provider must
                 # not prevent the next configured judge from answering the same question.
