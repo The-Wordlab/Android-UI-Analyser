@@ -178,6 +178,25 @@ tail). Diagnostics contain field names and counts, never narrative content. Requ
 `reasons`, verdict/confidence and criterion identities/results/evidence are never clipped;
 the per-criterion evidence remains the acceptance authority.
 
+Judges receive the requested compact observation sample (hard cap 32), without the former
+silent eight-frame truncation. Selection preserves observed screen families, changed selection
+states, checkpoint boundaries and lifecycle epochs. Up to four images prioritize a same-screen
+state pair and exclude exact/near duplicate captures only when their observed element state
+also agrees. A changed checkmark is never discarded merely because its pixels are similar.
+Image-to-evidence-ref/action-step metadata distinguishes post-restart observations from earlier
+states. Criteria text never controls the selection algorithm; unavailable evidence stays unknown.
+
+`or-gpt5p6-luna-open` is an independent vision/tool fallback with reasoning disabled, open
+throughput routing, `data_collection: deny`, compression off and $0.22/$1.32 per-million
+prompt/completion caps. Unexpected native reasoning remains visible (`exclude=false`). The
+2026-09-16 saved-evidence audit attached four images and thirteen positioned text observations:
+two native votes agreed on ten verified criteria and one unavailable independent system fact
+(`not_verified`), in 6.844s/$0.00302065 and 6.179s/$0.00296860 through OpenAI. This validates
+transport and evidence handling, not device acceptance. The 90-second vote cap, dynamic fair
+route slices and 45-second request ceiling are unchanged.
+A second audit of the final selection/provenance prompt repeated that exact criterion agreement
+in 6.270s/$0.00301560 and 7.501s/$0.00301755, again with zero repairs/reasoning tokens.
+
 The real-app compact surface adds two navigation actions without widening the fixed fixture
 comparison profile. `long_press_and_analyze` accepts only a fresh element id from the current AUA
 observation, so pin, unpin and rename menus retain AUA's stale-selector refusal. The separate

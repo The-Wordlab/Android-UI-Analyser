@@ -129,3 +129,16 @@ def test_candidate_manifest_configurations_are_supported():
     for model in json.loads(path.read_text())["models"]:
         validate_request_config(model["request_config"])
         CostGuard(model["cost_limit_usd"])
+
+
+def test_independent_luna_vision_profile_keeps_price_privacy_and_reasoning_bounds():
+    path = Path(__file__).resolve().parents[1] / "experiments/aua_controller/openrouter-comparison.json"
+    profile = next(item for item in json.loads(path.read_text())["models"]
+                   if item["id"] == "or-gpt5p6-luna-open")
+    assert profile["repository"] == "openai/gpt-5.6-luna"
+    assert profile["vision"] is True
+    config = validate_request_config(profile["request_config"])
+    assert config["reasoning"] == {"enabled": False, "exclude": False}
+    assert config["provider"] == {"allow_fallbacks": True, "sort": "throughput",
+        "data_collection": "deny", "max_price": {"prompt": 0.22, "completion": 1.32}}
+    assert config["plugins"] == [{"id": "context-compression", "enabled": False}]

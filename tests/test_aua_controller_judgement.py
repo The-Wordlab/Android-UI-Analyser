@@ -89,6 +89,31 @@ def test_decide_opens_a_fresh_window_and_forces_the_structured_tool():
     assert "temperature" not in payload and "parallel_tool_calls" not in payload
 
 
+def test_judge_keeps_requested_text_checkpoints_beyond_eight_and_image_positions():
+    sender = Sender([tool_reply("record_verdict", verdict("unverified"))])
+    frames = [frame(f"fp-{index}", (f"Checkpoint {index}",)) for index in range(13)]
+    image_position = {"image_index": 1, "ref": "E12", "after_step": 11, "lifecycle_epoch": 1}
+    asyncio.run(judge_outcome_votes(decider(sender), votes=1, goal="audit", final_frame=frame(),
+                                   frames=frames, image_evidence=[image_position]))
+    context = json.loads(sender.payloads[0]["messages"][1]["content"].split("Evidence:\n", 1)[1])
+    assert len(context["intermediate_frames"]) == 13
+    assert context["image_evidence"] == [image_position]
+    assert context["intermediate_frames"][-1]["observation"]["elements"][0]["text"] == "Checkpoint 12"
+
+
+def test_disabled_reasoning_stays_disabled_under_the_unchanged_vote_deadline():
+    settings = copy.deepcopy(SETTINGS)
+    settings["reasoning"] = {"enabled": False, "exclude": False}
+    sender = Sender([tool_reply("record_verdict", verdict("unverified"))])
+    subject = decider(sender, request_config=settings, max_tokens=8192)
+    asyncio.run(subject.decide(role="judge", instructions="i", question="q", context={},
+                              schema=OUTCOME_SCHEMA, name="record_verdict"))
+    assert sender.payloads[0]["reasoning"] == {"enabled": False, "exclude": False}
+    assert subject.report()["decision_timeout_s"] == 90
+    assert judge_route_budget(90, 3, 45) == 30
+    assert judge_route_budget(75, 2, 45) == 37.5
+
+
 def test_decide_repairs_once_then_fails(tmp_path):
     sender = Sender([tool_reply("record_verdict", {"verdict": "maybe", "confidence": 2, "reasons": []}),
                      tool_reply("record_verdict", {"verdict": "fail", "confidence": 0.4, "reasons": ["x"]})])

@@ -13,6 +13,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Judge evidence selection now preserves observed screen families, selection/checkpoint
+  changes and post-restart provenance instead of silently truncating to eight text frames.
+  Four bounded images prioritize a same-screen state pair and omit redundant final captures;
+  host-owned image/ref/action mappings make lifecycle evidence attributable.
+- Added a price-capped, data-collection-denied open GPT-5.6 Luna vision/tool fallback profile
+  with reasoning disabled. A saved-evidence audit validated two consistent structured votes
+  while preserving an unavailable independent-system fact as unverified; no device acceptance
+  is implied by this audit and vote timeouts remain unchanged.
 - Judge replies with oversized optional `satisfied`/`unsatisfied` summaries now retain only
   the schema-bounded prefix, with content-free normalization diagnostics. Every item must
   already be valid; required fields, verdicts and criterion identities/results/evidence

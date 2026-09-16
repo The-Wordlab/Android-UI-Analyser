@@ -333,11 +333,46 @@ def _strip_ids(value: Any) -> Any:
 def evidence_frame(result: Any, *, max_elements: int = 40, keep_ids: bool = False) -> Any:
     """Compact one raw AUA result for judgement input. Judges do not act, so ids are dropped."""
     compact = compact_frame(result, max_elements=max_elements, max_text=100, keep_ids=keep_ids)
+    if isinstance(result, dict) and isinstance(compact, dict) and isinstance(result.get("_judge_evidence"), dict):
+        compact["evidence_position"] = {key: value for key, value in result["_judge_evidence"].items()
+                                        if key in {"ref", "sequence", "after_tool", "after_step", "lifecycle_epoch"}}
     return compact if keep_ids else _strip_ids(compact)
 
 
 MAX_IMAGE_WIDTH = 360
 MAX_IMAGES = 4
+MAX_TEXT_FRAMES = 32
+
+
+def _frame_traits(frame: Any) -> tuple[str, str, str]:
+    """Screen family, observed state and selection state; no authored-contract heuristics."""
+    compact = evidence_frame(frame)
+    observation = (compact.get("observation") or compact) if isinstance(compact, dict) else {}
+    elements = observation.get("elements", [])
+    screen = observation.get("screen", {})
+    meta = observation.get("meta", {})
+    title = next((str(item.get("text") or item.get("desc")) for item in elements
+                  if not item.get("clickable") and len(str(item.get("text") or item.get("desc") or "")) > 1), "")
+    family = str(meta.get("known_screen") or title or meta.get("screen") or screen.get("activity") or "")
+    selection = [item for item in elements if item.get("selected") or item.get("checked")
+                 or re.search(r"\bselected\b", str(item.get("text", "")), re.IGNORECASE)]
+    state = json.dumps({"elements": elements, "fingerprint": frame_fingerprint(frame)}, sort_keys=True)
+    return family, state, json.dumps(selection, sort_keys=True) if selection else ""
+
+
+def annotate_judge_frames(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve host journal position, especially across restarts, without action arguments."""
+    epoch = 0
+    result = []
+    for sequence, entry in enumerate(entries):
+        tool = entry.get("tool")
+        if tool in {"app_force_stop", "app_relaunch_and_analyze", "app_launch_and_analyze"}:
+            epoch += 1
+        raw = entry.get("raw")
+        if isinstance(raw, dict):
+            result.append({**raw, "_judge_evidence": {"ref": entry.get("ref"), "sequence": sequence,
+                           "after_tool": tool, "after_step": entry.get("step"), "lifecycle_epoch": epoch}})
+    return result
 
 
 def encode_image(path: Any, *, max_width: int = MAX_IMAGE_WIDTH, quality: int = 70) -> str | None:
@@ -365,7 +400,7 @@ def encode_image(path: Any, *, max_width: int = MAX_IMAGE_WIDTH, quality: int = 
 
 
 def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
-    """Pick frames that span the whole journey rather than only its tail.
+    """Pick evidence-bearing screen/state/checkpoint observations, in journey order.
 
     The judge is asked about the *route* -- "the first interactive screen is the authentication
     landing", "taking that option ends on home" -- and the previous ``frames[-4:-1]`` showed it
@@ -374,11 +409,53 @@ def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
     passing run into a BLOCKED one.  Most contracts describe a route, so this was not an edge
     case.
 
-    The final observation is judged separately, so the last element is left out here.  Below
-    *limit* every frame is kept; above it the first and last are always kept and the remainder
-    are spread evenly between them, so a long journey still shows its beginning.
+    The final observation is judged separately, so the last element is left out here.
+    *limit* is the preferred compact-text count, with a hard cap of 32. Observed screen
+    families, selection changes and lifecycle/checkpoint boundaries take priority over repeated
+    states. Legacy frames without hierarchy metadata retain the evenly spread fallback.
     """
+    limit = min(limit if limit > 0 else MAX_TEXT_FRAMES, MAX_TEXT_FRAMES)
     body = list(frames[:-1])
+    # The compatibility shape without actual observations retains chronological sampling.
+    # Rich observations instead preserve screen coverage and changed/restarted states.
+    if body and all(isinstance(frame, dict) for frame in body) and any(_frame_traits(frame)[0] for frame in body):
+        rich = any((frame.get("observation") or frame).get("elements") for frame in body)
+        if rich:
+            cap = min(limit if limit > 0 else MAX_TEXT_FRAMES, MAX_TEXT_FRAMES)
+            traits = [_frame_traits(frame) for frame in body]
+            keep = {0} if cap == 1 else {0, len(body) - 1}
+            seen_families: set[str] = set()
+            priority = []
+            seen_states: set[tuple[str, str, Any]] = set()
+            family_selections: dict[str, str] = {}
+            previous_checkpoint = None
+            for index, (family, state, selection) in enumerate(traits):
+                position = body[index].get("_judge_evidence", {})
+                progress = body[index].get("goal_progress") or {}
+                checkpoint = (progress.get("completed"), (progress.get("current") or {}).get("id"))
+                key = (family, state, position.get("lifecycle_epoch"))
+                if family not in seen_families:
+                    priority.append((0, index))
+                    seen_families.add(family)
+                elif (position.get("after_tool") in {"app_relaunch_and_analyze", "app_launch_and_analyze"}
+                      or (selection and family_selections.get(family) not in (None, selection))
+                      or (previous_checkpoint is not None and checkpoint != previous_checkpoint)):
+                    priority.append((1, index))
+                elif key not in seen_states:
+                    priority.append((2, index))
+                seen_states.add(key)
+                if selection:
+                    family_selections[family] = selection
+                previous_checkpoint = checkpoint
+            if cap > 1:
+                # Preserve one observation per screen family when the hard budget permits it.
+                mandatory = keep | {index for rank, index in priority if rank == 0}
+                cap = min(MAX_TEXT_FRAMES, max(cap, len(mandatory)))
+            for _, index in sorted(priority):
+                if len(keep) >= cap:
+                    break
+                keep.add(index)
+            return [body[index] for index in sorted(keep)]
     if limit <= 0 or len(body) <= limit:
         return body
     if limit == 1:
@@ -400,6 +477,71 @@ def image_frame_sample(frames: Sequence[Any], limit: int = MAX_IMAGES - 1) -> li
     last = len(items) - 1
     picks = sorted({round(index * last / (limit - 1)) for index in range(limit)})
     return [items[index] for index in picks]
+
+
+def judge_image_frames(frames: Sequence[Any], final: Any, index: Mapping[str, str],
+                       limit: int = MAX_IMAGES) -> list[Any]:
+    """Prefer a same-screen observed state pair; never spend two image slots on the final state."""
+    if limit <= 0:
+        return []
+    limit = min(limit, MAX_IMAGES)
+    candidates = []
+    signatures = []
+    try:
+        from PIL import Image, ImageChops, ImageStat
+    except ImportError:
+        return []
+
+    def signature(frame):
+        path = screenshot_for(index, frame_fingerprint(frame))
+        try:
+            with Image.open(str(path)) as image:
+                return image.convert("RGB").resize((24, 48))
+        except (OSError, ValueError):
+            return None
+
+    def similar(left_frame, left, right_frame, right):
+        # Pixel-near duplicates must not hide a changed checkmark, label or state flag.
+        left_traits, right_traits = _frame_traits(left_frame), _frame_traits(right_frame)
+        same_elements = json.loads(left_traits[1])["elements"] == json.loads(right_traits[1])["elements"]
+        return (left_traits[0] == right_traits[0] and same_elements
+                and sum(ImageStat.Stat(ImageChops.difference(left, right)).mean) / (3 * 255) < 0.015)
+
+    final_signature = signature(final)
+    for frame in frames:
+        current = signature(frame)
+        if current is None or (final_signature is not None and similar(frame, current, final, final_signature)):
+            continue
+        if any(similar(frame, current, previous_frame, previous)
+               for previous_frame, previous in zip(candidates, signatures, strict=True)):
+            continue
+        signatures.append(current)
+        candidates.append(frame)
+    slots = limit - int(final_signature is not None)
+    selected: set[int] = set()
+    pairs = []
+    traits = [_frame_traits(frame) for frame in candidates]
+    if slots >= 2:
+        for right in range(1, len(candidates)):
+            for left in range(right):
+                a, b = traits[left], traits[right]
+                if a[0] and a[0] == b[0] and a[1] != b[1]:
+                    selection_change = bool(a[2] and b[2] and a[2] != b[2])
+                    pairs.append((int(selection_change), -(right - left), -left, left, right))
+        if pairs:
+            *_, left, right = max(pairs)
+            selected.update((left, right))
+    # Cover another screen family before spending a remaining slot on a repeat.
+    used = {traits[item][0] for item in selected}
+    for item in sorted(range(len(candidates)), key=lambda item: (traits[item][0] in used, item)):
+        if len(selected) >= slots:
+            break
+        selected.add(item)
+        used.add(traits[item][0])
+    result = [candidates[item] for item in sorted(selected)]
+    if final_signature is not None:
+        result.append(final)
+    return result
 
 
 def screenshot_index(manifest_path: Any) -> dict[str, str]:
@@ -790,6 +932,7 @@ async def judge_outcome(
     progress: Any = None,
     stance: str = "neutral",
     images: Sequence[str] = (),
+    image_evidence: Sequence[dict[str, Any]] = (),
     contract: str | None = None,
 ) -> dict[str, Any]:
     """One independent verdict from observed frames. The controller's narrative is not input.
@@ -806,9 +949,16 @@ async def judge_outcome(
                        for action in list(actions)[-30:]],
         # The rendered-image cap is not a text-evidence cap. A long route may need more compact
         # hierarchy frames to prove distinct screens while still sending only four screenshots.
-        "intermediate_frames": [evidence_frame(frame) for frame in list(frames)[:8]],
+        "intermediate_frames": [evidence_frame(frame) for frame in list(frames)[:MAX_TEXT_FRAMES]],
         "final_frame": evidence_frame(final_frame),
     }
+    if image_evidence:
+        context["image_evidence"] = list(image_evidence)[:MAX_IMAGES]
+        context["evidence_selection_note"] = (
+            "Images are selected rendered checkpoints, not every recorded frame. "
+            "Use evidence_position and image_evidence to correlate observations with action steps "
+            "and restarts. Text-only observations cannot prove unseen rendering or independent system facts."
+        )
     if progress is not None:
         context["aua_goal_progress"] = progress
     if contract:

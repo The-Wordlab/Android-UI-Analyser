@@ -34,12 +34,12 @@ from experiments.aua_controller.compaction import FrameCompactor
 from experiments.aua_controller.hosted import BACKENDS, validate_endpoint, validate_request_config
 from experiments.aua_controller.hosted_projection import hosted_model_view
 from experiments.aua_controller.judgement import (
-    MAX_IMAGES,
     Decider,
     ScreenNamer,
+    annotate_judge_frames,
     encode_image,
     frame_fingerprint,
-    image_frame_sample,
+    judge_image_frames,
     judge_outcome_votes,
     judged_frame_sample,
     screenshot_for,
@@ -1584,13 +1584,17 @@ async def run_realapp(
         # Kept raw so a verdict can be re-judged offline from the same evidence later.
         (output / "final-observation.json").write_text(json.dumps(final, ensure_ascii=False, indent=2) + "\n")
         frames = []
+        call_records = _load_jsonl(output / "controller" / "tool-calls.jsonl")
+        evidence_steps = {item.get("evidence_ref"): item.get("step") for item in call_records
+                          if item.get("executed") is True and item.get("evidence_ref")}
         for entry in report.get("evidence", []):
             raw = json.loads((output / "controller" / entry["path"]).read_text(encoding="utf-8"))
             if observation_frame(raw) is not None:
-                frames.append({"ref": entry["ref"], "tool": entry.get("tool"), "raw": raw})
+                frames.append({"ref": entry["ref"], "tool": entry.get("tool"),
+                               "step": evidence_steps.get(entry["ref"]), "raw": raw})
         actions = [
             {"step": call_record["step"], "tool": call_record["tool"], "arguments": call_record.get("arguments")}
-            for call_record in _load_jsonl(output / "controller" / "tool-calls.jsonl")
+            for call_record in call_records
             if call_record.get("executed") is True
         ]
         # Recording is journey evidence, not judge latency evidence. Export it while the exact
@@ -1651,34 +1655,40 @@ async def run_realapp(
             if result["claim"]:
                 context_actions.append({"step": len(actions), "tool": "session_finish",
                                         "arguments": {"controller_claim_untrusted": result["claim"]}})
+            positioned_frames = annotate_judge_frames(frames)
+            final = {**final, "_judge_evidence": {"ref": "final", "sequence": len(frames),
+                      "lifecycle_epoch": positioned_frames[-1]["_judge_evidence"]["lifecycle_epoch"]
+                      if positioned_frames else 0}}
             judged_frames = judged_frame_sample(
-                [frame["raw"] for frame in frames],
+                [*positioned_frames, final],
                 judge_intermediate_frame_limit(judge_frames, vision=vision),
             )
             images: list[str] = []
+            image_evidence: list[dict[str, Any]] = []
             if vision:
                 # Element text cannot answer a question about appearance. Pair each judged
                 # frame with the screenshot AUA already captured for it, oldest first, so the
                 # final screen is the last image the judge sees.
                 shot_index = screenshot_index(aua_artifacts_dir / "manifest.json")
-                image_frames = image_frame_sample(judged_frames, MAX_IMAGES - 1)
+                image_frames = judge_image_frames(positioned_frames, final, shot_index)
                 for frame in image_frames:
                     shot = screenshot_for(shot_index, frame_fingerprint(frame))
                     encoded = encode_image(shot) if shot else None
                     if encoded:
                         images.append(encoded)
-                final_shot = screenshot_for(shot_index, frame_fingerprint(final))
-                final_image = encode_image(final_shot) if final_shot else None
-                if final_image:
-                    images.append(final_image)
+                        image_evidence.append({"image_index": len(images),
+                                               **frame.get("_judge_evidence", {})})
                 result["vision"] = {"requested": True, "frames": len(judged_frames) + 1,
-                                    "image_frames_selected": len(image_frames) + 1,
+                                    "image_frames_selected": len(image_frames),
                                     "images_attached": len(images),
-                                    "final_image_attached": bool(final_image)}
+                                    "final_image_attached": bool(image_evidence and image_evidence[-1].get("ref") == "final"),
+                                    "image_evidence": image_evidence,
+                                    "text_evidence_source_count": len(positioned_frames),
+                                    "text_evidence": [frame.get("_judge_evidence", {}) for frame in judged_frames]}
             verdict = await judge_outcome_votes(
                 decider, votes=judge_votes, goal=goal, final_frame=final,
                 frames=judged_frames, actions=context_actions,
-                images=images, contract=contract,
+                images=images, image_evidence=image_evidence, contract=contract,
             )
             if stop == "no_progress" and verdict["verdict"] == "pass":
                 verdict["verdict"] = "pass_with_warning"

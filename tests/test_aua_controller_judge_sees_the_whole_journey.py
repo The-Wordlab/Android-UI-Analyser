@@ -22,8 +22,10 @@ import json
 from pathlib import Path
 
 from experiments.aua_controller.judgement import (
+    annotate_judge_frames,
     frame_fingerprint,
     image_frame_sample,
+    judge_image_frames,
     judged_frame_sample,
     screenshot_for,
     screenshot_index,
@@ -88,6 +90,69 @@ def test_rendered_image_sample_spans_the_text_journey_without_dropping_its_tail(
     picked = image_frame_sample(frames, limit=3)
 
     assert picked == [frames[0], frames[4], frames[7]]
+
+
+def _state_frame(screen: str, state: str, ref: str) -> dict:
+    elements = [{"text": screen}, {"text": state + " Selected", "clickable": True}]
+    return {"observation": {"screen": {"package": "example.app"},
+                           "meta": {"fingerprint": ref}, "elements": elements}}
+
+
+def _appearance_journey():
+    states = [("Home", "Dim"), ("Preferences", "Dim"), ("Appearance", "Dim"),
+              ("Appearance", "Dim"), ("Preferences", "Dim"), ("Home", "Dim"),
+              ("Preferences", "Dim"), ("Appearance", "Dim"), ("Appearance", "Bright"),
+              ("Preferences", "Bright"), ("Home", "Bright"), ("Preferences", "Bright"),
+              ("Appearance", "Bright"), ("Appearance", "Automatic"),
+              ("Home", "Bright"), ("Preferences", "Automatic"), ("Appearance", "Automatic")]
+    entries = [{"ref": f"E{i}", "step": i - 1,
+                "tool": "app_relaunch_and_analyze" if i == 14 else "tap_and_analyze",
+                "raw": _state_frame(screen, state, f"fp{i}")}
+               for i, (screen, state) in enumerate(states)]
+    return annotate_judge_frames(entries)
+
+
+def test_state_sampling_keeps_screen_coverage_changes_and_post_restart_evidence():
+    frames = _appearance_journey()
+    picked = judged_frame_sample([*frames, frames[-1]], 13)
+    refs = [frame["_judge_evidence"]["ref"] for frame in picked]
+    assert len(picked) <= 13
+    assert {"E1", "E2", "E8", "E13", "E14", "E15", "E16"} <= set(refs)
+    assert picked[-1]["_judge_evidence"]["after_step"] == 15
+    assert picked[-1]["_judge_evidence"]["lifecycle_epoch"] == 1
+    assert [_name["_judge_evidence"]["sequence"] for _name in picked] == sorted(
+        frame["_judge_evidence"]["sequence"] for frame in picked)
+
+
+def test_image_selection_keeps_changed_pair_and_deduplicates_final_and_near_copies(tmp_path):
+    from PIL import Image
+
+    frames = _appearance_journey()
+    index = {}
+    for frame in frames:
+        ref = frame_fingerprint(frame)
+        elements = frame["observation"]["elements"]
+        state = elements[1]["text"]
+        base = 20 if state.startswith("Dim") else 235
+        # Layout-dependent tint distinguishes different screens, not repeated captures.
+        offset = {"Home": 0, "Preferences": 20, "Appearance": 10}[elements[0]["text"]]
+        image = Image.new("RGB", (48, 96), (base, min(255, base + offset), base))
+        image.putpixel((0, 0), (1, 1, 1))  # harmless single-pixel capture noise
+        path = tmp_path / (ref + ".png")
+        image.save(path)
+        index[ref] = str(path)
+    picked = judge_image_frames(frames, frames[-1], index)
+    assert len(picked) == 4 and picked[-1] is frames[-1]
+    appearances = [item["observation"]["elements"][1]["text"] for item in picked
+                   if item["observation"]["elements"][0]["text"] == "Appearance"]
+    assert appearances == ["Dim Selected", "Bright Selected", "Automatic Selected"]
+    assert sum(item["observation"]["elements"] == frames[-1]["observation"]["elements"]
+               for item in picked) == 1
+
+
+def test_sparse_or_absent_observation_payloads_are_safe():
+    frames = [{"observation": None}, _state_frame("Preferences", "A", "a"), {}]
+    assert judged_frame_sample(frames, 13) == frames[:-1]
 
 
 # --------------------------------------------------------------------------- image pairing

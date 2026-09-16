@@ -25,6 +25,28 @@
   "context_comparison": "Hosted services have larger advertised context. Record usage and flag prompts plus requested output above 32768; no independently verified hosted tokenizer. Do not pool with the old local profile.",
   "models": [
     {
+      "id": "or-gpt5p6-luna-open",
+      "repository": "openai/gpt-5.6-luna",
+      "canonical_slug": "openai/gpt-5.6-luna-20260709",
+      "backend": "openrouter",
+      "revision": null,
+      "weight_identity": "provider_advertised_not_independently_verified",
+      "provider_quantization": "provider default; an open route is not a weights comparison",
+      "request_config": {
+        "reasoning": {"enabled": false, "exclude": false},
+        "provider": {
+          "allow_fallbacks": true,
+          "sort": "throughput",
+          "data_collection": "deny",
+          "max_price": {"prompt": 0.22, "completion": 1.32}
+        },
+        "plugins": [{"id": "context-compression", "enabled": false}]
+      },
+      "cost_limit_usd": 0.1,
+      "vision": true,
+      "route_change_reason": "2026-09-16: independent fast vision/tool judge fallback. Official model/endpoint metadata confirms image input and native tools. Reasoning disabled; exclude=false preserves any unexpected native continuity blocks. Price caps admit standard OpenAI and regional alternatives, not the higher-priced fast route. Two saved-evidence votes with host-correlated state-pair images/checkpoints agreed without inventing an unavailable independent system fact; transport/evidence audit only, not device acceptance."
+    },
+    {
       "id": "or-deepseek-v4p1-flash-low",
       "repository": "deepseek/deepseek-v4.1-flash",
       "canonical_slug": "deepseek/deepseek-v4.1-flash-20260910",
