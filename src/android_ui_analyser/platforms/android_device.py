@@ -1284,11 +1284,14 @@ class Uiautomator2Device(AndroidRuntimeBase):
                 )
             if self._paste_via_clipboard(text, clear=True):
                 return
-            try:
-                self.clear_text()
-            except Exception as exc:
-                logger.debug("clear before send_keys failed (%s)", exc)
-            self._call("send_keys", text, clear=True)
+            # The paste path already cleared once, before attempting clipboard input.
+            # u2 send_keys(clear=True) invokes AdbKeyboard's retrying clear broadcast again.
+            if self.focused_text() != "":
+                raise DeviceError(
+                    "cannot verify an empty focused field before fallback input",
+                    hint="No fallback text was sent. Reobserve and refocus the intended editable field.",
+                )
+            self._call("send_keys", text, clear=False)
             return
 
         # Append: set_text would replace, so skip straight to paste / keys.
@@ -1310,11 +1313,7 @@ class Uiautomator2Device(AndroidRuntimeBase):
         before = ""
         try:
             if clear:
-                try:
-                    self.clear_text()
-                except Exception as exc:
-                    logger.debug("clear_text before paste failed (%s)", exc)
-                    return False
+                self.clear_text()
                 cleared = self.focused_text()
                 if cleared != "":
                     logger.debug("could not verify an empty field before clipboard paste")
@@ -1369,11 +1368,34 @@ class Uiautomator2Device(AndroidRuntimeBase):
 
     def clear_text(self) -> None:
         try:
-            self._d(focused=True).set_text("")
+            self._d(focused=True).set_text("", timeout=1.0)
             return
         except Exception as exc:
-            logger.debug("set_text('') clear failed (%s); using clear_text", exc)
-        self._call("clear_text")
+            logger.debug("accessibility clear failed (%s); checking editable focus", type(exc).__name__)
+        # AdbKeyboard CLEAR_TEXT can repeatedly throw when ExtractedText.text is null.
+        # It is not a broken connection: reconnecting multiplies u2's broadcast retries.
+        # Refocus one *verified* editable node through its semantic selector, not coordinates.
+        try:
+            field = self._d(focused=True)
+            before = field.info
+            if not isinstance(before, dict) or not (
+                before.get("editable") is True
+                or str(before.get("className") or "").rsplit(".", 1)[-1] == "EditText"
+            ) or before.get("enabled") is False:
+                raise ValueError("focused node is not a verified editable field")
+            field.click(timeout=1.0)
+            after = self._d(focused=True).info
+            identity = ("className", "resourceName", "packageName", "bounds")
+            if not isinstance(after, dict) or any(before.get(key) != after.get(key) for key in identity):
+                raise ValueError("focused field identity changed")
+            self._d(focused=True).set_text("", timeout=1.0)
+            if self._d(focused=True).get_text(timeout=1.0) != "":
+                raise ValueError("empty field could not be verified")
+        except Exception as exc:
+            raise DeviceError(
+                "focused editable field could not be cleared after one semantic refocus",
+                hint="No IME clear broadcast or reconnect was attempted. Reobserve the intended field before retrying.",
+            ) from exc
 
     def send_ime_action(self, action: str = "search") -> None:
         try:

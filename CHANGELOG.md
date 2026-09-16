@@ -13,6 +13,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Android text-clear recovery no longer multiplies AdbKeyboard clear-broadcast retries through
+  reconnects. It allows one semantic refocus of a verified editable field and one accessibility
+  clear retry, then requires empty-field proof. Replace-input fallback never clears a second time
+  through IME send; changed/unknown focus or an unverified clear fails without fallback typing.
+
 - Public MCP long-press exposes its existing fresh semantic selector path. Real-app compact tap
   and long-press retain ID-first guidance but also allow one observed text/resource-ID/description
   selector and a bounded occurrence index for duplicate rows. Ambiguous selections remain refused;
