@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The real-app harness supports opt-in private database setup proof through its existing
+  read-only database API. A device-clock boundary and SQL-level expected-label allowlist keep
+  stale evidence and private fields out of reports; final revalidation revokes obsolete proof.
 - A failed provision claim retains its exact boot identity for a same-worker retry. When the
   fallback acquires that same target, unattended session cleanup retires the original boot;
   replacement boots and different worker, owner, or cache scopes are never adopted.

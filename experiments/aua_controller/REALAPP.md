@@ -4,6 +4,31 @@ Written 2026-09-13 after driving the hosted controller against a real applicatio
 of the public fixtures. The model was fine. The harness was the bottleneck, in four measured
 ways, and this document records the fixes and the design behind them.
 
+## Private setup proof from an app database
+
+For builds without diagnostic log bodies, use `--setup-proof-query proof.json` together with
+`--setup-proof-name setup_tier --setup-proof-value premium`. This is an alternative to the
+log substring/regex source, not a fallback that accepts stale proof. The operator-authored JSON
+contains exactly `database` and `sql`:
+
+```json
+{"database":"proof.db","sql":"SELECT tier AS actual, updated_ms AS observed_at_ms FROM state_events WHERE updated_ms >= :since_unix_ms ORDER BY updated_ms DESC LIMIT 1"}
+```
+
+The read-only query must project `actual` and `observed_at_ms` (device Unix milliseconds), use
+the host-bound `:since_unix_ms`, and have no trailing semicolon. Select the latest relevant event,
+including negative/error events; do not filter only the expected state. The host wraps the query
+with its own time boundary and exact expected-label allowlist, so only that short enum or null
+leaves SQLite. It uses the existing session's `database_query` with `live=true`, `limit=1`; it
+does not stop the app, mutate its database, or expose this capability to the controller.
+
+The boundary is a freshly measured device-clock mark before setup. Missing device-clock evidence
+means unavailable proof, never a host-time guess. Capture polls briefly for asynchronous results
+and runs again before cleanup; failed/latest negative evidence revokes earlier proof. Only
+`verified`, allowlisted `actual`, and `source: database` enter the report. SQL arguments, rows,
+and database errors are excluded from setup logs. The existing AUA private-database capability
+must be supported by the target app/platform; unsupported access leaves the prerequisite unproved.
+
 ## What broke on a real application
 
 | Symptom | Measured | Cause |

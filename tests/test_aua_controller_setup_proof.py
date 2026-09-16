@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -128,3 +129,68 @@ def test_literal_pattern_does_not_treat_regex_metacharacters_as_a_filter():
     result = asyncio.run(capture_setup_proof(call, ("proof", "[premium]", "yes")))
     assert seen[0][1]["grep"] == r"\[premium\]"
     assert result["verified"] is True
+
+
+QUERY = {"database": "proof.db", "sql": "SELECT actual, observed_at_ms FROM evidence "
+         "WHERE observed_at_ms >= :since_unix_ms"}
+
+
+@pytest.mark.parametrize("rows,expected", [
+    ([("premium", 99)], False),
+    ([("premium", 101)], True),
+    ([("premium", 101), ("free", 102)], False),
+    ([("premium", 101), (None, 102)], False),
+    ([(SECRET, 101)], False),
+])
+def test_database_proof_filters_freshness_and_allowlist_inside_sqlite(rows, expected):
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE evidence(actual, observed_at_ms)")
+    db.executemany("INSERT INTO evidence VALUES (?, ?)", rows)
+    returned = []
+
+    async def call(name, args, actor):
+        assert name == "database_query" and actor == "setup-proof"
+        assert args["live"] is True and args["limit"] == 1
+        assert args["parameters"] == {"since_unix_ms": 100, "expected_value": "premium"}
+        cursor = db.execute(args["sql"], args["parameters"])
+        data = [list(row) for row in cursor.fetchall()]
+        returned.extend(data)
+        return {"ok": True, "columns": [item[0] for item in cursor.description], "rows": data}
+
+    result = asyncio.run(run_realapp.capture_database_setup_proof(
+        call, QUERY, package="com.example.fictional", value="premium", since_unix_ms=100,
+        poll_timeout_s=0,
+    ))
+    db.close()
+    assert result == {"verified": expected, "actual": "premium" if expected else None,
+                      "source": "database"}
+    assert all(row[0] in {None, "premium"} for row in returned)
+    assert "someone@example.test" not in repr(result)
+
+
+def test_database_proof_requires_measured_device_boundary():
+    call, seen = _calls({"ok": True, "columns": ["actual"], "rows": [["premium"]]})
+    assert asyncio.run(run_realapp.capture_database_setup_proof(
+        call, QUERY, package="com.example.fictional", value="premium", since_unix_ms=None,
+    )) is None
+    assert seen == []
+
+
+def test_database_proof_polls_async_response(monkeypatch):
+    monkeypatch.setattr(run_realapp.asyncio, "sleep", _nosleep)
+    call, seen = _calls({"ok": True, "columns": ["actual"], "rows": []},
+                       {"ok": True, "columns": ["actual"], "rows": [["premium"]]})
+    result = asyncio.run(run_realapp.capture_database_setup_proof(
+        call, QUERY, package="com.example.fictional", value="premium", since_unix_ms=100,
+    ))
+    assert result["verified"] is True and len(seen) == 2
+
+
+@pytest.mark.parametrize("spec", [
+    {}, {**QUERY, "extra": "untrusted"}, {**QUERY, "sql": "DELETE FROM evidence"},
+    {**QUERY, "sql": "SELECT actual, observed_at_ms FROM evidence"},
+    {**QUERY, "sql": QUERY["sql"] + "; SELECT 'private'"},
+])
+def test_database_proof_rejects_unbounded_or_unsupported_query_spec(spec):
+    with pytest.raises(run_realapp.RunError):
+        run_realapp.validate_setup_proof_query(spec)

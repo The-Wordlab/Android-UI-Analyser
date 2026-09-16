@@ -616,6 +616,55 @@ def test_setup_proof_uses_run_mark_and_rechecks_latest_state_before_cleanup(tmp_
     assert names[-1] == "session_finish"
 
 
+@pytest.mark.parametrize("latest", [None, "error", "exception"])
+def test_database_setup_proof_rechecks_and_never_logs_private_results(tmp_path, monkeypatch, latest):
+    import functools
+
+    from experiments.aua_controller import run_realapp as module
+
+    monkeypatch.setattr(module, "capture_database_setup_proof", functools.partial(
+        module.capture_database_setup_proof, poll_timeout_s=0,
+    ))
+    secret = "private-account@example.test"
+
+    class ProofAua(FakeAua):
+        reads = 0
+
+        async def call_tool(self, name, arguments):
+            if name == "logcat_mark":
+                self.calls.append((name, copy.deepcopy(arguments)))
+                return {"ok": True, "clock": "device", "unix_ms": 100}
+            if name == "database_query":
+                self.calls.append((name, copy.deepcopy(arguments)))
+                self.reads += 1
+                if self.reads > 1 and latest == "exception":
+                    raise RuntimeError(secret)
+                if self.reads > 1 and latest == "error":
+                    return {"ok": False, "error": secret, "responseBody": secret}
+                return {"ok": True, "columns": ["actual"],
+                        "rows": [["premium" if self.reads == 1 else None]],
+                        "untrusted_extra": secret}
+            return await super().call_tool(name, arguments)
+
+    aua = ProofAua()
+    model = FakeModel(
+        controller=[model_call("session_finish", {"outcome": "achieved", "note": "observed"})],
+        judgements={"record_verdict": [verdict("pass", "observed"), verdict("pass", "observed")]},
+    )
+    result = run(tmp_path, aua, model, setup_proof=("setup_tier", "database", "premium"),
+                 setup_proof_query={"database": "proof.db", "sql":
+                     "SELECT actual, observed_at_ms FROM evidence WHERE observed_at_ms >= :since_unix_ms"})
+    assert aua.reads == 2
+    assert result["setup_tier"] == ({"verified": False, "actual": None, "source": "database"}
+                                      if latest is None else None)
+    for path in (tmp_path / "run").rglob("*"):
+        if path.is_file():
+            assert secret not in path.read_text(), path
+    calls = [args for name, args in aua.calls if name == "database_query"]
+    assert all(args["parameters"]["since_unix_ms"] == 100 for args in calls)
+    assert aua.calls[-1][0] == "session_finish"
+
+
 @pytest.mark.parametrize("saveable", [True, False])
 def test_primary_flow_preview_runs_before_cleanup_and_cannot_hide_failure(tmp_path, saveable):
     class FlowAua(FakeAua):

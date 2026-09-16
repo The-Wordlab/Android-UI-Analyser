@@ -784,6 +784,55 @@ seven seconds is a verdict about the harness rather than about the product.
 
 
 
+def validate_setup_proof_query(spec: Any) -> dict[str, str]:
+    """Validate an operator-authored projection; SQLite enforces read-only execution."""
+    if (not isinstance(spec, dict) or set(spec) != {"database", "sql"}
+            or any(not isinstance(spec[key], str) or not spec[key].strip() for key in spec)):
+        raise RunError("setup proof query requires only non-empty database and sql strings")
+    if (not re.match(r"\s*(SELECT|WITH)\b", spec["sql"], re.IGNORECASE)
+            or ";" in spec["sql"] or ":since_unix_ms" not in spec["sql"]):
+        raise RunError("setup proof query must be one read-only projection bound to :since_unix_ms")
+    return dict(spec)
+
+
+async def capture_database_setup_proof(
+    call: Callable[[str, dict[str, Any], str], Awaitable[dict[str, Any]]],
+    spec: dict[str, str], *, package: str, value: str, since_unix_ms: int | None,
+    poll_timeout_s: float = 12,
+) -> dict[str, Any] | None:
+    """Return only the allowlisted expected enum, never a database field or error."""
+    if since_unix_ms is None:
+        return None
+    # The authored query projects actual + observed_at_ms. The outer gate enforces the run
+    # boundary and allowlist inside SQLite, before any data reaches the tool response.
+    sql = ("SELECT CASE WHEN actual = :expected_value THEN :expected_value ELSE NULL END AS actual "
+           f"FROM ({spec['sql']}) WHERE observed_at_ms >= :since_unix_ms "
+           "ORDER BY observed_at_ms DESC LIMIT 1")
+    deadline = time.monotonic() + poll_timeout_s
+    observed = False
+    while True:
+        try:
+            payload = await call("database_query", {
+                "package": package, "database": spec["database"], "sql": sql,
+                "parameters": {"since_unix_ms": since_unix_ms, "expected_value": value},
+                "live": True, "limit": 1,
+            }, "setup-proof")
+            rows = payload.get("rows")
+            valid = (payload.get("ok") is True and payload.get("columns") == ["actual"]
+                     and isinstance(rows, list) and len(rows) <= 1
+                     and all(isinstance(row, list) and len(row) == 1 for row in rows))
+            observed = bool(valid)
+            matched = bool(valid and rows and rows[0][0] == value)
+            if matched:
+                return {"verified": True, "actual": value, "source": "database"}
+        except Exception:
+            observed = False
+        if time.monotonic() >= deadline:
+            return ({"verified": False, "actual": None, "source": "database"}
+                    if observed else None)
+        await asyncio.sleep(2)
+
+
 async def capture_setup_proof(
     call: Callable[[str, dict[str, Any], str], Awaitable[dict[str, Any]]],
     setup_proof: tuple[str, str, str],
@@ -907,6 +956,7 @@ async def run_realapp(
     setup_flows: Sequence[tuple[str, dict[str, str]]] = (),
     setup_proof: tuple[str, str, str] | None = None,
     setup_proof_regex: bool = False,
+    setup_proof_query: dict[str, str] | None = None,
     save_primary_flow: bool = False,
     contract: str | None = None,
     authored_context: str | None = None,
@@ -955,6 +1005,12 @@ async def run_realapp(
         raise RunError("forbidden foreground package names must be non-empty")
     if package in forbidden_foreground_packages:
         raise RunError("the target package cannot also be a forbidden foreground package")
+    if setup_proof_query is not None:
+        setup_proof_query = validate_setup_proof_query(setup_proof_query)
+        if setup_proof is None or setup_proof_regex:
+            raise RunError("database setup proof needs a name and value, without a log pattern")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", setup_proof[2]):
+            raise RunError("database setup proof value must be a short enum label")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
@@ -1011,17 +1067,20 @@ async def run_realapp(
 
     async def call(name: str, arguments: dict[str, Any], actor: str) -> dict[str, Any]:
         tick = time.monotonic()
-        record: dict[str, Any] = {"actor": actor, "tool": name, "arguments": arguments}
+        private_proof = actor == "setup-proof"
+        record: dict[str, Any] = {"actor": actor, "tool": name,
+                                  "arguments": {} if private_proof else arguments}
         try:
             decoded = tool_result(await call_tool(name, arguments))
             record["ok"] = decoded.get("ok")
-            if decoded.get("ok") is not True and name != "logcat_dump":
+            if decoded.get("ok") is not True and name != "logcat_dump" and not private_proof:
                 # A failing AUA call does not always populate `error`; keep a bounded copy of the
                 # payload so the reason survives in the log instead of reading as `error: null`.
                 record["payload"] = json.dumps(decoded, ensure_ascii=False, default=str)[:2000]
             return decoded
         except Exception as exc:
-            record["error"] = "logcat proof unavailable" if name == "logcat_dump" else _error_text(exc)
+            record["error"] = ("setup proof unavailable" if private_proof else
+                               "logcat proof unavailable" if name == "logcat_dump" else _error_text(exc))
             raise
         finally:
             record["duration_ms"] = (time.monotonic() - tick) * 1000
@@ -1053,6 +1112,18 @@ async def run_realapp(
 
     session_id: str | None = None
     proof_mark: str | None = None
+    proof_since_unix_ms: int | None = None
+
+    async def read_setup_proof() -> dict[str, Any] | None:
+        assert setup_proof is not None
+        if setup_proof_query is not None:
+            return await capture_database_setup_proof(
+                call, setup_proof_query, package=package, value=setup_proof[2],
+                since_unix_ms=proof_since_unix_ms,
+            )
+        return await capture_setup_proof(
+            call, setup_proof, regex=setup_proof_regex, since=proof_mark,
+        )
     setup_notes: list[str] = []
     setup_facts: list[str] = [str(item) for item in inherited_setup_facts]
     recording_started = False
@@ -1168,6 +1239,9 @@ async def run_realapp(
                 marked = await call("logcat_mark", {"name": mark_name}, "setup")
                 if marked.get("ok") is True:
                     proof_mark = mark_name
+                    if (marked.get("clock") == "device" and
+                            type(marked.get("unix_ms")) is int and marked["unix_ms"] > 0):
+                        proof_since_unix_ms = marked["unix_ms"]
             except Exception:
                 pass
         for index, (flow_yaml, flow_params) in enumerate(prelaunch_setup_flows):
@@ -1281,9 +1355,7 @@ async def run_realapp(
         # After every setup flow, while the session is still live: a precondition the caller
         # must be able to prove rather than infer from the screen.
         if setup_proof is not None and proof_mark is not None:
-            proved = await capture_setup_proof(
-                call, setup_proof, regex=setup_proof_regex, since=proof_mark,
-            )
+            proved = await read_setup_proof()
             if proved is not None:
                 result[setup_proof[0]] = proved
         if flags or setup_flows or observation_frame(launched) is None:
@@ -1680,9 +1752,7 @@ async def run_realapp(
         # Refresh while the session is still live: a later state change must supersede setup
         # proof. Missing/unreadable evidence cannot preserve an earlier positive attestation.
         if setup_proof is not None and proof_mark is not None:
-            retried = await capture_setup_proof(
-                call, setup_proof, regex=setup_proof_regex, since=proof_mark,
-            )
+            retried = await read_setup_proof()
             result[setup_proof[0]] = retried
 
         if session_id and finish_session:
@@ -1840,6 +1910,9 @@ def main() -> int:
                         help="Regex alternative to --setup-proof-grep. A named 'value' group "
                              "compares the latest matching value with --setup-proof-value; "
                              "captured text is never returned.")
+    parser.add_argument("--setup-proof-query", type=Path,
+                        help="JSON file with database and SQL projecting actual + observed_at_ms, "
+                             "bound to :since_unix_ms; reads only the expected scalar via AUA")
     parser.add_argument("--save-primary-flow", action="store_true",
                         help="Export a proved controller journal suffix to output/flow.yaml; never save globally")
     parser.add_argument("--setup-proof-value",
@@ -1894,13 +1967,20 @@ def main() -> int:
         args.prelaunch_setup_flow, args.prelaunch_setup_params
     )
     setup_flows = build_setup_flows(args.setup_flow, args.setup_params)
-    if args.setup_proof_grep and args.setup_proof_regex:
-        parser.error("use only one of --setup-proof-grep and --setup-proof-regex")
-    proof_parts = (args.setup_proof_name, args.setup_proof_regex or args.setup_proof_grep,
+    if sum(bool(item) for item in (args.setup_proof_grep, args.setup_proof_regex, args.setup_proof_query)) > 1:
+        parser.error("use only one setup proof source: grep, regex, or query")
+    proof_parts = (args.setup_proof_name, args.setup_proof_regex or args.setup_proof_grep or
+                   ("database" if args.setup_proof_query else None),
                    args.setup_proof_value)
     if any(proof_parts) and not all(proof_parts):
         parser.error("--setup-proof-name, one proof pattern, and --setup-proof-value go together")
     setup_proof = tuple(proof_parts) if all(proof_parts) else None
+    setup_proof_query = None
+    if args.setup_proof_query:
+        try:
+            setup_proof_query = validate_setup_proof_query(json.loads(args.setup_proof_query.read_text()))
+        except (OSError, ValueError, RunError):
+            parser.error("invalid setup proof query file; expected database and bounded SQL projection")
     if args.setup_proof_regex:
         try:
             re.compile(args.setup_proof_regex)
@@ -2047,6 +2127,7 @@ def main() -> int:
                     setup_flows=setup_flows,
                     setup_proof=setup_proof,
                     setup_proof_regex=bool(args.setup_proof_regex),
+                    setup_proof_query=setup_proof_query,
                     save_primary_flow=args.save_primary_flow,
                     contract=args.contract.read_text(encoding="utf-8") if args.contract else None,
                     authored_context=(
