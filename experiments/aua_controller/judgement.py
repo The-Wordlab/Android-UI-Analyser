@@ -18,6 +18,7 @@ import asyncio
 import base64
 import copy
 import io
+import itertools
 import json
 import math
 import re
@@ -376,6 +377,7 @@ def evidence_frame(result: Any, *, max_elements: int = 40, keep_ids: bool = Fals
 
 MAX_IMAGE_WIDTH = 360
 MAX_IMAGES = 4
+MAX_IMAGE_CHECKPOINTS = 5  # explicit caller opt-in; ordinary selection remains four
 MAX_TEXT_FRAMES = 32
 
 
@@ -514,12 +516,78 @@ def image_frame_sample(frames: Sequence[Any], limit: int = MAX_IMAGES - 1) -> li
     return [items[index] for index in picks]
 
 
+def order_transition_checkpoints(frames: Sequence[Any], actions: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Index observed A/B/A label-order sequences across two different named UI actions.
+
+    This is evidence organization, not a verdict or an inference that an action caused a state.
+    Labels, geometry, chronology and action targets all come from host observations.
+    """
+    histories: dict[tuple[str, str], list[tuple[int, bool]]] = {}
+    for index, frame in enumerate(frames):
+        observation = evidence_frame(frame).get("observation") or {}
+        labels: dict[str, list[float]] = {}
+        duplicates: set[str] = set()
+        for element in observation.get("elements", []):
+            label = element.get("text") or element.get("desc")
+            position = element.get("center_pct")
+            if not label or not position or not element.get("clickable"):
+                continue
+            if label in labels:
+                duplicates.add(label)
+            labels[label] = position
+        for a, b in itertools.combinations(sorted(labels.keys() - duplicates), 2):
+            left, right = labels[a], labels[b]
+            if abs(left[0] - right[0]) > 20 or abs(left[1] - right[1]) < 1:
+                continue
+            histories.setdefault((a, b), []).append((index, left[1] < right[1]))
+
+    def between(before, after):
+        start = frames[before].get("_judge_evidence", {}).get("after_step")
+        end = frames[after].get("_judge_evidence", {}).get("after_step")
+        if not isinstance(start, int) or not isinstance(end, int):
+            return None
+        for action in reversed(actions):
+            target = action.get("resolved_target") or {}
+            label = target.get("text") or target.get("desc") or target.get("content_desc")
+            step = action.get("step")
+            if (isinstance(step, int) and start < step <= end and label
+                    and target.get("source") == "previous_fresh_observation"
+                    and action.get("tool") in {"tap", "tap_and_analyze"}):
+                return {"step": step, "target": label,
+                        "source_evidence_ref": target.get("source_evidence_ref")}
+        return None
+
+    groups = []
+    seen = set()
+    for labels, history in histories.items():
+        states: list[tuple[int, bool]] = []
+        for index, order in history:
+            if states and states[-1][1] == order:
+                continue  # first capture of each state, including the return to an old state
+            states.append((index, order))
+            if len(states) < 3:
+                continue
+            before, changed, returned = [item[0] for item in states[-3:]]
+            first, second = between(before, changed), between(changed, returned)
+            if not first or not second or first["target"] == second["target"]:
+                continue
+            key = (before, changed, returned)
+            if key not in seen:
+                groups.append({"labels": list(labels), "frame_indexes": list(key),
+                               "actions_between": [first, second]})
+                seen.add(key)
+            break
+    return sorted(groups, key=lambda group: group["frame_indexes"])[:4]
+
+
 def judge_image_frames(frames: Sequence[Any], final: Any, index: Mapping[str, str],
                        limit: int = MAX_IMAGES, *, actions: Sequence[dict[str, Any]] = ()) -> list[Any]:
     """Prefer named form-action outcomes and changed pairs, then spread remaining images."""
     if limit <= 0:
         return []
-    limit = min(limit, MAX_IMAGES)
+    limit = min(limit, MAX_IMAGE_CHECKPOINTS)
+    transitions = order_transition_checkpoints(frames, actions)
+    protected = {id(frames[item]) for group in transitions for item in group["frame_indexes"]}
     candidates = []
     signatures = []
     actions_by_step = {action.get("step"): action for action in actions}
@@ -565,11 +633,13 @@ def judge_image_frames(frames: Sequence[Any], final: Any, index: Mapping[str, st
     final_signature = signature(final)
     for frame in frames:
         current = signature(frame)
-        if current is None or (final_signature is not None and similar(frame, current, final, final_signature)):
+        if current is None or (id(frame) not in protected and final_signature is not None
+                               and similar(frame, current, final, final_signature)):
             continue
         duplicate = next((item for item, (previous_frame, previous) in enumerate(
             zip(candidates, signatures, strict=True))
-            if similar(frame, current, previous_frame, previous)), None)
+            if id(frame) not in protected and id(previous_frame) not in protected
+            and similar(frame, current, previous_frame, previous)), None)
         if duplicate is not None:
             # Keep the post-action capture instead of an identical pre-action form.
             if action_priority(frame) > action_priority(candidates[duplicate]):
@@ -586,6 +656,12 @@ def judge_image_frames(frames: Sequence[Any], final: Any, index: Mapping[str, st
     priorities = [action_priority(frame) for frame in candidates]
     if slots and priorities and max(priorities) >= 2:
         selected.add(max(range(len(candidates)), key=lambda item: (priorities[item], -item)))
+    for group in transitions:
+        group_ids = {id(frames[item]) for item in group["frame_indexes"]}
+        checkpoint_indexes = {item for item, frame in enumerate(candidates) if id(frame) in group_ids}
+        if len(checkpoint_indexes) == 3 and len(selected | checkpoint_indexes) <= slots:
+            selected.update(checkpoint_indexes)
+            break
     if slots - len(selected) >= 2:
         for right in range(1, len(candidates)):
             for left in range(right):
@@ -756,7 +832,7 @@ class Decider:
         """
         jsonschema.validators.validator_for(schema).check_schema(schema)
         text = question + "\n\nEvidence:\n" + json.dumps(context, ensure_ascii=False)
-        shots = [url for url in list(images)[:MAX_IMAGES] if isinstance(url, str) and url]
+        shots = [url for url in list(images)[:MAX_IMAGE_CHECKPOINTS] if isinstance(url, str) and url]
         if shots:
             text += ("\n\nThe attached screenshots are the rendered frames, oldest first, and the "
                      "last one is the final screen. Use them for anything about appearance, "
@@ -1027,8 +1103,21 @@ async def judge_outcome(
             "not enabled/disabled appearance or whether an action succeeded."
         ),
     }
+    transitions = order_transition_checkpoints(frames, actions)
+    if transitions:
+        context["observed_order_transitions"] = [
+            {"labels": group["labels"], "actions_between": group["actions_between"],
+             "checkpoints": [{
+                 "evidence_position": frames[item].get("_judge_evidence", {}),
+                 "rows": [element for element in evidence_frame(frames[item])["observation"]["elements"]
+                          if (element.get("text") or element.get("desc")) in group["labels"]],
+             } for item in group["frame_indexes"]],
+             "note": "Observed vertical order changed, then returned to its prior order. "
+                     "Correlate action steps and screenshots; this grouping supplies no verdict."}
+            for group in transitions
+        ]
     if image_evidence:
-        context["image_evidence"] = list(image_evidence)[:MAX_IMAGES]
+        context["image_evidence"] = list(image_evidence)[:MAX_IMAGE_CHECKPOINTS]
         context["evidence_selection_note"] = (
             "Images are selected rendered checkpoints, not every recorded frame. "
             "Use evidence_position and image_evidence to correlate observations with action steps "

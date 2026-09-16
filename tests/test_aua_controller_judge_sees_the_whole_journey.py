@@ -27,6 +27,7 @@ from experiments.aua_controller.judgement import (
     image_frame_sample,
     judge_image_frames,
     judged_frame_sample,
+    order_transition_checkpoints,
     screenshot_for,
     screenshot_index,
 )
@@ -200,6 +201,34 @@ def test_image_selection_retains_named_empty_form_outcome_not_pre_action_duplica
     # A controller's invented target cannot influence the evidence priorities.
     actions[0]["resolved_target"]["source"] = "controller_claim"
     assert frames[15] not in judge_image_frames(frames[:-1], frames[-1], index, actions=actions)
+
+
+def test_five_checkpoint_budget_keeps_empty_submit_order_change_return_and_final(tmp_path):
+    frames = []
+    for step in range(27):
+        elements = [{"text": f"Control {step}", "clickable": True}]
+        if step == 11:
+            elements = [{"type": "EditText", "clickable": True}, {"text": "Save", "clickable": True}]
+        if step in (20, 22, 24, 26):
+            names = ("First item", "Named item") if step in (20, 24) else ("Named item", "First item")
+            elements = [{"text": name, "clickable": True, "bounds": [10, 100 + i * 100, 200, 180 + i * 100]}
+                        for i, name in enumerate(names)]
+        frames.append({"observation": {"screen": {"width": 360, "height": 640},
+                                       "meta": {"fingerprint": f"f{step}"}, "elements": elements},
+                       "_judge_evidence": {"after_step": step, "ref": f"E{step}", "sequence": step}})
+    actions = [{"step": step, "tool": "tap_and_analyze", "resolved_target": {
+        "text": target, "source": "previous_fresh_observation"}}
+        for step, target in ((11, "Save"), (22, "Pin"), (24, "Unpin"))]
+    groups = order_transition_checkpoints(frames, actions)
+    assert groups[0]["frame_indexes"] == [20, 22, 24]
+    assert [action["target"] for action in groups[0]["actions_between"]] == ["Pin", "Unpin"]
+    index = _render_test_frames(tmp_path, frames)
+    picked = judge_image_frames(frames[:-1], frames[-1], index, limit=5, actions=actions)
+    assert [value["_judge_evidence"]["after_step"] for value in picked] == [11, 20, 22, 24, 26]
+    assert len(judge_image_frames(frames[:-1], frames[-1], index, actions=actions)) == 4
+    assert len(judge_image_frames(frames[:-1], frames[-1], index, limit=99, actions=actions)) == 5
+    actions[2]["resolved_target"]["source"] = "controller_claim"
+    assert order_transition_checkpoints(frames, actions) == []
 
 
 # --------------------------------------------------------------------------- image pairing

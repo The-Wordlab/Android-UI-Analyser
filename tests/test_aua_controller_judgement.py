@@ -698,6 +698,22 @@ def test_judge_relative_positions_prove_order_changes_without_pixel_bounds():
         "First item", "Named item", "First item"]
     assert frames == originals
 
+    sender = Sender([tool_reply("record_verdict", verdict("unverified"))])
+    actions = [{"step": step, "tool": "tap_and_analyze", "resolved_target": {
+        "text": label, "source": "previous_fresh_observation"}}
+        for step, label in ((22, "Pin"), (24, "Unpin"))]
+    asyncio.run(judge_outcome_votes(decider(sender), votes=1, goal="Check row order",
+                                    final_frame=frame(), frames=frames, actions=actions,
+                                    images=[f"data:image/png;base64,{i}" for i in range(5)],
+                                    image_evidence=[{"image_index": i + 1} for i in range(5)]))
+    content = sender.payloads[0]["messages"][1]["content"]
+    assert len([item for item in content if item["type"] == "image_url"]) == 5
+    context = json.loads(content[0]["text"].split("Evidence:\n", 1)[1].split("\n\nThe attached", 1)[0])
+    assert len(context["image_evidence"]) == 5
+    checkpoints = context["observed_order_transitions"][0]["checkpoints"]
+    assert [item["evidence_position"]["ref"] for item in checkpoints] == ["E20", "E22", "E24"]
+    assert [item["rows"][0]["text"] for item in checkpoints] == ["First item", "Named item", "First item"]
+
 
 @pytest.mark.parametrize("bounds", [[0, 0, float("nan"), 20], [0, 0, 0, 0],
                                     [0, -200, 10, -100], [0, 0, True, 5], [0, 1]])

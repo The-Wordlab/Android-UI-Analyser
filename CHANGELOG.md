@@ -13,6 +13,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Judge packets group host-observed before/change/return row-order checkpoints with their named
+  action steps, retaining recurrent states rather than deduplicating away the return. Callers may
+  explicitly request five native screenshots for multi-state contracts; the default remains four.
+
 - Judge evidence retains relative positions for labeled controls and prioritizes captured
   form-validation outcomes. Image selection spreads across the journey even without screen names,
   rather than omitting later observed states; raw handles and pixel bounds remain excluded.

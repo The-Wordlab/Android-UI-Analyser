@@ -1079,6 +1079,7 @@ async def run_realapp(
     judge: bool = True,
     judge_votes: int = 2,
     judge_frames: int = 8,
+    judge_images: int = 4,
     name_screens: bool = False,
     max_named_screens: int = 8,
     max_steps: int = 24,
@@ -1761,7 +1762,8 @@ async def run_realapp(
                 # frame with the screenshot AUA already captured for it, oldest first, so the
                 # final screen is the last image the judge sees.
                 shot_index = screenshot_index(aua_artifacts_dir / "manifest.json")
-                image_frames = judge_image_frames(positioned_frames, final, shot_index, actions=actions)
+                image_frames = judge_image_frames(positioned_frames, final, shot_index,
+                                                 limit=judge_images, actions=actions)
                 for frame in image_frames:
                     shot = screenshot_for(shot_index, frame_fingerprint(frame))
                     encoded = encode_image(shot) if shot else None
@@ -2116,6 +2118,8 @@ def main() -> int:
                         help="How many observations to show the judge, spread across the whole "
                              "journey. A contract bullet about the route is unverifiable from "
                              "the tail alone.")
+    parser.add_argument("--judge-images", type=int, default=4, choices=range(1, 6),
+                        help="Bounded rendered checkpoints; use 5 only for a multi-state contract")
     parser.add_argument("--map", action="store_true", help="Name screens and summarise the route (paid)")
     parser.add_argument("--max-steps", type=int, default=24)
     parser.add_argument("--preserve-end-state", action="store_true",
@@ -2311,7 +2315,7 @@ def main() -> int:
                     judge_request_config=judge_config,
                     judge_fallbacks=judge_fallbacks,
                     judge=not args.no_judge, judge_votes=args.judge_votes,
-                    judge_frames=args.judge_frames, name_screens=args.map,
+                    judge_frames=args.judge_frames, judge_images=args.judge_images, name_screens=args.map,
                     max_steps=args.max_steps, time_limit_s=args.time_limit, max_tokens=args.max_tokens,
                     preserve_end_state=args.preserve_end_state,
                     cost_limit_usd=args.cost_limit_usd, judge_cost_limit_usd=args.judge_cost_limit_usd,
