@@ -11,7 +11,7 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
-## [0.27.0] - 2026-09-16
+## [0.27.1] - 2026-09-16
 
 ### Fixed
 
@@ -19,6 +19,10 @@ notes, so you can check for a newer version — and read what changed — withou
   headers. Real-app callers can explicitly preserve the authored end state for continuous runs;
   default return-home guidance is unchanged. Captured loading observations remain judge evidence
   without authorizing actions, settled-state claims or checkpoint completion from unsafe selectors.
+
+## [0.27.0] - 2026-09-16
+
+### Fixed
 
 - Compact real-app controllers retain editable-field, resource-ID and window semantics across
   post-action observations, plus input verification/submission status. Sending guidance now
@@ -1016,5 +1020,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.26.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.26.1
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.27.0...HEAD
 [0.27.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.27.1...HEAD
+[0.27.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.1
