@@ -22,6 +22,9 @@ notes, so you can check for a newer version — and read what changed — withou
 - Opt-in primary-flow export previews the exact clean controller action suffix into the run's
   output directory. Incomplete or unsaveable journals cannot produce a passing export, and
   observation-only runs never borrow setup actions or write global flow memory.
+- The real-app harness offers a separate forbidden-foreground-package guard: installed sibling
+  apps are allowed, but setup, controller, and final evidence entering a forbidden app aborts the
+  run independently of model judgment. The existing installed-package exclusion remains available.
 
 ## [0.26.1] - 2026-09-14
 

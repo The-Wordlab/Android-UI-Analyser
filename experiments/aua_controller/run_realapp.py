@@ -616,6 +616,24 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def forbidden_foreground(payload: dict[str, Any], forbidden: Sequence[str]) -> str | None:
+    """Read current foreground identity, never package inventories or historical frames."""
+    current = observation_frame(payload)
+    if current is not None:
+        screen = current["screen"]
+        for identity in (screen.get("app_id"), screen.get("package")):
+            if identity in forbidden:
+                return str(identity)
+    # Some combined actions expose fresh foreground proof without a full hierarchy.
+    contract = payload.get("observation_contract") or {}
+    change = payload.get("change") or {}
+    if isinstance(contract, dict) and contract.get("evidence_fresh") is True and isinstance(change, dict):
+        identity = str(change.get("activity_after") or "").split("/", 1)[0]
+        if identity in forbidden:
+            return identity
+    return None
+
+
 async def export_primary_flow(call, output: Path) -> dict[str, Any]:
     """Export only a clean controller action suffix, never write shared flow memory."""
     action_tools = {
@@ -876,6 +894,7 @@ async def run_realapp(
     apk: str | None = None,
     grant_permissions: bool = False,
     forbidden_packages: Sequence[str] = (),
+    forbidden_foreground_packages: Sequence[str] = (),
     record: bool = False,
     recording_required: bool = True,
     lease_wait_s: float = 0,
@@ -932,6 +951,10 @@ async def run_realapp(
         raise RunError("lease waits must be non-negative")
     if any(not str(item).strip() for item in forbidden_packages):
         raise RunError("forbidden package names must be non-empty")
+    if any(not str(item).strip() for item in forbidden_foreground_packages):
+        raise RunError("forbidden foreground package names must be non-empty")
+    if package in forbidden_foreground_packages:
+        raise RunError("the target package cannot also be a forbidden foreground package")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
@@ -965,6 +988,26 @@ async def run_realapp(
         "cost": {"total_usd": 0.0}, "error": None, "warnings": [], "report_is_untrusted": True,
     }
     setup_log = output / "setup-calls.jsonl"
+
+    raw_call_tool = call_tool
+
+    async def guarded_call_tool(name: str, arguments: dict[str, Any]) -> Any:
+        # All setup, direct controller and final observations cross this same boundary.
+        # Installed siblings remain untouched; explicit attempts to operate on them refuse.
+        if (arguments.get("package") in forbidden_foreground_packages
+                and name not in {"app_status", "session_finish"}):
+            raise RunError("action targets a forbidden foreground package")
+        raw = await raw_call_tool(name, arguments)
+        if forbidden_foreground_packages:
+            identity = forbidden_foreground(tool_result(raw), forbidden_foreground_packages)
+            if identity:
+                result["foreground_guard"] = {"blocked": True, "package": identity, "tool": name}
+                # Capture the returned session id first so this refusal still cleans up.
+                if name != "session_start":
+                    raise RunError(f"forbidden package entered the foreground: {identity}")
+        return raw
+
+    call_tool = guarded_call_tool
 
     async def call(name: str, arguments: dict[str, Any], actor: str) -> dict[str, Any]:
         tick = time.monotonic()
@@ -1071,6 +1114,8 @@ async def run_realapp(
             if not isinstance(session_id, str) or not session_id:
                 raise RunError("session_start returned no session_id: " + json.dumps(start)[:500])
             result["session_id"], result["serial"] = session_id, start.get("serial")
+            if result.get("foreground_guard"):
+                raise RunError("forbidden package entered the foreground during session bootstrap")
             knowledge = host_knowledge(start)
             result["knowledge_shown"] = [item.get("id") for item in knowledge]
             result["setup"].append({
@@ -1438,6 +1483,9 @@ async def run_realapp(
             "provider": (report.get("providers") or [None])[0], "usd": controller_cost(report),
         }
 
+        if result.get("foreground_guard"):
+            raise RunError("forbidden package entered the foreground during controller execution")
+
         final = await call("analyze_screen", {"source": "hierarchy", "no_cache": True}, "final")
         # Kept raw so a verdict can be re-judged offline from the same evidence later.
         (output / "final-observation.json").write_text(json.dumps(final, ensure_ascii=False, indent=2) + "\n")
@@ -1735,6 +1783,10 @@ def main() -> int:
         default=[],
         help="Fail before controller navigation when this package is installed; repeatable",
     )
+    parser.add_argument(
+        "--forbid-foreground-package", action="append", default=[],
+        help="Refuse actions on or fresh foreground evidence of this package; installation alone is allowed",
+    )
     parser.add_argument("--activity")
     parser.add_argument(
         "--headed",
@@ -1984,6 +2036,7 @@ def main() -> int:
                     fresh_app=args.fresh, apk=args.apk,
                     grant_permissions=args.grant_permissions,
                     forbidden_packages=args.forbid_package,
+                    forbidden_foreground_packages=args.forbid_foreground_package,
                     record=args.record,
                     lease_wait_s=args.lease_wait, fallback_lease_wait_s=args.fallback_lease_wait,
                     provision_target=not args.no_provision,

@@ -412,6 +412,48 @@ def test_forbidden_package_guard_blocks_before_recording_or_navigation(tmp_path)
     assert aua.named("session_finish"), "the leased session is still cleaned up"
 
 
+def test_foreground_guard_allows_an_installed_sibling_without_inspecting_or_mutating_it(tmp_path):
+    aua = SetupAua(installed_packages={"com.example.production"})
+    result = run(tmp_path, aua, two_step_model(),
+                 forbidden_foreground_packages=["com.example.production"])
+    assert result["error"] is None
+    assert result["verdict"]["verdict"] == "pass"
+    assert aua.named("app_status") == []
+    assert aua.named("session_start")[0]["package"] == "com.example.fictional"
+    assert aua.named("session_finish")
+
+
+@pytest.mark.parametrize("entry_tool", ["session_start", "app_launch_and_analyze", "tap_and_analyze", "analyze_screen"])
+def test_forbidden_foreground_aborts_independently_of_judges_and_still_finishes(tmp_path, entry_tool):
+    class WrongForegroundAua(SetupAua):
+        async def call_tool(self, name, arguments):
+            value = await super().call_tool(name, arguments)
+            if name == entry_tool:
+                wrong = frame("forbidden", ("Unrelated application",))
+                wrong["observation"]["screen"]["package"] = "com.example.production"
+                value.update(wrong)
+            return value
+
+    aua = WrongForegroundAua()
+    model = two_step_model()
+    result = run(tmp_path, aua, model,
+                 forbidden_foreground_packages=["com.example.production"])
+    assert result["foreground_guard"]["blocked"] is True
+    assert result["verdict"]["verdict"] == "unverified"
+    assert aua.named("session_finish"), "even a forbidden bootstrap observation retains cleanup"
+    assert not any(isinstance(payload.get("tool_choice"), dict) for payload in model.payloads)
+    if entry_tool in {"session_start", "app_launch_and_analyze"}:
+        assert aua.named("tap_and_analyze") == []
+
+
+def test_foreground_guard_rejects_a_contradictory_target_before_session_start(tmp_path):
+    aua = SetupAua()
+    with pytest.raises(RunError, match="target package"):
+        run(tmp_path, aua, two_step_model(),
+            forbidden_foreground_packages=["com.example.fictional"])
+    assert not aua.calls
+
+
 def test_package_pinned_app_lifecycle_capability_maps_to_safe_aua_calls(tmp_path):
     aua = SetupAua()
     neutral = verdict("pass", "state persisted")
