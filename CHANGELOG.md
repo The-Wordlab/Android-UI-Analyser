@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Judge requests now share a 45-second route deadline across transport retries/backoff and schema
+  repairs, with a 90-second deadline per vote. Stalled routes advance promptly; cancellation
+  preserves cleanup and result artifacts, and requests without usage mark reported cost incomplete.
 - Real-app judging keeps routing retries separate from each model's schema-repair budget,
   escalates reasoning-only exhaustion, and normalizes unambiguous criterion formatting while
   leaving missing evidence unverified. Failed judgement spend remains in report totals. Safe

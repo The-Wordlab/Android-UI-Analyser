@@ -710,6 +710,8 @@ def verdict_markdown(result: dict[str, Any]) -> str:
         if entry:
             lines.append(f"| {tier} | {entry.get('model')} | {entry.get('provider')} | {entry.get('usd'):.6f} |")
     lines.append(f"| total | | | {cost['total_usd']:.6f} |")
+    if cost.get("complete") is False:
+        lines.append("Reported cost is incomplete: cancelled/timed-out requests returned no usage; provider charges are unknown.")
     screens = result.get("screens") or []
     if screens:
         lines += ["", "## Screens", ""]
@@ -1726,6 +1728,12 @@ async def run_realapp(
             (output / "screens.json").write_text(json.dumps(result["screens"], ensure_ascii=False, indent=2) + "\n")
             if result["route"]:
                 (output / "route.json").write_text(json.dumps(result["route"], ensure_ascii=False, indent=2) + "\n")
+    except asyncio.CancelledError:
+        result["cancelled"] = True
+        result["error"] = "Run cancelled; judgement and any in-flight provider charge are incomplete."
+        result["verdict"] = {"oracle": "none", "verified": False, "verdict": "unverified",
+                             "reasons": [result["error"]]}
+        raise
     except Exception as exc:
         result["error"] = _error_text(exc)
         if result["verdict"] is None:
@@ -1804,6 +1812,10 @@ async def run_realapp(
         result["cost"]["total_usd"] = round(sum(
             float(entry["usd"]) for key, entry in result["cost"].items()
             if key != "total_usd" and isinstance(entry, dict)), 8)
+        result["cost"]["complete"] = not result.get("cancelled", False) and all(
+            (entry.get("decider") or {}).get("cost_complete", True)
+            for entry in result["cost"].values() if isinstance(entry, dict)
+        )
         result["duration_seconds"] = time.monotonic() - started
         (output / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n")
         (output / "verdict.md").write_text(verdict_markdown(result))

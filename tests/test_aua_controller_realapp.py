@@ -723,6 +723,39 @@ def test_failed_judgement_spend_survives_in_result_and_markdown(tmp_path):
     assert "0.013000" in (tmp_path / "run/verdict.md").read_text()
 
 
+def test_cancel_during_judge_preserves_unknown_cost_and_still_finishes_session(tmp_path):
+    aua = FakeAua()
+
+    async def exercise():
+        judging = asyncio.Event()
+
+        async def send(payload):
+            if isinstance(payload.get("tool_choice"), dict):
+                judging.set()
+                await asyncio.Event().wait()
+            return model_call("session_finish", {"outcome": "achieved", "note": "observed"})
+
+        task = asyncio.create_task(run_realapp(
+            call_tool=aua.call_tool, list_tools=aua.list_tools, send=send,
+            goal="Observe theme", package="com.example.fictional", output=tmp_path / "run",
+            model="fictional/model", request_config=SETTINGS,
+        ))
+        await asyncio.wait_for(judging.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+    assert aua.calls[-1][0] == "session_finish"
+    saved = json.loads((tmp_path / "run/result.json").read_text())
+    assert saved["verdict"]["verdict"] == "unverified"
+    assert "cancelled" in saved["error"]
+    assert saved["cost"]["complete"] is False
+    assert saved["cost"]["judge"]["decider"]["unreported_cost_requests"] == 1
+    assert "provider charges are unknown" in (tmp_path / "run/verdict.md").read_text()
+    assert "decision_cancelled" in (tmp_path / "run/judge/judge-events.jsonl").read_text()
+
+
 def test_realapp_puts_host_knowledge_into_the_first_user_message(tmp_path):
     """A live run started with three accurate facts in the store and re-derived all of them by hand."""
     fact = {"id": "knowledge_theme", "kind": "claim", "name": None, "aliases": ["switch theme"], "score": 70,

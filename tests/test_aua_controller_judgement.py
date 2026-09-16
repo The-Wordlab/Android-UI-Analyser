@@ -188,6 +188,86 @@ def test_reasoning_exhaustion_route_relaxation_and_schema_repair_have_separate_b
     assert result["cost"] == pytest.approx(0.011)
 
 
+def test_route_deadline_covers_transport_backoff_and_advances_without_repair(tmp_path):
+    from experiments.aua_controller.transport import resilient_request
+
+    calls, transport_calls, cancelled = [], [], []
+
+    async def send(payload):
+        calls.append(payload["model"])
+        if payload["model"] == "fictional/fallback":
+            return tool_reply("record_verdict", verdict("pass"))
+
+        async def once():
+            transport_calls.append(True)
+            raise RuntimeError("temporary provider failure")
+
+        async def backoff(_seconds):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append(True)
+
+        return await resilient_request(once, classify=lambda exc: (503, {}) if isinstance(exc, RuntimeError)
+                                       else None, sleep=backoff)
+
+    subject = decider(send, route_timeout_s=0.01, decision_timeout_s=1,
+                      fallbacks=[("fictional/fallback", SETTINGS)], output=tmp_path)
+    result = asyncio.run(subject.decide(role="judge", instructions="i", question="q", context={},
+                                       schema=OUTCOME_SCHEMA, name="record_verdict"))
+    assert result["result"]["verdict"] == "pass"
+    assert calls == ["fictional/model", "fictional/fallback"]
+    assert len(transport_calls) == len(cancelled) == 1
+    report = subject.report()
+    assert report["cost_complete"] is False and report["unreported_cost_requests"] == 1
+    assert report["reported_usd"] == pytest.approx(0.0005)
+    logs = [json.loads(line) for line in (tmp_path / "judge-events.jsonl").read_text().splitlines()]
+    assert logs[0]["event"] == "route_timeout" and logs[0]["cost_unreported"] is True
+
+
+def test_route_repairs_share_one_deadline_and_keep_already_reported_spend(tmp_path):
+    requests = []
+
+    async def send(payload):
+        requests.append(payload["model"])
+        if len(requests) == 1:
+            return tool_reply("record_verdict", {"verdict": "invalid"}, cost=0.003)
+        if payload["model"] == "fictional/model":
+            await asyncio.Event().wait()
+        return tool_reply("record_verdict", verdict("pass"), cost=0.004)
+
+    subject = decider(send, route_timeout_s=0.01, decision_timeout_s=1,
+                      fallbacks=[("fictional/fallback", SETTINGS)], output=tmp_path)
+    result = asyncio.run(subject.decide(role="judge", instructions="i", question="q", context={},
+                                       schema=OUTCOME_SCHEMA, name="record_verdict"))
+    assert requests == ["fictional/model", "fictional/model", "fictional/fallback"]
+    assert result["cost"] == pytest.approx(0.007)
+    logs = [json.loads(line) for line in (tmp_path / "judge-events.jsonl").read_text().splitlines()]
+    assert logs[0]["reported_cost_usd"] == pytest.approx(0.003)
+
+
+def test_total_decision_deadline_bounds_all_routes(tmp_path):
+    calls = []
+
+    async def send(payload):
+        calls.append(payload["model"])
+        await asyncio.Event().wait()
+
+    subject = decider(send, route_timeout_s=0.02, decision_timeout_s=0.03,
+                      fallbacks=[("fictional/second", SETTINGS), ("fictional/third", SETTINGS)],
+                      output=tmp_path)
+    with pytest.raises(RunError, match="decision deadline"):
+        asyncio.run(subject.decide(role="judge", instructions="i", question="q", context={},
+                                   schema=OUTCOME_SCHEMA, name="record_verdict"))
+    assert calls == ["fictional/model", "fictional/second"]
+    assert subject.report()["unreported_cost_requests"] == 2
+
+
+def test_default_judge_deadlines_do_not_change_controller_request_timeout():
+    subject = decider(Sender([]))
+    assert subject.route_timeout_s == 45 and subject.decision_timeout_s == 90
+
+
 @pytest.mark.parametrize("failure", [RuntimeError("provider timeout"), None])
 def test_transport_or_nonobject_reply_can_reach_valid_fallback(failure):
     replies = ([failure] if isinstance(failure, Exception) else [None, None])

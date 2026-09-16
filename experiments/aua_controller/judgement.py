@@ -14,6 +14,7 @@ caller enables them explicitly and every result records reported cost.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import io
@@ -385,6 +386,8 @@ class Decider:
         max_tokens: int = 1024,
         cost_limit_usd: float = 0.05,
         repair_budget: int = 1,
+        route_timeout_s: float = 45,
+        decision_timeout_s: float = 90,
         fallbacks: Sequence[tuple[str, dict[str, Any] | None]] = (),
         output: Path | None = None,
     ) -> None:
@@ -392,6 +395,8 @@ class Decider:
             raise RunError("unknown decider backend")
         if type(max_tokens) is not int or max_tokens <= 0 or type(repair_budget) is not int or repair_budget < 0:
             raise RunError("decider budgets must be positive integers")
+        if not (0 < route_timeout_s < float("inf") and 0 < decision_timeout_s < float("inf")):
+            raise RunError("decider deadlines must be finite and positive")
         self.send = send
         self.model = model
         self.backend = backend
@@ -399,6 +404,9 @@ class Decider:
         self.settings = validate_request_config(request_config or {}) if self.hosted else copy.deepcopy(request_config or {})
         self.max_tokens = max_tokens
         self.repair_budget = repair_budget
+        self.route_timeout_s = route_timeout_s
+        self.decision_timeout_s = decision_timeout_s
+        self.unreported_cost_requests = 0
         # Rungs tried in order once the model in hand has spent its repair budget. A judge
         # that cannot produce its own schema is not going to produce it on the fourth ask;
         # a stronger model is a better use of the next request than another repair.
@@ -421,7 +429,9 @@ class Decider:
         if self.output is None:
             return
         self.output.mkdir(parents=True, exist_ok=True)
-        with (self.output / "judgements.jsonl").open("a", encoding="utf-8") as handle:
+        # Progress snapshots must not look like additional billed decisions to log readers.
+        filename = "judge-events.jsonl" if record.get("event") else "judgements.jsonl"
+        with (self.output / filename).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
     async def decide(
@@ -467,7 +477,13 @@ class Decider:
         forced_choice = True
         rung_attempts = 0
         request_start = len(self.request_ms)
+        decision_deadline = time.monotonic() + self.decision_timeout_s
+        route_deadline = min(decision_deadline, time.monotonic() + self.route_timeout_s)
         while rung < len(self.ladder):
+            if time.monotonic() >= decision_deadline:
+                error = "judge decision deadline exceeded"
+                self._log({**record, "event": "decision_timeout", "error": error})
+                break
             if rung_attempts > self.repair_budget:
                 rung += 1
                 if rung == len(self.ladder):
@@ -477,7 +493,15 @@ class Decider:
                 record["escalated_to"] = self.ladder[rung][0]
                 rung_attempts = 0
                 forced_choice = True
+                route_deadline = min(decision_deadline, time.monotonic() + self.route_timeout_s)
             rung_model, rung_settings = self.ladder[rung]
+            remaining = min(route_deadline, decision_deadline) - time.monotonic()
+            if remaining <= 0:
+                error = "judge route deadline exceeded"
+                self._log({**record, "event": "route_timeout", "route_index": rung,
+                           "route_model": rung_model, "error": error})
+                rung_attempts = self.repair_budget + 1
+                continue
             payload: dict[str, Any] = {
                 "model": rung_model, "messages": copy.deepcopy(messages), "tools": [tool],
                 "tool_choice": ({"type": "function", "function": {"name": name}}
@@ -493,7 +517,25 @@ class Decider:
             tick = time.monotonic()
             self.requests += 1
             try:
-                response = await self.send(payload)
+                # Bound the entire transport, including its HTTP attempts and backoff. The
+                # controller uses a separate loop and keeps its existing request timeout.
+                async with asyncio.timeout(remaining):
+                    response = await self.send(payload)
+            except TimeoutError:
+                self.unreported_cost_requests += 1
+                error = "judge route deadline exceeded"
+                detail = {"route_index": rung, "route_model": rung_model,
+                          "deadline_s": round(remaining, 3), "reported_cost_usd": record["cost"],
+                          "cost_unreported": True}
+                record.setdefault("route_timeouts", []).append(detail)
+                self._log({**record, **detail, "event": "route_timeout", "error": error})
+                rung_attempts = self.repair_budget + 1
+                continue
+            except asyncio.CancelledError:
+                self.unreported_cost_requests += 1
+                self._log({**record, "event": "decision_cancelled", "route_index": rung,
+                           "route_model": rung_model, "cost_unreported": True})
+                raise
             except Exception as exc:
                 # The request transport already gave the selected provider route its bounded
                 # retries. If no endpoint on that route can honour forced tool choice, asking it
@@ -508,6 +550,7 @@ class Decider:
                         record.setdefault("route_failures", []).append(str(exc)[:400])
                         rung_attempts = 0
                         forced_choice = True
+                        route_deadline = min(decision_deadline, time.monotonic() + self.route_timeout_s)
                         continue
                     if forced_choice:
                         # Every rung is exhausted and none can honour a *forced* tool choice.
@@ -583,6 +626,9 @@ class Decider:
         return {"decisions": self.decisions, "requests": self.requests,
                 "ladder": [model for model, _ in self.ladder], "escalations": self.escalations,
                 "reported_usd": round(self.total_cost, 8), "request_ms": self.request_ms,
+                "route_timeout_s": self.route_timeout_s, "decision_timeout_s": self.decision_timeout_s,
+                "unreported_cost_requests": self.unreported_cost_requests,
+                "cost_complete": self.unreported_cost_requests == 0,
                 "spend_guard": self.guard.report() if self.guard is not None else None}
 
 

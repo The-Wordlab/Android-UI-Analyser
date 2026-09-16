@@ -31,6 +31,18 @@ must be supported by the target app/platform; unsupported access leaves the prer
 
 ## What broke on a real application
 
+Judge latency is bounded independently of the controller: `Decider` defaults to 45 seconds per
+provider/model route (including every transport retry, backoff and schema repair), and 90 seconds
+per vote. Two-vote judging therefore takes at most roughly three minutes of model requests, not
+120-second HTTP timeouts multiplied by four transport attempts and repair rounds. A timeout
+cancels that transport coroutine, emits a `route_timeout` diagnostic immediately, and advances
+the configured ladder while the decision deadline remains. Controller request limits are unchanged.
+
+Reported charges are retained after failure. A timed-out or cancelled request has unknown usage,
+not proven zero cost: `cost_complete: false` and `unreported_cost_requests` in the decider report
+make that gap explicit, and the run's cost summary is marked incomplete. Graceful cancellation
+still writes an unverified result and performs session cleanup; it cannot produce a passing vote.
+
 | Symptom | Measured | Cause |
 |---|---|---|
 | Correct run never registers as done | 6 rejected `session_finish`, 13 wasted steps after the goal was met | Completion was fixture-contract-only. A real `session_start` has no machine contract, so `session_finish` returns `finished: false` forever and the model hunts for evidence. |
