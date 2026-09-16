@@ -172,6 +172,12 @@ proof_unavailable}` warning and saves no candidate; the evidence verdict is unch
 Missing, corrupt, incomplete or failed execution journals remain execution errors, and
 real recording/session cleanup failures still invalidate the run independently.
 
+Judge validation may truncate only oversized optional `satisfied`/`unsatisfied` narrative
+arrays to their advertised item count, after validating every item (including the discarded
+tail). Diagnostics contain field names and counts, never narrative content. Required
+`reasons`, verdict/confidence and criterion identities/results/evidence are never clipped;
+the per-criterion evidence remains the acceptance authority.
+
 The real-app compact surface adds two navigation actions without widening the fixed fixture
 comparison profile. `long_press_and_analyze` accepts only a fresh element id from the current AUA
 observation, so pin, unpin and rename menus retain AUA's stale-selector refusal. The separate

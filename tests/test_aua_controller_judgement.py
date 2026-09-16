@@ -21,6 +21,7 @@ from experiments.aua_controller.judgement import (
     contract_max_tokens,
     judge_outcome_votes,
     judge_route_budget,
+    normalize_optional_summaries,
     outcome_schema,
     relaxed_json_answer,
     summarize_route,
@@ -364,6 +365,62 @@ def test_native_tool_is_preferred_over_message_content_after_route_relaxation():
     result = asyncio.run(decider(sender).decide(role="judge", instructions="i", question="q", context={},
                                               schema=OUTCOME_SCHEMA, name="record_verdict"))
     assert result["result"]["verdict"] == "fail"
+
+
+@pytest.mark.parametrize("field", ["satisfied", "unsatisfied"])
+@pytest.mark.parametrize("text_response", [False, True])
+def test_optional_summary_overflow_never_invalidates_strict_criteria(tmp_path, field, text_response):
+    answer = {**verdict("unverified"), field: ["private-summary@example.test"] * 11,
+              "criteria": [{"criterion_index": 0, "result": "not_verified",
+                            "evidence": "Independent system state unavailable."}]}
+    response = tool_reply("record_verdict", answer)
+    if text_response:
+        response["choices"][0]["message"] = {"role": "assistant", "content": json.dumps(answer)}
+        response["choices"][0]["finish_reason"] = "stop"
+    sender = Sender([RuntimeError("HTTP 404: No endpoints found that support the provided 'tool_choice' value"),
+                     response])
+    result = asyncio.run(decider(sender, repair_budget=0, output=tmp_path).decide(
+        role="judge", instructions="i", question="q", context={}, name="record_verdict",
+        schema=outcome_schema("- Device default follows system."),
+        criteria_order=["Device default follows system."]))
+    assert result["repairs"] == 0 and len(sender.payloads) == 2
+    assert len(result["result"][field]) == 8
+    assert result["result"]["verdict"] == "unverified"
+    assert result["result"]["criteria"] == [{"criterion": "Device default follows system.",
+        "result": "not_verified", "evidence": "Independent system state unavailable."}]
+    events = (tmp_path / "judge-events.jsonl").read_text()
+    normalized = [json.loads(line) for line in events.splitlines()
+                  if json.loads(line).get("event") == "optional_summary_normalized"]
+    assert normalized[0]["fields"] == [{"field": field, "original_count": 11, "retained_count": 8}]
+    assert "private-summary@example.test" not in events
+
+
+@pytest.mark.parametrize("field,value", [
+    ("reasons", ["reason"] * 7), ("confidence", 2), ("verdict", "maybe"),
+    ("criteria", [{"criterion_index": 0, "result": "verified", "evidence": "observed"}] * 2),
+    ("criteria", [{"criterion_index": 1, "result": "verified", "evidence": "observed"}]),
+    ("criteria", [{"criterion_index": 0, "result": "maybe", "evidence": "observed"}]),
+    ("criteria", [{"criterion_index": 0, "result": "verified", "evidence": "x" * 401}]),
+    ("satisfied", ["valid"] * 8 + [42]), ("satisfied", ["valid"] * 8 + ["x" * 201]),
+])
+def test_optional_summary_normalization_never_repairs_authoritative_or_malformed_fields(field, value):
+    schema = outcome_schema("- One criterion.")
+    answer = {**verdict("pass"), "satisfied": ["summary"] * 11,
+              "criteria": [{"criterion_index": 0, "result": "verified", "evidence": "observed"}],
+              field: value}
+    normalized, _ = normalize_optional_summaries(answer, schema)
+    assert normalized[field] == value
+    import jsonschema
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(normalized, schema)
+
+
+def test_optional_summary_normalization_preserves_missing_and_required_fields():
+    schema = copy.deepcopy(OUTCOME_SCHEMA)
+    schema["required"].append("satisfied")
+    answer = {"satisfied": ["summary"] * 11}
+    assert normalize_optional_summaries(answer, schema) == (answer, [])
+    assert normalize_optional_summaries({}, OUTCOME_SCHEMA) == ({}, [])
 
 
 def test_schema_repair_diagnostics_never_include_private_model_content(tmp_path):

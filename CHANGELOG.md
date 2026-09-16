@@ -13,6 +13,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Judge replies with oversized optional `satisfied`/`unsatisfied` summaries now retain only
+  the schema-bounded prefix, with content-free normalization diagnostics. Every item must
+  already be valid; required fields, verdicts and criterion identities/results/evidence
+  remain strict and unchanged.
 - Optional primary-flow preview/export failures now produce a sanitized QA warning and no
   replay candidate, without rewriting product evidence or falsely marking cleanup failed.
   Corrupt/incomplete execution journals and actual lifecycle cleanup failures remain blocking.

@@ -74,6 +74,29 @@ def contract_criteria(contract: str | None) -> list[str]:
     return criteria
 
 
+def normalize_optional_summaries(answer: Any, schema: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
+    """Bound unused narrative summaries only; never repair authoritative or required fields."""
+    if not isinstance(answer, dict):
+        return answer, []
+    normalized = dict(answer)
+    changes: list[dict[str, Any]] = []
+    for field in ("satisfied", "unsatisfied"):
+        spec = schema.get("properties", {}).get(field, {})
+        values = answer.get(field)
+        maximum = spec.get("maxItems")
+        if (field in schema.get("required", []) or spec.get("type") != "array"
+                or not isinstance(values, list) or type(maximum) is not int
+                or maximum < 0 or len(values) <= maximum):
+            continue
+        # Do not conceal malformed values, including those beyond the retained prefix.
+        validator = jsonschema.validators.validator_for(schema)(spec.get("items", {}))
+        if not all(validator.is_valid(value) for value in values):
+            continue
+        normalized[field] = values[:maximum]
+        changes.append({"field": field, "original_count": len(values), "retained_count": maximum})
+    return normalized, changes
+
+
 def contract_max_tokens(requested: int, contract: str | None) -> int:
     """Reserve enough output for compact criterion indexes plus concise evidence."""
     criteria = contract_criteria(contract)
@@ -684,15 +707,20 @@ class Decider:
                 message, native = completion(response)
                 if native is None and not forced_choice:
                     candidate_answer = relaxed_json_answer(message.get("content"))
-                    # Only the advertised compact schema qualifies for text recovery; do not
-                    # use legacy-label normalization to rescue arbitrary prose-shaped output.
-                    jsonschema.validate(candidate_answer, schema)
                     record["response_format"] = "relaxed_json_content"
                 elif native is not None and native.get("name") == name:
                     candidate_answer = native["arguments"]
                     record["response_format"] = "native_tool"
                 else:
                     raise RunError("decider did not answer with the required tool call")
+                candidate_answer, summary_changes = normalize_optional_summaries(candidate_answer, schema)
+                if summary_changes:
+                    self._log({"event": "optional_summary_normalized", "route_index": rung,
+                               "route_model": rung_model, "fields": summary_changes})
+                if record["response_format"] == "relaxed_json_content":
+                    # Only the advertised compact schema qualifies for text recovery; do not
+                    # use legacy-label normalization to rescue arbitrary prose-shaped output.
+                    jsonschema.validate(candidate_answer, schema)
                 answer = normalize_contract_answer(candidate_answer, criteria_order)
                 jsonschema.validate(answer, schema)
                 if criteria_order:
