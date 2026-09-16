@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from experiments.aua_controller.run_realapp import RunError, export_primary_flow
+from experiments.aua_controller.run_realapp import (
+    ControllerJournalError,
+    RunError,
+    export_primary_flow,
+)
 
 
 def _journal(tmp_path, entries):
@@ -71,3 +75,10 @@ def test_pure_observation_never_steals_setup_actions(tmp_path):
 
     result = asyncio.run(export_primary_flow(forbidden, tmp_path))
     assert result == {"route_action_count": 0, "flow_not_applicable_reason": "observation_only_no_actions"}
+
+
+def test_malformed_journal_is_execution_error_not_optional_export_failure(tmp_path):
+    _journal(tmp_path, [])
+    (tmp_path / "controller/tool-calls.jsonl").write_text("not JSON\n")
+    with pytest.raises(ControllerJournalError):
+        asyncio.run(export_primary_flow(None, tmp_path))

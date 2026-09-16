@@ -165,6 +165,13 @@ recording stops → `session_finish allow_incomplete: true` releases the target 
 harness default so guest and limited-access scenarios do not silently receive capabilities their
 persona withholds.
 
+`--save-primary-flow` requests a replay candidate, not another acceptance criterion.
+If a complete clean controller journal cannot be exported with exact replay scope, the
+runner emits a sanitized `primary_flow_export: {status: unavailable, reason:
+proof_unavailable}` warning and saves no candidate; the evidence verdict is unchanged.
+Missing, corrupt, incomplete or failed execution journals remain execution errors, and
+real recording/session cleanup failures still invalidate the run independently.
+
 The real-app compact surface adds two navigation actions without widening the fixed fixture
 comparison profile. `long_press_and_analyze` accepts only a fresh element id from the current AUA
 observation, so pin, unpin and rename menus retain AUA's stale-selector refusal. The separate

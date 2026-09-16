@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Optional primary-flow preview/export failures now produce a sanitized QA warning and no
+  replay candidate, without rewriting product evidence or falsely marking cleanup failed.
+  Corrupt/incomplete execution journals and actual lifecycle cleanup failures remain blocking.
 - An explicit forced-tool capability rejection no longer consumes the relaxed answer's time
   allowance. The relaxed request receives up to 45 seconds, still capped by the unchanged
   absolute vote deadline, with renewed-budget diagnostics and normal cancellation handling.

@@ -634,6 +634,16 @@ def forbidden_foreground(payload: dict[str, Any], forbidden: Sequence[str]) -> s
     return None
 
 
+class ControllerJournalError(RunError):
+    """Execution itself is incomplete/unproved, independently of optional replay export."""
+
+
+class PrimaryFlowUnavailable(RunError):
+    def __init__(self, count: int):
+        super().__init__("primary flow preview could not prove the exact clean controller action suffix")
+        self.route_action_count = count
+
+
 async def export_primary_flow(call, output: Path) -> dict[str, Any]:
     """Export only a clean controller action suffix, never write shared flow memory."""
     action_tools = {
@@ -645,36 +655,44 @@ async def export_primary_flow(call, output: Path) -> dict[str, Any]:
     read_tools = {"analyze_screen", "wait_and_analyze", "session_progress", "session_finish"}
     path = output / "controller/tool-calls.jsonl"
     if not path.is_file():
-        raise RunError("primary flow requires the controller action journal")
+        raise ControllerJournalError("primary flow requires the controller action journal")
+    try:
+        entries = _load_jsonl(path)
+    except (OSError, ValueError):
+        raise ControllerJournalError("controller action journal is unreadable") from None
     count = 0
-    for entry in _load_jsonl(path):
+    for entry in entries:
         if not isinstance(entry, dict):
-            raise RunError("primary flow action journal is malformed")
+            raise ControllerJournalError("primary flow action journal is malformed")
         if entry.get("dispatch_started") and entry.get("executed") is not True:
-            raise RunError("primary flow has an action with unknown execution outcome")
+            raise ControllerJournalError("primary flow has an action with unknown execution outcome")
         if entry.get("executed") is not True:
             continue
         name = entry.get("tool")
         if name in read_tools:
             continue
         if name not in action_tools:
-            raise RunError("primary flow contains an unsupported controller action")
+            raise ControllerJournalError("primary flow contains an unsupported controller action")
         action = entry.get("result")
         if (not isinstance(action, dict) or action.get("ok") is not True
                 or action.get("error") or action.get("mcp_is_error")):
-            raise RunError("primary flow contains a failed or unverified controller action")
+            raise ControllerJournalError("primary flow contains a failed or unverified controller action")
         count += 1
     if count == 0:
         return {"route_action_count": 0, "flow_not_applicable_reason": "observation_only_no_actions"}
-    preview = await call("flow_save", {"name": "controller-route", "last": count, "save": False}, "evidence")
-    scope = preview.get("scope") or {}
-    body = preview.get("preview")
-    if (preview.get("ok") is not True or preview.get("steps") != count
-            or scope.get("requested_last") != count or scope.get("selected") != count
-            or scope.get("boundary_omitted") not in (0, None)
-            or not isinstance(body, str) or not body.strip()):
-        raise RunError("primary flow preview could not prove the exact clean controller action suffix")
-    (output / "flow.yaml").write_text(body.rstrip() + "\n", encoding="utf-8")
+    try:
+        preview = await call("flow_save", {"name": "controller-route", "last": count, "save": False}, "evidence")
+        scope = preview.get("scope") or {}
+        body = preview.get("preview")
+        if (preview.get("ok") is not True or preview.get("steps") != count
+                or scope.get("requested_last") != count or scope.get("selected") != count
+                or scope.get("boundary_omitted") not in (0, None)
+                or not isinstance(body, str) or not body.strip()):
+            raise PrimaryFlowUnavailable(count)
+        (output / "flow.yaml").write_text(body.rstrip() + "\n", encoding="utf-8")
+    except Exception:
+        (output / "flow.yaml").unlink(missing_ok=True)
+        raise PrimaryFlowUnavailable(count) from None
     return {"route_action_count": count, "primary_flow": "flow.yaml"}
 
 
@@ -1694,10 +1712,19 @@ async def run_realapp(
         if save_primary_flow and (judged.get("verdict") in {"pass", "pass_with_warning"} or evidence_gap_only):
             try:
                 result.update(await export_primary_flow(call, output))
-            except Exception:
-                message = "Primary flow export could not prove a clean replayable controller route."
-                result["primary_flow_error"] = message
-                _mark_cleanup_failure(result, message)
+            except ControllerJournalError:
+                message = "Controller execution journal could not prove complete successful actions."
+                result["execution_error"] = result["error"] = message
+                result["verdict"].update(verdict="unverified", verified=False)
+                result["verdict"].setdefault("reasons", []).append(message)
+            except PrimaryFlowUnavailable as exc:
+                message = "Optional primary flow export unavailable; no replayable flow was proved or saved."
+                result["route_action_count"] = exc.route_action_count
+                result["primary_flow_warning"] = message
+                result["primary_flow_export"] = {"status": "unavailable", "reason": "proof_unavailable"}
+                result["warnings"].append(message)
+        if result.get("foreground_guard"):
+            raise RunError("forbidden package entered the foreground during evidence collection")
         if result.get("recording_cleanup_error"):
             _mark_cleanup_failure(result, str(result["recording_cleanup_error"]))
         if name_screens:

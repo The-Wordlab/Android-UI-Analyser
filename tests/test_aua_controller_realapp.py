@@ -667,9 +667,13 @@ def test_database_setup_proof_rechecks_and_never_logs_private_results(tmp_path, 
 
 @pytest.mark.parametrize("saveable", [True, False])
 @pytest.mark.parametrize("evidence_gap", [True, False])
-def test_primary_flow_preview_runs_before_cleanup_and_cannot_hide_failure(tmp_path, saveable, evidence_gap):
+@pytest.mark.parametrize("cleanup_fails", [True, False])
+def test_primary_flow_preview_runs_before_cleanup_and_cannot_hide_failure(tmp_path, saveable, evidence_gap, cleanup_fails):
     class FlowAua(FakeAua):
         async def call_tool(self, name, arguments):
+            if name == "session_finish" and cleanup_fails:
+                self.calls.append((name, copy.deepcopy(arguments)))
+                return {"ok": False, "finished": False, "error": "cleanup refused"}
             if name == "flow_save":
                 self.calls.append((name, copy.deepcopy(arguments)))
                 return {"ok": saveable, "steps": 1, "scope": {"requested_last": 1,
@@ -698,11 +702,36 @@ def test_primary_flow_preview_runs_before_cleanup_and_cannot_hide_failure(tmp_pa
         assert result["primary_flow"] == "flow.yaml"
         assert result["route_action_count"] == 1
         assert (tmp_path / "run/flow.yaml").is_file()
-        assert result["verdict"]["verdict"] == ("unverified" if evidence_gap else "pass")
     else:
-        assert result["verdict"]["verdict"] == "unverified"
-        assert result["primary_flow_error"]
+        assert result["primary_flow_warning"]
+        assert result["primary_flow_export"] == {"status": "unavailable", "reason": "proof_unavailable"}
+        assert result["route_action_count"] == 1
         assert not (tmp_path / "run/flow.yaml").exists()
+    if cleanup_fails:
+        assert result["verdict"]["verdict"] == "unverified"
+        assert result["verdict"]["cleanup_verified"] is False
+        assert result["cleanup_error"]
+    else:
+        assert result["verdict"]["verdict"] == ("unverified" if evidence_gap else "pass")
+        assert not result["error"]
+        assert result["verdict"].get("cleanup_verified") is not False
+
+
+def test_corrupt_execution_is_not_downgraded_to_optional_flow_warning(tmp_path, monkeypatch):
+    from experiments.aua_controller import run_realapp as module
+
+    async def corrupt(*args):
+        raise module.ControllerJournalError("unknown execution outcome")
+
+    monkeypatch.setattr(module, "export_primary_flow", corrupt)
+    model = FakeModel(
+        controller=[model_call("session_finish", {"outcome": "achieved", "note": "observed"})],
+        judgements={"record_verdict": [verdict("pass", "observed"), verdict("pass", "observed")]},
+    )
+    result = run(tmp_path, FakeAua(), model, save_primary_flow=True)
+    assert result["verdict"]["verdict"] == "unverified" and result["execution_error"]
+    assert not result.get("primary_flow_warning")
+    assert result["verdict"].get("cleanup_verified") is not False
 
 
 def test_failed_judgement_spend_survives_in_result_and_markdown(tmp_path):
