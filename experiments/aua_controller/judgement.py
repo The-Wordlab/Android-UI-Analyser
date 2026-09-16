@@ -18,7 +18,9 @@ import base64
 import copy
 import io
 import json
+import re
 import time
+import unicodedata
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -105,6 +107,59 @@ def outcome_schema(contract: str | None) -> dict[str, Any]:
     }
     schema["required"].append("criteria")
     return schema
+
+
+def normalize_contract_answer(answer: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """Repair identity-preserving formatting only; missing evidence stays not verified."""
+    criteria_schema = schema.get("properties", {}).get("criteria")
+    if not criteria_schema or "criteria" not in answer:
+        return answer
+    expected = criteria_schema["items"]["properties"]["criterion"]["enum"]
+
+    def key(value: str) -> str:
+        text = unicodedata.normalize("NFKC", value).translate(str.maketrans({
+            "’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-",
+        }))
+        return re.sub(r"\s+", " ", text).strip().removesuffix(".").casefold()
+
+    canonical = {key(item): item for item in expected}
+    if len(canonical) != len(expected):
+        raise RunError("contract contains ambiguous duplicate criterion labels")
+    supplied = answer["criteria"]
+    if isinstance(supplied, dict):
+        supplied = [{"criterion": label, **entry} if isinstance(entry, dict) else entry
+                    for label, entry in supplied.items()]
+    if not isinstance(supplied, list) or not supplied:
+        raise RunError("criteria must be a non-empty list of criterion/result/evidence objects")
+    found: dict[str, dict[str, Any]] = {}
+    for raw in supplied:
+        if not isinstance(raw, dict):
+            raise RunError("each criteria entry needs criterion, result, and observed evidence")
+        entry = dict(raw)
+        if "criterion" not in entry and "name" in entry:
+            entry["criterion"] = entry.pop("name")
+        label = entry.get("criterion")
+        if isinstance(label, list) and len(label) == 1:
+            label = label[0]
+        if not isinstance(label, str) or key(label) not in canonical:
+            raise RunError("criterion must identify exactly one authored bullet, not the whole list")
+        label = canonical[key(label)]
+        if label in found:
+            raise RunError("criteria contains a duplicate authored bullet; return each exactly once")
+        entry["criterion"] = label
+        found[label] = entry
+    result = copy.deepcopy(answer)
+    result["criteria"] = [found.get(label, {
+        "criterion": label, "result": "not_verified", "evidence": "Judge omitted this criterion; no evidence was supplied.",
+    }) for label in expected]
+    statuses = [item.get("result") for item in result["criteria"]]
+    if "failed" in statuses:
+        result["verdict"] = "fail"
+    elif "not_verified" in statuses and result.get("verdict") in {"pass", "pass_with_warning"}:
+        result["verdict"] = "unverified"
+    return result
+
+
 SCREEN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -410,16 +465,18 @@ class Decider:
         error: str | None = None
         rung = 0
         forced_choice = True
-        attempts = (self.repair_budget + 1) * len(self.ladder)
-        for attempt in range(attempts):
-            # Each rung gets the full repair budget before the next one is asked at all.
-            if attempt and attempt % (self.repair_budget + 1) == 0 and rung + 1 < len(self.ladder):
+        rung_attempts = 0
+        request_start = len(self.request_ms)
+        while rung < len(self.ladder):
+            if rung_attempts > self.repair_budget:
                 rung += 1
+                if rung == len(self.ladder):
+                    break
                 self.escalations += 1
                 record["escalations"] = rung
                 record["escalated_to"] = self.ladder[rung][0]
-                # No extra nudge: the failed repair already appended what was wrong with the
-                # last answer, and the stronger model reads the same thread.
+                rung_attempts = 0
+                forced_choice = True
             rung_model, rung_settings = self.ladder[rung]
             payload: dict[str, Any] = {
                 "model": rung_model, "messages": copy.deepcopy(messages), "tools": [tool],
@@ -437,7 +494,7 @@ class Decider:
             self.requests += 1
             try:
                 response = await self.send(payload)
-            except BaseException as exc:  # noqa: BLE001 - preserve non-routing failures unchanged
+            except Exception as exc:
                 # The request transport already gave the selected provider route its bounded
                 # retries. If no endpoint on that route can honour forced tool choice, asking it
                 # again cannot repair the schema; move immediately to the configured stronger
@@ -449,6 +506,8 @@ class Decider:
                         record["escalations"] = rung
                         record["escalated_to"] = self.ladder[rung][0]
                         record.setdefault("route_failures", []).append(str(exc)[:400])
+                        rung_attempts = 0
+                        forced_choice = True
                         continue
                     if forced_choice:
                         # Every rung is exhausted and none can honour a *forced* tool choice.
@@ -462,32 +521,50 @@ class Decider:
                         record.setdefault("route_failures", []).append(str(exc)[:400])
                         record["tool_choice_relaxed"] = True
                         continue
-                raise
-            elapsed = (time.monotonic() - tick) * 1000
-            self.request_ms.append(elapsed)
-            if not isinstance(response, dict):
-                raise RunError("decider response must be a JSON object")
-            usage = response.get("usage")
+                # Transport already applied its own bounded retries. A broken provider must
+                # not prevent the next configured judge from answering the same question.
+                if isinstance(exc, HostedError):
+                    raise
+                error = "judge transport failed: " + type(exc).__name__
+                record.setdefault("route_failures", []).append(error)
+                rung_attempts = self.repair_budget + 1
+                continue
+            finally:
+                self.request_ms.append((time.monotonic() - tick) * 1000)
+            usage = response.get("usage") if isinstance(response, dict) else None
             record["usage"].append(usage)
-            if self.guard is not None:
+            if self.guard is not None and isinstance(response, dict):
                 self.guard.consume(response)
-                record["cost"] += float((usage or {}).get("cost") or 0)
-            record["model"] = response.get("model")
-            record["provider"] = response.get("provider")
+                spent = float((usage or {}).get("cost") or 0)
+                record["cost"] += spent
+                self.total_cost += spent
             try:
+                if not isinstance(response, dict):
+                    raise RunError("decider response must be a JSON object")
+                record["model"] = response.get("model")
+                record["provider"] = response.get("provider")
                 message, native = completion(response)
                 if native is None or native.get("name") != name:
                     raise RunError("decider did not answer with the required tool call")
-                jsonschema.validate(native["arguments"], schema)
-                result = native["arguments"]
+                answer = normalize_contract_answer(native["arguments"], schema)
+                jsonschema.validate(answer, schema)
+                result = answer
                 break
             except (RunError, jsonschema.ValidationError) as exc:
-                error = str(getattr(exc, "message", exc))[:400]
-                record["repairs"] = attempt + 1
+                if isinstance(exc, jsonschema.ValidationError):
+                    path = ".".join(str(item) for item in exc.absolute_path) or "answer"
+                    error = f"{path}: violates {exc.validator}; follow the offered field schema"
+                else:
+                    error = str(exc)[:400]
+                rung_attempts += 1
+                record["repairs"] += 1
                 messages.append({"role": "user", "content": "Your previous answer was invalid: " + error
                                  + ". Answer again with exactly one valid call to " + name + "."})
-        record["request_ms"] = sum(self.request_ms[-(record["repairs"] + 1):])
-        self.total_cost += record["cost"]
+                if error == "model completion truncated" and rung + 1 < len(self.ladder):
+                    # Repeating the same reasoning-only token exhaustion wastes the repair
+                    # budget; the configured next judge has a different completion envelope.
+                    rung_attempts = self.repair_budget + 1
+        record["request_ms"] = sum(self.request_ms[request_start:])
         if result is None:
             record["error"] = error
             self._log(record)

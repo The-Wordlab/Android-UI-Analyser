@@ -666,7 +666,8 @@ def test_database_setup_proof_rechecks_and_never_logs_private_results(tmp_path, 
 
 
 @pytest.mark.parametrize("saveable", [True, False])
-def test_primary_flow_preview_runs_before_cleanup_and_cannot_hide_failure(tmp_path, saveable):
+@pytest.mark.parametrize("evidence_gap", [True, False])
+def test_primary_flow_preview_runs_before_cleanup_and_cannot_hide_failure(tmp_path, saveable, evidence_gap):
     class FlowAua(FakeAua):
         async def call_tool(self, name, arguments):
             if name == "flow_save":
@@ -677,22 +678,49 @@ def test_primary_flow_preview_runs_before_cleanup_and_cannot_hide_failure(tmp_pa
             return await super().call_tool(name, arguments)
 
     aua = FlowAua()
+    judgement = verdict("pass", "observed")
+    if evidence_gap:
+        judgement = model_call("record_verdict", {
+            "verdict": "unverified", "confidence": 0.8, "reasons": ["device default not observed"],
+            "criteria": [{"criterion": "Device default follows system.", "result": "not_verified",
+                          "evidence": "system mode unavailable"}],
+        })
     model = FakeModel(
         controller=[model_call("tap_and_analyze", {"id": "el:fp-home-1"}),
                     model_call("session_finish", {"outcome": "achieved", "note": "observed"})],
-        judgements={"record_verdict": [verdict("pass", "observed"), verdict("pass", "observed")]},
+        judgements={"record_verdict": [judgement, judgement]},
     )
-    result = run(tmp_path, aua, model, save_primary_flow=True)
+    result = run(tmp_path, aua, model, save_primary_flow=True,
+                 contract="- Device default follows system." if evidence_gap else None)
     names = [name for name, _ in aua.calls]
     assert names.index("flow_save") < names.index("session_finish")
     if saveable:
         assert result["primary_flow"] == "flow.yaml"
         assert result["route_action_count"] == 1
         assert (tmp_path / "run/flow.yaml").is_file()
+        assert result["verdict"]["verdict"] == ("unverified" if evidence_gap else "pass")
     else:
         assert result["verdict"]["verdict"] == "unverified"
         assert result["primary_flow_error"]
         assert not (tmp_path / "run/flow.yaml").exists()
+
+
+def test_failed_judgement_spend_survives_in_result_and_markdown(tmp_path):
+    aua = FakeAua()
+    invalid = model_call("record_verdict", {"verdict": "invalid"}, cost=0.005)
+    model = FakeModel(
+        controller=[model_call("session_finish", {"outcome": "achieved", "note": "observed"}, cost=0.003)],
+        judgements={"record_verdict": [invalid, invalid]},
+    )
+    result = run(tmp_path, aua, model)
+    assert result["verdict"]["verdict"] == "unverified" and result["error"]
+    assert result["cost"]["controller"]["usd"] == pytest.approx(0.003)
+    assert result["cost"]["judge"]["usd"] == pytest.approx(0.010)
+    assert result["cost"]["total_usd"] == pytest.approx(0.013)
+    assert result["cost"]["judge"]["decider"]["requests"] == 2
+    saved = json.loads((tmp_path / "run/result.json").read_text())
+    assert saved["cost"]["total_usd"] == pytest.approx(0.013)
+    assert "0.013000" in (tmp_path / "run/verdict.md").read_text()
 
 
 def test_realapp_puts_host_knowledge_into_the_first_user_message(tmp_path):

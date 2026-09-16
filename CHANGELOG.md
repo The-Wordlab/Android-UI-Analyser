@@ -13,6 +13,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Real-app judging keeps routing retries separate from each model's schema-repair budget,
+  escalates reasoning-only exhaustion, and normalizes unambiguous criterion formatting while
+  leaving missing evidence unverified. Failed judgement spend remains in report totals. Safe
+  primary-flow previews may accompany an unverified evidence gap without promoting the verdict.
 - The real-app harness supports opt-in private database setup proof through its existing
   read-only database API. A device-clock boundary and SQL-level expected-label allowlist keep
   stale evidence and private fields out of reports; final revalidation revokes obsolete proof.

@@ -1127,6 +1127,8 @@ async def run_realapp(
     setup_notes: list[str] = []
     setup_facts: list[str] = [str(item) for item in inherited_setup_facts]
     recording_started = False
+    decider: Decider | None = None
+    namer_decider: Decider | None = None
     recording_path = (output / "journey.mp4").resolve()
     aua_artifacts_dir = (
         Path(session_artifacts_dir).resolve()
@@ -1677,7 +1679,17 @@ async def run_realapp(
             reason = report.get("error") or f"controller stopped with {stop}"
             result["verdict"] = {"oracle": "none", "verified": False, "verdict": "unverified",
                                  "reasons": [str(reason)[:300]], "controller_stop_reason": stop}
-        if save_primary_flow and (result.get("verdict") or {}).get("verdict") in {"pass", "pass_with_warning"}:
+        judged = result.get("verdict") or {}
+        checks = judged.get("criteria") or []
+        evidence_gap_only = (
+            judged.get("verdict") == "unverified" and bool(checks) and bool(judged.get("votes"))
+            and any(item.get("result") == "not_verified" for item in checks)
+            and all(item.get("result") in {"verified", "not_verified", "not_applicable"}
+                    for item in checks)
+            and all(vote.get("verdict") in {"pass", "pass_with_warning", "unverified"}
+                    and not vote.get("blocker") for vote in judged["votes"])
+        )
+        if save_primary_flow and (judged.get("verdict") in {"pass", "pass_with_warning"} or evidence_gap_only):
             try:
                 result.update(await export_primary_flow(call, output))
             except Exception:
@@ -1720,6 +1732,16 @@ async def run_realapp(
             result["verdict"] = {"oracle": "none", "verified": False, "verdict": "unverified",
                                  "reasons": [result["error"][:300]]}
     finally:
+        # Failed judge/schema attempts still consumed paid tokens. Preserve their own role's
+        # accounting even when the call raised before returning an aggregate verdict.
+        for role, decision_maker, decision_model in (
+            ("judge", decider, judging_model), ("map", namer_decider, model),
+        ):
+            if decision_maker is not None:
+                prior = result["cost"].get(role) or {}
+                result["cost"][role] = {**prior, "model": decision_model,
+                    "provider": prior.get("provider"), "usd": decision_maker.total_cost,
+                    "decider": decision_maker.report()}
         if recording_started:
             try:
                 stopped_recording = await stop_recording("cleanup")

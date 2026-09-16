@@ -19,6 +19,7 @@ from experiments.aua_controller.judgement import (
     contract_criteria,
     contract_max_tokens,
     judge_outcome_votes,
+    outcome_schema,
     summarize_route,
 )
 from experiments.aua_controller.run_live import RunError
@@ -158,6 +159,70 @@ def test_decider_has_its_own_spend_stop():
     with pytest.raises(HostedError, match="cost limit"):
         asyncio.run(judge.decide(role="r", instructions="i", question="q", context={}, schema=OUTCOME_SCHEMA, name="record_verdict"))
     assert judge.report()["decisions"] == 2 and judge.report()["reported_usd"] == pytest.approx(0.04)
+
+
+def test_reasoning_exhaustion_route_relaxation_and_schema_repair_have_separate_budgets():
+    contract = "- Theme selected.\n- Device default follows system."
+    truncated = {"model": "reasoning/model", "usage": {"cost": 0.01},
+                 "choices": [{"finish_reason": "length", "message": {"role": "assistant"}}]}
+    invalid = {**verdict("unverified"), "criteria": [{
+        "criterion": contract_criteria(contract), "result": "not_verified", "evidence": "not seen",
+    }]}
+    usable = {**verdict("pass"), "criteria": {
+        "theme selected": {"result": "verified", "evidence": "selection is visible"},
+        "Device default follows system.": {"result": "not_verified", "evidence": "system setting unseen"},
+    }}
+    sender = Sender([truncated, RuntimeError(
+        "HTTP 404: No endpoints found that support the provided 'tool_choice' value"),
+        tool_reply("record_verdict", invalid), tool_reply("record_verdict", usable)])
+    subject = decider(sender, fallbacks=[("fictional/fallback", SETTINGS)])
+    result = asyncio.run(subject.decide(role="judge", instructions="i", question="q", context={},
+                                       schema=outcome_schema(contract), name="record_verdict"))
+    assert result["result"]["verdict"] == "unverified"
+    assert result["result"]["criteria"][1]["result"] == "not_verified"
+    assert [item["model"] for item in sender.payloads] == [
+        "fictional/model", "fictional/fallback", "fictional/fallback", "fictional/fallback",
+    ]
+    assert sender.payloads[-1]["tool_choice"] == "auto"
+    assert "exactly one authored bullet" in sender.payloads[-1]["messages"][-1]["content"]
+    assert result["cost"] == pytest.approx(0.011)
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("provider timeout"), None])
+def test_transport_or_nonobject_reply_can_reach_valid_fallback(failure):
+    replies = ([failure] if isinstance(failure, Exception) else [None, None])
+    sender = Sender([*replies, tool_reply("record_verdict", verdict("pass"))])
+    result = asyncio.run(decider(sender, fallbacks=[("fictional/fallback", SETTINGS)]).decide(
+        role="judge", instructions="i", question="q", context={},
+        schema=OUTCOME_SCHEMA, name="record_verdict"))
+    assert result["result"]["verdict"] == "pass" and result["escalations"] == 1
+
+
+def test_criterion_reordering_and_missing_evidence_never_invent_a_pass():
+    contract = "- First surface.\n- Second surface.\n- Device default."
+    answer = {**verdict("pass"), "criteria": [
+        {"name": "second  surface", "result": "verified", "evidence": "visible second"},
+        {"criterion": ["First surface."], "result": "verified", "evidence": "visible first"},
+    ]}
+    sender = Sender([tool_reply("record_verdict", answer)])
+    result = asyncio.run(judge_outcome_votes(decider(sender), votes=1, goal="theme", final_frame=frame(),
+                                             contract=contract))
+    assert [item["criterion"] for item in result["criteria"]] == contract_criteria(contract)
+    assert result["criteria"][-1]["result"] == "not_verified"
+    assert result["verdict"] == "unverified"
+
+
+def test_duplicate_criteria_fail_inside_the_repair_loop_not_after_it():
+    contract = "- First surface.\n- Second surface."
+    entry = {"criterion": "First surface.", "result": "verified", "evidence": "visible"}
+    bad = {**verdict("pass"), "criteria": [entry, entry]}
+    fixed = {**verdict("fail"), "criteria": [entry, {
+        "criterion": "Second surface.", "result": "failed", "evidence": "wrong palette visible",
+    }]}
+    sender = Sender([tool_reply("record_verdict", bad), tool_reply("record_verdict", fixed)])
+    result = asyncio.run(judge_outcome_votes(decider(sender), votes=1, goal="theme", final_frame=frame(),
+                                             contract=contract))
+    assert result["verdict"] == "fail" and len(sender.payloads) == 2
 
 
 def test_decider_rejects_bad_budgets_and_backends():
