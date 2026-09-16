@@ -41,6 +41,14 @@ them by source, and restores the exact authored `criterion` labels. Missing entr
 the bounded repair/fallback path. Legacy exact-label replies remain readable internally, but are
 not advertised as the model's output format.
 
+When every applicable provider refuses forced tool choice and the host has relaxed it to `auto`,
+a response without a native call may supply exactly one JSON object in `message.content`, either
+plain or inside one JSON code fence. The host validates that object against the compact wire
+schema before restoring labels. It never extracts JSON from prose or reasoning, accepts multiple
+objects/duplicate keys, or overrides a native call with content. Native calls remain preferred;
+this recovery is disabled while forced tool choice is active. Sanitized `schema_repair` entries
+in `judge-events.jsonl` identify the failing field/constraint without recording the answer text.
+
 Judge latency is bounded independently of the controller: `Decider` defaults to 45 seconds per
 provider/model route (including every transport retry, backoff and schema repair), and 90 seconds
 per vote. Each route gets at most its fair share of remaining time divided by remaining routes,

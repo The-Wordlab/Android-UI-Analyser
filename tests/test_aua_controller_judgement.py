@@ -21,6 +21,7 @@ from experiments.aua_controller.judgement import (
     judge_outcome_votes,
     judge_route_budget,
     outcome_schema,
+    relaxed_json_answer,
     summarize_route,
 )
 from experiments.aua_controller.run_live import RunError
@@ -245,7 +246,80 @@ def test_route_repairs_share_one_deadline_and_keep_already_reported_spend(tmp_pa
     assert requests == ["fictional/model", "fictional/model", "fictional/fallback"]
     assert result["cost"] == pytest.approx(0.007)
     logs = [json.loads(line) for line in (tmp_path / "judge-events.jsonl").read_text().splitlines()]
-    assert logs[0]["reported_cost_usd"] == pytest.approx(0.003)
+    timeout = next(item for item in logs if item.get("event") == "route_timeout")
+    assert timeout["reported_cost_usd"] == pytest.approx(0.003)
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+def test_relaxed_tool_route_recovers_only_schema_valid_json_content(tmp_path, fenced):
+    answer = {**verdict("unverified"), "criteria": [
+        {"criterion_index": 0, "result": "not_verified", "evidence": "system mode unavailable"},
+    ]}
+    body = json.dumps(answer)
+    if fenced:
+        body = "```json\n" + body + "\n```"
+    response = {"model": "fictional/model", "usage": {"cost": 0.001}, "choices": [
+        {"finish_reason": "stop", "message": {"role": "assistant", "content": body}},
+    ]}
+    sender = Sender([RuntimeError("HTTP 404: No endpoints found that support the provided 'tool_choice' value"),
+                     response])
+    result = asyncio.run(judge_outcome_votes(decider(sender, output=tmp_path), votes=1,
+        goal="verify", final_frame=frame(), contract="- Device default follows system."))
+    assert sender.payloads[-1]["tool_choice"] == "auto"
+    assert result["verdict"] == "unverified"
+    assert result["criteria"][0]["criterion"] == "Device default follows system."
+    assert result["criteria"][0]["result"] == "not_verified"
+    logged = json.loads((tmp_path / "judgements.jsonl").read_text())
+    assert logged["response_format"] == "relaxed_json_content"
+
+
+@pytest.mark.parametrize("content", [
+    'Here is the answer: {"verdict":"pass"}', '{"verdict":"pass"} {}',
+    '```json\n{}\n```\n```json\n{}\n```', '{invalid}', '[]', 'null',
+    '{"verdict":"fail","verdict":"pass"}', '{"confidence":NaN}',
+    '```python\n{}\n```', '{} trailing explanation',
+])
+def test_relaxed_json_rejects_prose_ambiguity_and_invalid_json(content):
+    with pytest.raises(RunError):
+        relaxed_json_answer(content)
+
+
+def test_content_recovery_is_disabled_until_tool_choice_was_relaxed():
+    response = {"usage": {"cost": 0.001}, "choices": [{"finish_reason": "stop", "message": {
+        "role": "assistant", "content": json.dumps(verdict("pass")),
+    }}]}
+    sender = Sender([response])
+    with pytest.raises(RunError, match="required tool call"):
+        asyncio.run(decider(sender, repair_budget=0).decide(
+            role="judge", instructions="i", question="q", context={},
+            schema=OUTCOME_SCHEMA, name="record_verdict"))
+
+
+def test_native_tool_is_preferred_over_message_content_after_route_relaxation():
+    response = tool_reply("record_verdict", verdict("fail"))
+    response["choices"][0]["message"]["content"] = json.dumps(verdict("pass"))
+    sender = Sender([RuntimeError("HTTP 404: No endpoints found that support the provided 'tool_choice' value"),
+                     response])
+    result = asyncio.run(decider(sender).decide(role="judge", instructions="i", question="q", context={},
+                                              schema=OUTCOME_SCHEMA, name="record_verdict"))
+    assert result["result"]["verdict"] == "fail"
+
+
+def test_schema_repair_diagnostics_never_include_private_model_content(tmp_path):
+    private = "private-account@example.test"
+    response = {"usage": {"cost": 0.001}, "choices": [{"finish_reason": "stop", "message": {
+        "role": "assistant", "content": json.dumps({"verdict": private}),
+    }}]}
+    sender = Sender([RuntimeError("HTTP 404: No endpoints found that support the provided 'tool_choice' value"),
+                     response])
+    with pytest.raises(RunError):
+        asyncio.run(decider(sender, repair_budget=0, output=tmp_path).decide(
+            role="judge", instructions="i", question="q", context={},
+            schema=OUTCOME_SCHEMA, name="record_verdict"))
+    events = (tmp_path / "judge-events.jsonl").read_text()
+    assert "schema_repair" in events and "violates" in events
+    assert private not in events
+    assert private not in (tmp_path / "judgements.jsonl").read_text()
 
 
 def test_total_decision_deadline_bounds_all_routes(tmp_path):

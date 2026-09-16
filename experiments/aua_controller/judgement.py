@@ -193,6 +193,37 @@ def judge_route_budget(remaining: float, routes_left: int, route_limit: float) -
     return max(0.0, min(route_limit, remaining / routes_left))
 
 
+def relaxed_json_answer(content: Any) -> dict[str, Any]:
+    """Read one complete JSON object, never extract an answer from prose or reasoning."""
+    if not isinstance(content, str):
+        raise RunError("relaxed judge content must be exactly one JSON object")
+    text = content.strip()
+    if text.startswith("```"):
+        fenced = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", text, re.IGNORECASE | re.DOTALL)
+        if fenced is None:
+            raise RunError("relaxed judge content must be one JSON object or one JSON fence")
+        text = fenced.group(1).strip()
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def invalid_constant(_value: str) -> None:
+        raise ValueError("non-JSON constant")
+
+    try:
+        value = json.loads(text, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+    except (ValueError, TypeError):
+        raise RunError("relaxed judge content is not one unambiguous valid JSON object") from None
+    if not isinstance(value, dict):
+        raise RunError("relaxed judge content must be a JSON object, not an array or scalar")
+    return value
+
+
 SCREEN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -642,9 +673,18 @@ class Decider:
                 if reasoning_only_response(response):
                     raise RunError("judge returned reasoning only or a truncated completion")
                 message, native = completion(response)
-                if native is None or native.get("name") != name:
+                if native is None and not forced_choice:
+                    candidate_answer = relaxed_json_answer(message.get("content"))
+                    # Only the advertised compact schema qualifies for text recovery; do not
+                    # use legacy-label normalization to rescue arbitrary prose-shaped output.
+                    jsonschema.validate(candidate_answer, schema)
+                    record["response_format"] = "relaxed_json_content"
+                elif native is not None and native.get("name") == name:
+                    candidate_answer = native["arguments"]
+                    record["response_format"] = "native_tool"
+                else:
                     raise RunError("decider did not answer with the required tool call")
-                answer = normalize_contract_answer(native["arguments"], criteria_order)
+                answer = normalize_contract_answer(candidate_answer, criteria_order)
                 jsonschema.validate(answer, schema)
                 if criteria_order:
                     indexes = [entry["criterion_index"] for entry in answer["criteria"]]
@@ -673,6 +713,10 @@ class Decider:
                     rung_attempts = self.repair_budget + 1
                     self._log({**record, "event": "reasoning_exhausted", "route_index": rung,
                                "route_model": rung_model, "error": error})
+                else:
+                    self._log({**record, "event": "schema_repair", "route_index": rung,
+                               "route_model": rung_model, "forced_tool_choice": forced_choice,
+                               "error": error})
         record["request_ms"] = sum(self.request_ms[request_start:])
         if result is None:
             record["error"] = error

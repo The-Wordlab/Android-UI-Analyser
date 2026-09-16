@@ -13,6 +13,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- After a provider forces relaxed tool choice, judges may recover a single strict JSON object
+  from message content (optionally one JSON fence), under the same compact schema and evidence
+  validation. Prose/ambiguous output is rejected, native calls take precedence, and sanitized
+  schema-repair diagnostics explain failures without retaining private model text.
 - Judge tool replies identify contract bullets by compact zero-based indexes instead of
   repeating long criterion strings. The host validates identities and restores exact authored
   labels in source order; duplicates/out-of-range values require repair, and omissions stay unverified.
