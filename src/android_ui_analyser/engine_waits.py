@@ -32,6 +32,7 @@ from .engine_support import (
     logger,
 )
 from .errors import (
+    DeviceError,
     JobCancelledError,
     ProviderError,
     SelectorAmbiguousError,
@@ -1315,12 +1316,27 @@ def await_predicate(
             elif term.by == "log":
                 present = _log_present(term.value)
             else:
-                present = (
-                    _wait_input_runtime(self, device).find_text(
-                        term.value, match=mode, ignore_case=ignore_case, by=term.by
+                try:
+                    present = (
+                        _wait_input_runtime(self, device).find_text(
+                            term.value, match=mode, ignore_case=ignore_case, by=term.by
+                        )
+                        is not None
                     )
-                    is not None
-                )
+                except DeviceError as exc:
+                    if budget is None or exc.code != "device":
+                        raise
+                    # A passive read can miss one poll while the server is busy. Do not
+                    # reconnect, restart, or extend the caller's absolute deadline. Unknown
+                    # visibility never satisfies an absence predicate; a later fresh poll
+                    # (or independent rich observation) must establish the actual state.
+                    self._job_checkpoint()
+                    budget.check()
+                    out.append(
+                        {"term": term.text, "present": None, "satisfied": False,
+                         "evidence": "unconfirmed", "reason": "ui_read_failed"}
+                    )
+                    continue
             out.append(
                 {
                     "term": term.text,
@@ -1381,8 +1397,13 @@ def await_predicate(
             return wanted in candidate
 
         rich: list[dict[str, Any]] = []
-        for term in terms:
+        for term, previous_result in zip(terms, results, strict=True):
             if term.by not in {"text", "desc"}:
+                if previous_result.get("present") is None:
+                    # This rich pass only rechecks text/description terms. It cannot
+                    # turn an unreadable resource-id term into evidence of absence.
+                    rich.append(previous_result)
+                    continue
                 present = base_present.get(term.text, False)
             else:
                 values: list[str] = []

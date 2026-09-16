@@ -13,6 +13,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Predicate waits treat a failed bounded passive UI read as an unconfirmed poll and retry within
+  the original deadline. They never reconnect the automation server or infer absence from a read
+  failure; cancellation and unsupported-capability errors remain immediate.
+
 - Controller action evidence resolves opaque UI handles against the immediately preceding fresh
   observation. Independent judges receive the observed target labels and evidence reference in
   action order, so named menu actions remain distinguishable after element handles are removed.

@@ -11,6 +11,7 @@ import pytest
 from android_ui_analyser import engine_waits, read_budget
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import (
+    DeviceError,
     JobCancelledError,
     UnsupportedPlatformCapabilityError,
     UsageError,
@@ -261,6 +262,117 @@ def test_job_cancellation_remains_cancellation_and_restores_scope():
     with pytest.raises(JobCancelledError):
         eng.wait(for_="Ready", timeout_ms=100)
     assert read_budget.current() is None
+
+
+def test_await_retries_a_failed_passive_read_within_the_same_deadline(monkeypatch):
+    runtime = Runtime()
+    eng = engine(runtime)
+    probes = []
+
+    def probe(*args, **kwargs):
+        probes.append(read_budget.current().deadline)
+        if len(probes) == 1:
+            raise DeviceError("passive UI read failed")
+        return (10, 10, 40, 40)
+
+    monkeypatch.setattr(runtime, "find_text", probe)
+    result = eng.await_predicate("text:Ready", timeout_ms=300, poll_ms=10,
+                                 rich_ui=False, observe=False)
+    assert result.ok and result.await_outcome == "satisfied"
+    assert len(probes) == 2 and probes[0] == probes[1]
+    assert read_budget.current() is None
+
+
+@pytest.mark.parametrize("predicate", ["text:Ready", "!text:Loading"])
+def test_repeated_passive_read_errors_timeout_and_never_prove_absence(monkeypatch, predicate):
+    runtime = Runtime()
+    eng = engine(runtime)
+    probes = []
+
+    def probe(*args, **kwargs):
+        probes.append(read_budget.current().deadline)
+        raise DeviceError("passive UI read failed")
+
+    monkeypatch.setattr(runtime, "find_text", probe)
+    started = time.monotonic()
+    result = eng.await_predicate(predicate, timeout_ms=150, poll_ms=10,
+                                 rich_ui=False, observe=False)
+    assert time.monotonic() - started < 0.8
+    assert not result.ok and result.await_outcome == "timeout"
+    assert len(probes) >= 2 and len(set(probes)) == 1
+    assert result.await_terms[0]["satisfied"] is False
+    assert result.await_terms[0]["reason"] == "ui_read_failed"
+    assert read_budget.current() is None
+
+
+def test_passive_read_retry_does_not_delay_cancellation(monkeypatch):
+    runtime = Runtime()
+    eng = engine(runtime)
+    event = threading.Event()
+    eng._job_cancel_event = event
+    probes = []
+
+    def probe(*args, **kwargs):
+        probes.append(True)
+        event.set()
+        raise DeviceError("passive UI read failed")
+
+    monkeypatch.setattr(runtime, "find_text", probe)
+    started = time.monotonic()
+    with pytest.raises(JobCancelledError):
+        eng.await_predicate("text:Ready", timeout_ms=5000, poll_ms=1000, rich_ui=False)
+    assert time.monotonic() - started < 0.5 and len(probes) == 1
+    assert read_budget.current() is None
+
+
+def test_passive_read_retry_does_not_hide_unsupported_capability(monkeypatch):
+    runtime = Runtime()
+
+    def probe(*args, **kwargs):
+        raise DeviceError("unsupported read", code="unsupported_capability")
+
+    monkeypatch.setattr(runtime, "find_text", probe)
+    with pytest.raises(DeviceError, match="unsupported read"):
+        engine(runtime).await_predicate("text:Ready", timeout_ms=500, rich_ui=False)
+
+
+def test_detached_await_recovers_after_one_passive_read_failure(monkeypatch):
+    from android_ui_analyser.jobs import manager_for
+
+    runtime = Runtime()
+    probes = []
+
+    def probe(*args, **kwargs):
+        probes.append(True)
+        if len(probes) == 1:
+            raise DeviceError("passive UI read failed")
+        return (10, 10, 40, 40)
+
+    monkeypatch.setattr(runtime, "find_text", probe)
+    manager = manager_for(engine(runtime))
+    started = manager.start("await", {"predicate": "rid:ready_control", "timeout_ms": 500,
+                                      "poll_ms": 10, "observe": False})
+    terminal = manager.wait(started["job_id"], timeout_ms=1500)
+    assert terminal["status"] == "succeeded" and terminal["run_ok"] is True
+    assert terminal["result"]["await_outcome"] == "satisfied"
+    assert len(probes) >= 2
+
+
+def test_rich_text_recheck_cannot_turn_failed_negative_id_probe_into_absence(monkeypatch):
+    runtime = Runtime()
+
+    def probe(*args, **kwargs):
+        if kwargs.get("by") == "rid":
+            raise DeviceError("passive UI read failed")
+        return None  # Rich observation independently finds the Ready text.
+
+    monkeypatch.setattr(runtime, "find_text", probe)
+    result = engine(runtime).await_predicate(
+        "!rid:loading_control,text:Ready", timeout_ms=150, poll_ms=10, observe=False
+    )
+    assert not result.ok and result.await_outcome == "timeout"
+    assert result.await_terms[0]["satisfied"] is False
+    assert result.await_terms[0]["reason"] == "ui_read_failed"
 
 
 def test_cancellation_during_final_observation_is_not_reported_as_success(monkeypatch):
