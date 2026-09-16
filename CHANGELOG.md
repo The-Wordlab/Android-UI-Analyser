@@ -11,6 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.27.2] - 2026-09-16
+
+### Fixed
+
+- Release qualification uses deterministic judge-budget clocks and only announces signal-test
+  readiness after cleanup protection is active, removing macOS CI races without changing runtime
+  deadlines, cancellation, signal forwarding or cost accounting.
+
 ## [0.27.1] - 2026-09-16
 
 ### Fixed
@@ -1022,5 +1030,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.27.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.27.1...HEAD
 [0.27.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.1
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.27.2...HEAD
+[0.27.2]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.2
