@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from experiments.aua_controller.session_state import SessionState, observation_frame
+from experiments.aua_controller.session_state import (
+    SessionState,
+    judgement_observation_frame,
+    observation_frame,
+)
 
 
 def frame(text="Ready", **meta):
@@ -24,6 +28,42 @@ def state(tmp_path):
 
 def prime(s):
     s.observe("initial_observation", {}, frame(), "E0000")
+
+
+def loading_capture():
+    return {"observation_present": True,
+            "observation_contract": {"reusable": False, "evidence_fresh": False,
+                                     "fingerprint": "source-frame"},
+            "observation": frame("Working...", arrival_state="loading", stale_risk=True)}
+
+
+def test_loading_is_assertion_evidence_not_selector_or_checkpoint_authority(tmp_path):
+    raw = loading_capture()
+    before = copy.deepcopy(raw)
+    assert judgement_observation_frame(raw) == raw["observation"]
+    assert observation_frame(raw) is None
+    assert raw == before
+    s = state(tmp_path)
+    s.observe("tap_and_analyze", {"id": "old"}, raw, "E0001")
+    assert s.context()["current_observation"] is None
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda r: r.update(observation_present=False),
+    lambda r: r.update(stale=True),
+    lambda r: r.update(fresh=False),
+    lambda r: r["observation"]["meta"].update(stale=True),
+    lambda r: r["observation"]["meta"].update(fresh=False),
+    lambda r: r["observation_contract"].update(stale=True),
+    lambda r: r["observation_contract"].update(fingerprint="different"),
+    lambda r: r["observation"]["meta"].update(arrival_state="ready"),
+    lambda r: r["observation"]["screen"].update(width=0),
+    lambda r: r.update(result=frame("Contradiction", fingerprint="other")),
+])
+def test_judgement_loading_exception_rejects_stale_absent_or_ambiguous_captures(mutation):
+    raw = loading_capture()
+    mutation(raw)
+    assert judgement_observation_frame(raw) is None
 
 
 def test_flow_summary_uses_full_nested_observation_without_another_capture():

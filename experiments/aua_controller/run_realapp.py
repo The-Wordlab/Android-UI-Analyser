@@ -47,15 +47,15 @@ from experiments.aua_controller.judgement import (
     summarize_route,
 )
 from experiments.aua_controller.run_live import (
-    COMPACT_SYSTEM,
     SYSTEM,
     RunError,
     _error_text,
     compact_schema,
+    compact_system_prompt,
     offered_schema,
     tool_result,
 )
-from experiments.aua_controller.session_state import observation_frame
+from experiments.aua_controller.session_state import judgement_observation_frame, observation_frame
 from experiments.aua_controller.transport import resilient_request, retryable_http_status
 
 from android_ui_analyser.engine_support import _parse_await_terms
@@ -439,7 +439,7 @@ def controller_observation_arguments(
     if "observe_fields" not in schemas.get(name, {}).get("properties", {}):
         return arguments
     return {**arguments, "observe_fields": (
-        "id,type,text,desc,resource_id,window,clickable,enabled,focused,checked,selected,scrollable"
+        "id,type,text,desc,resource_id,bounds,window,clickable,enabled,focused,checked,selected,scrollable"
     )}
 
 
@@ -1073,6 +1073,7 @@ async def run_realapp(
     request_timeout_s: float = 90,
     existing_session_id: str | None = None,
     finish_session: bool = True,
+    preserve_end_state: bool = False,
     retain_started_target: bool = True,
     inherited_setup_facts: Sequence[str] = (),
     session_artifacts_dir: str | Path | None = None,
@@ -1611,7 +1612,7 @@ async def run_realapp(
         compactor = FrameCompactor(max_elements=max_elements)
         report = await run_agent(
             send=send, call_tool=controller_call, tools=tools,
-            system_prompt=SYSTEM + COMPACT_SYSTEM + (
+            system_prompt=SYSTEM + compact_system_prompt(preserve_end_state=preserve_end_state) + (
                 CONTRACT_SYSTEM if session_contract else REALAPP_SYSTEM
             ),
             user_prompt=goal_prompt(
@@ -1660,7 +1661,7 @@ async def run_realapp(
                           if item.get("executed") is True and item.get("evidence_ref")}
         for entry in report.get("evidence", []):
             raw = json.loads((output / "controller" / entry["path"]).read_text(encoding="utf-8"))
-            if observation_frame(raw) is not None:
+            if judgement_observation_frame(raw) is not None:
                 frames.append({"ref": entry["ref"], "tool": entry.get("tool"),
                                "step": evidence_steps.get(entry["ref"]), "raw": raw})
         actions = [
@@ -2098,6 +2099,9 @@ def main() -> int:
                              "the tail alone.")
     parser.add_argument("--map", action="store_true", help="Name screens and summarise the route (paid)")
     parser.add_argument("--max-steps", type=int, default=24)
+    parser.add_argument("--preserve-end-state", action="store_true",
+                        help="Leave the authored goal/contract end state for caller continuation; "
+                             "default controller guidance returns to the requested home state.")
     parser.add_argument("--time-limit", type=float, default=300)
     parser.add_argument("--max-tokens", type=int, default=32768)
     parser.add_argument("--cost-limit-usd", type=float, default=0.05)
@@ -2290,6 +2294,7 @@ def main() -> int:
                     judge=not args.no_judge, judge_votes=args.judge_votes,
                     judge_frames=args.judge_frames, name_screens=args.map,
                     max_steps=args.max_steps, time_limit_s=args.time_limit, max_tokens=args.max_tokens,
+                    preserve_end_state=args.preserve_end_state,
                     cost_limit_usd=args.cost_limit_usd, judge_cost_limit_usd=args.judge_cost_limit_usd,
                     judge_max_tokens=args.judge_max_tokens,
                     terminal_claim_limit=args.terminal_claim_limit, no_progress_limit=args.no_progress_limit,

@@ -14,7 +14,7 @@ import copy
 from typing import Any
 
 ELEMENT_FIELDS = (
-    "id", "text", "desc", "content_desc", "resource_id", "rid",
+    "id", "text", "desc", "content_desc", "resource_id", "rid", "bounds",
     "clickable", "editable", "checked", "selected", "scrollable", "focused", "window",
 )
 STATE_FLAGS = ("clickable", "editable", "scrollable")

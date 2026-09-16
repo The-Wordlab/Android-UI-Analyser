@@ -31,6 +31,19 @@ must be supported by the target app/platform; unsupported access leaves the prer
 
 ## What broke on a real application
 
+Compact controller observations preserve target bounds, including unchanged-frame handles, so a
+small unlabeled child is distinguishable from its large clickable header. Bounds describe existing
+element IDs; they do not authorize guessed coordinates. Judge text still omits handles/geometry.
+
+Continuous callers can pass `preserve_end_state=True` (CLI `--preserve-end-state`) to leave the
+current goal/contract's requested end state for the next row. By default, existing return-home
+guidance remains. This prompt option does not change session ownership, completion proof or cleanup.
+
+Judgement includes structurally valid post-action loading captures with matching observation/contract
+fingerprints, even when their selectors are non-reusable. These frames are labeled transient and
+cannot prove a settled destination. The controller/session-state resolver still rejects them;
+actually stale, absent, malformed or contradictory captures remain excluded from this exception.
+
 The judge's native tool schema uses compact entries such as
 `{"criterion_index":0,"result":"verified","evidence":"Selected option is visible"}`.
 Indexes refer to the authored markdown bullets in zero-based source order. The tool schema never

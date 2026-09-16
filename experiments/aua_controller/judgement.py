@@ -36,6 +36,7 @@ from experiments.aua_controller.hosted import (
     validate_request_config,
 )
 from experiments.aua_controller.run_live import RunError, completion
+from experiments.aua_controller.session_state import judgement_observation_frame, observation_frame
 from experiments.aua_controller.transport import tool_choice_route_missing
 
 ORACLE = "model_judgement_v1"
@@ -324,7 +325,8 @@ ROUTE_INSTRUCTIONS = (
 
 def _strip_ids(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: _strip_ids(item) for key, item in value.items() if key != "id"}
+        # Geometry helps controllers distinguish targets; judges have bounded images instead.
+        return {key: _strip_ids(item) for key, item in value.items() if key not in {"id", "bounds"}}
     if isinstance(value, list):
         return [_strip_ids(item) for item in value]
     return value
@@ -333,6 +335,10 @@ def _strip_ids(value: Any) -> Any:
 def evidence_frame(result: Any, *, max_elements: int = 40, keep_ids: bool = False) -> Any:
     """Compact one raw AUA result for judgement input. Judges do not act, so ids are dropped."""
     compact = compact_frame(result, max_elements=max_elements, max_text=100, keep_ids=keep_ids)
+    if (isinstance(compact, dict) and observation_frame(result) is None
+            and judgement_observation_frame(result) is not None):
+        compact["evidence_usage"] = {"action_safe": False, "observed_transient_state": "loading",
+                                     "proves_settled_destination": False}
     if isinstance(result, dict) and isinstance(compact, dict) and isinstance(result.get("_judge_evidence"), dict):
         compact["evidence_position"] = {key: value for key, value in result["_judge_evidence"].items()
                                         if key in {"ref", "sequence", "after_tool", "after_step", "lifecycle_epoch"}}
@@ -976,6 +982,9 @@ async def judge_outcome(
                     "whose trigger did not occur. If a criterion cannot be checked from this evidence, "
                     "do not assume it passed: mark it not_verified and return 'unverified' unless "
                     "another criterion is outright broken, which is 'fail'.")
+    question += (" Frames labeled observed_transient_state=loading prove only what was visible at "
+                 "that capture, including a pending indicator. They do not prove a settled destination, "
+                 "completion or reusable action selectors; use later evidence for those claims.")
     criteria = contract_criteria(contract)
     decision = await decider.decide(
         role="outcome judge (" + stance + ")", instructions=JUDGE_INSTRUCTIONS[stance] + CLAIM_NOTE,

@@ -50,18 +50,42 @@ def observation_frame(value: Any) -> dict | None:
     stale flags, missing geometry/fingerprint, and multiple different frames are
     not current proof. Returned data is copied, not modified.
     """
+    return _observation_frame(value, allow_loading=False)
+
+
+def judgement_observation_frame(value: Any) -> dict | None:
+    """Resolve captured assertion evidence, including explicitly observed loading states.
+
+    A matched post-action loading capture proves what was visible at that instant,
+    not reusable selectors or a settled destination. Actual stale/history frames,
+    absent captures and contradictory geometry/fingerprints remain inadmissible.
+    Never use this resolver for action authorization or session progress.
+    """
+    return _observation_frame(value, allow_loading=True)
+
+
+def _observation_frame(value: Any, *, allow_loading: bool) -> dict | None:
     frames = []
     invalid = False
 
-    def visit(item, depth=0):
+    def visit(item, depth=0, loading_capture=False):
         nonlocal invalid
         if not isinstance(item, dict) or depth > 6:
             return
         contract = item.get("observation_contract")
-        if (item.get("stale_risk") is True or item.get("stale") is True or item.get("fresh") is False
+        observation = item.get("observation")
+        meta = observation.get("meta") if isinstance(observation, dict) else None
+        if (allow_loading and item.get("observation_present") is True
+                and isinstance(contract, dict) and isinstance(meta, dict)
+                and meta.get("arrival_state") == "loading"
+                and isinstance(meta.get("fingerprint"), str) and meta["fingerprint"].strip()
+                and contract.get("fingerprint") == meta["fingerprint"]):
+            loading_capture = True
+        if ((item.get("stale_risk") is True and not loading_capture)
+                or item.get("stale") is True or item.get("fresh") is False
                 or item.get("observation_present") is False
-                or isinstance(contract, dict) and (contract.get("reusable") is False
-                                                  or contract.get("stale_risk") is True
+                or isinstance(contract, dict) and ((not loading_capture and (
+                    contract.get("reusable") is False or contract.get("stale_risk") is True))
                                                   or contract.get("stale") is True or contract.get("fresh") is False)):
             invalid = True
             return
@@ -78,14 +102,14 @@ def observation_frame(value: Any) -> dict | None:
                                     and len(e["bounds"]) == 4 and all(type(n) is int for n in e["bounds"]))
                                for e in elements)
                     or not isinstance(meta, dict) or not isinstance(meta.get("fingerprint"), str)
-                    or not meta["fingerprint"].strip() or meta.get("stale_risk") is True
+                    or not meta["fingerprint"].strip() or (meta.get("stale_risk") is True and not loading_capture)
                     or meta.get("stale") is True or meta.get("fresh") is False):
                 invalid = True
                 return
             frames.append(item)
         for key in WRAPPERS:
             if isinstance(item.get(key), dict):
-                visit(item[key], depth + 1)
+                visit(item[key], depth + 1, loading_capture if key == "observation" else False)
         error = item.get("error")
         if isinstance(error, dict) and error.get("observation_present") is True:
             visit(error, depth + 1)

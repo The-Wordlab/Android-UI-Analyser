@@ -46,13 +46,25 @@ def test_compact_frame_keeps_actionable_fields_and_drops_noise():
     assert observation["meta"] == {"fingerprint": "fp-1", "stale_risk": None, "known_screen": "settings_x"}
     ids = [item["id"] for item in observation["elements"]]
     assert ids == ["el:01", "el:02", "el:03"], "empty containers and status-bar chrome are dropped"
-    assert observation["elements"][0] == {"id": "el:01", "text": "Settings", "clickable": True}
+    assert observation["elements"][0] == {"id": "el:01", "text": "Settings", "clickable": True,
+                                          "bounds": [0, 10, 100, 19]}
     assert observation["elements"][1] == {"id": "el:02", "text": "Theme",
-                                          "resource_id": "com.example.fictional:id/row_theme", "clickable": True}
-    assert observation["elements"][2] == {"id": "el:03", "editable": True}
+                                          "resource_id": "com.example.fictional:id/row_theme", "clickable": True,
+                                          "bounds": [0, 20, 100, 29]}
+    assert observation["elements"][2] == {"id": "el:03", "editable": True, "bounds": [0, 30, 100, 39]}
     text = json.dumps(out)
-    for noise in ("bounds", "center", "depth", "long_clickable", "elapsed_ms", "history_len", "serial"):
+    for noise in ("center", "depth", "long_clickable", "elapsed_ms", "history_len", "serial"):
         assert noise not in text
+
+
+def test_bounds_distinguish_small_unlabelled_child_from_full_width_header():
+    raw = frame(elements=[element(1, text="Profile", clickable=True, bounds=[0, 0, 720, 180]),
+                          element(2, clickable=True, bounds=[12, 80, 80, 148])])
+    compactor = FrameCompactor()
+    for _ in range(2):
+        elements = compactor(raw)["observation"]["elements"]
+        assert [(e["id"], e["bounds"]) for e in elements] == [
+            ("el:01", [0, 0, 720, 180]), ("el:02", [12, 80, 80, 148])]
 
 
 def test_compaction_preserves_input_semantics_without_inventing_editable_buttons():

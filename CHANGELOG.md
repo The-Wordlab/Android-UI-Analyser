@@ -15,6 +15,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Compact controllers retain target bounds to distinguish small unlabeled controls from enclosing
+  headers. Real-app callers can explicitly preserve the authored end state for continuous runs;
+  default return-home guidance is unchanged. Captured loading observations remain judge evidence
+  without authorizing actions, settled-state claims or checkpoint completion from unsafe selectors.
+
 - Compact real-app controllers retain editable-field, resource-ID and window semantics across
   post-action observations, plus input verification/submission status. Sending guidance now
   distinguishes an IME submit action or actual app Send control from keyboard Enter and

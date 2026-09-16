@@ -79,6 +79,11 @@ COMPACT_PROPERTIES = {
     "session_finish": set(),
 }
 SCHEMA_REPAIR_BUDGET = 3
+HOME_FINISH_INSTRUCTION = """Verify the observed UI and host progress. You must navigate back to the requested home state using
+the UI before session_finish. session_finish checks completion; it does not navigate home for you."""
+PRESERVE_FINISH_INSTRUCTION = """Verify the observed UI and host progress. Preserve the exact end state requested by the current
+goal/contract before session_finish so the caller can continue from it. Do not navigate home unless
+the current goal/contract requires it. session_finish records completion; it does not navigate."""
 COMPACT_SYSTEM = """
 The compact-v1 profile intentionally offers a restricted tool subset. Analyze returns the whole
 screen; filtered queries, observation projections, has, and expect are unavailable. Tap a button
@@ -96,10 +101,17 @@ After an input error, inspect fresh field state before retrying; it may have par
 Confirm a sent message and the requested reply; ok=true alone proves neither.
 Tool results are serialized JSON text; interpret the JSON fields as the observation or error,
 including when your native tool-response wrapper places that text inside a value field.
-Verify the observed UI and host progress. You must navigate back to the requested home state using
-the UI before session_finish. session_finish checks completion; it does not navigate home for you.
+""" + HOME_FINISH_INSTRUCTION + """
 If a tool argument is rejected, read the bounded error and repair the call using its offered schema.
 """
+
+
+def compact_system_prompt(*, preserve_end_state: bool = False) -> str:
+    """Caller-owned continuation changes navigation guidance, never lifecycle authority."""
+    return (COMPACT_SYSTEM.replace(HOME_FINISH_INSTRUCTION, PRESERVE_FINISH_INSTRUCTION)
+            if preserve_end_state else COMPACT_SYSTEM)
+
+
 HIDDEN_KEYS = {
     "assertions", "requirements", "contract", "contract_yaml", "contract_verdict",
     "recommended_call", "recommended_calls", "next_call", "next_actions", "candidate_flow",

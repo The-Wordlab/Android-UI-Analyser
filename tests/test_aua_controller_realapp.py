@@ -279,10 +279,54 @@ def test_controller_requests_semantic_fields_only_when_public_schema_supports_it
     schemas = {tool.name: dict(tool.inputSchema) for tool in _tool_definitions()}
     args = {"id": "current"}
     result = controller_observation_arguments("tap_and_analyze", args, schemas)
-    assert {"id", "type", "resource_id", "window", "focused"} <= set(result["observe_fields"].split(","))
+    assert {"id", "type", "resource_id", "bounds", "window", "focused"} <= set(result["observe_fields"].split(","))
     assert args == {"id": "current"}, "Never mutate model arguments or its action journal"
     assert controller_observation_arguments("session_finish", {}, schemas) == {}
     assert controller_observation_arguments("unknown", args, schemas) == args
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+def test_realapp_end_state_guidance_is_explicit_and_does_not_change_cleanup(tmp_path, preserve):
+    from experiments.aua_controller.run_live import (
+        HOME_FINISH_INSTRUCTION,
+        PRESERVE_FINISH_INSTRUCTION,
+    )
+
+    aua = FakeAua()
+    model = FakeModel([model_call("session_finish", {"outcome": "achieved"})], {})
+    result = run(tmp_path, aua, model, judge=False, preserve_end_state=preserve)
+    prompt = model.payloads[0]["messages"][0]["content"]
+    assert (PRESERVE_FINISH_INSTRUCTION if preserve else HOME_FINISH_INSTRUCTION) in prompt
+    assert (HOME_FINISH_INSTRUCTION if preserve else PRESERVE_FINISH_INSTRUCTION) not in prompt
+    assert result.get("cleanup_error") is None
+    assert sum(name == "session_finish" for name, _ in aua.calls) == 1
+
+
+def test_loading_capture_reaches_judges_but_never_becomes_action_safe(tmp_path):
+    from experiments.aua_controller.session_state import observation_frame
+
+    class LoadingAua(FakeAua):
+        async def call_tool(self, name, arguments):
+            result = await super().call_tool(name, arguments)
+            if name == "tap_and_analyze":
+                result = frame("fp-loading", ("Working...",), observation_present=True,
+                               observation_contract={"fingerprint": "fp-loading", "reusable": False,
+                                                     "evidence_fresh": False})
+                result["observation"]["meta"].update(arrival_state="loading", stale_risk=True)
+                assert observation_frame(result) is None
+            return result
+
+    model = FakeModel([model_call("tap_and_analyze", {"id": "el:fp-home-1"}),
+                       model_call("session_finish", {"outcome": "achieved"})],
+                      {"record_verdict": [verdict("pass", "observed"), verdict("pass", "observed")]})
+    run(tmp_path, LoadingAua(), model)
+    judges = [p for p in model.payloads if isinstance(p.get("tool_choice"), dict)]
+    assert len(judges) == 2
+    for payload in judges:
+        content = json.dumps(payload["messages"])
+        assert "Working..." in content
+        assert "observed_transient_state" in content
+        assert "proves_settled_destination" in content
 
 
 def test_realapp_tools_accept_the_current_public_mcp_schemas():
@@ -590,7 +634,7 @@ def test_realapp_claim_stops_the_loop_and_two_judges_decide(tmp_path):
     judge_payloads = [p for p in model.payloads if isinstance(p.get("tool_choice"), dict)]
     assert len(controller_payloads) == 2 and len(judge_payloads) == 2
     first_user = controller_payloads[0]["messages"][1]["content"]
-    assert "Initial observation" in first_user and "bounds" not in first_user and "recommended_call" not in first_user
+    assert "Initial observation" in first_user and "bounds" in first_user and "recommended_call" not in first_user
     assert "el:fp-home-1" in first_user, "controller keeps ids so it can act"
     assert all(len(p["messages"]) == 2 for p in judge_payloads), "judges start from a fresh window"
     assert all("Light is selected" not in json.dumps(p["messages"][0]) for p in judge_payloads)
