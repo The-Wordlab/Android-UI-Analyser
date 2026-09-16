@@ -99,6 +99,8 @@ def test_judge_keeps_requested_text_checkpoints_beyond_eight_and_image_positions
     context = json.loads(sender.payloads[0]["messages"][1]["content"].split("Evidence:\n", 1)[1])
     assert len(context["intermediate_frames"]) == 13
     assert context["image_evidence"] == [image_position]
+    assert "fresh observation after that numbered action" in context["evidence_selection_note"]
+    assert "not a controller claim" in context["evidence_selection_note"]
     assert context["intermediate_frames"][-1]["observation"]["elements"][0]["text"] == "Checkpoint 12"
 
 
@@ -713,6 +715,9 @@ def test_judge_relative_positions_prove_order_changes_without_pixel_bounds():
     checkpoints = context["observed_order_transitions"][0]["checkpoints"]
     assert [item["evidence_position"]["ref"] for item in checkpoints] == ["E20", "E22", "E24"]
     assert [item["rows"][0]["text"] for item in checkpoints] == ["First item", "Named item", "First item"]
+    assert "chronological host-captured post-action observations" in (
+        context["observed_order_transitions"][0]["note"]
+    )
 
 
 @pytest.mark.parametrize("bounds", [[0, 0, float("nan"), 20], [0, 0, 0, 0],

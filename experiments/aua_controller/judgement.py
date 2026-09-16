@@ -1112,16 +1112,22 @@ async def judge_outcome(
                  "rows": [element for element in evidence_frame(frames[item])["observation"]["elements"]
                           if (element.get("text") or element.get("desc")) in group["labels"]],
              } for item in group["frame_indexes"]],
-             "note": "Observed vertical order changed, then returned to its prior order. "
-                     "Correlate action steps and screenshots; this grouping supplies no verdict."}
+             "note": "These are chronological host-captured post-action observations: vertical "
+                     "order changed, then returned to its prior order. actions_between identifies "
+                     "the fresh semantic action between adjacent checkpoints. Correlate the exact "
+                     "steps and screenshots; this grouping supplies evidence, not a verdict."}
             for group in transitions
         ]
     if image_evidence:
         context["image_evidence"] = list(image_evidence)[:MAX_IMAGE_CHECKPOINTS]
         context["evidence_selection_note"] = (
             "Images are selected rendered checkpoints, not every recorded frame. "
+            "image_evidence.after_step means that image and its semantic frame were captured from "
+            "the tool's fresh observation after that numbered action; it is not a controller claim. "
             "Use evidence_position and image_evidence to correlate observations with action steps "
-            "and restarts. Text-only observations cannot prove unseen rendering or independent system facts."
+            "and restarts. A post-action image that still shows the same dialog directly proves "
+            "that the dialog remained visible at that checkpoint. Text-only observations cannot "
+            "prove unseen rendering or independent system facts."
         )
     if progress is not None:
         context["aua_goal_progress"] = progress
