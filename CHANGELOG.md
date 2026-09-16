@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Controller action evidence resolves opaque UI handles against the immediately preceding fresh
+  observation. Independent judges receive the observed target labels and evidence reference in
+  action order, so named menu actions remain distinguishable after element handles are removed.
+
 ## [0.27.3] - 2026-09-16
 
 ### Fixed

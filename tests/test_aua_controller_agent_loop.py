@@ -63,6 +63,21 @@ def records(path):
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
+def test_action_records_resolve_pin_unpin_save_from_prior_host_observations(tmp_path):
+    def observed(label):
+        return {"screen": {"width": 100, "height": 200},
+                "meta": {"fingerprint": "screen-" + label},
+                "elements": [{"id": "el:1", "text": label, "type": "Button"}]}
+
+    run(tmp_path, [response(), response(), response(), response(content="done")],
+        [observed("Unpin"), observed("Save"), observed("Done")],
+        initial_observation=observed("Pin"))
+    calls = records(tmp_path / "controller/tool-calls.jsonl")
+    assert [call["step"] for call in calls] == [0, 1, 2]
+    assert [call["resolved_target"]["text"] for call in calls] == ["Pin", "Unpin", "Save"]
+    assert [call["resolved_target"]["source_evidence_ref"] for call in calls] == ["E0000", "E0001", "E0002"]
+
+
 def test_native_continuity_and_numbered_raw_evidence(tmp_path):
     first = response()
     message = first["choices"][0]["message"]

@@ -661,6 +661,21 @@ def test_two_stances_must_agree_and_never_see_element_ids():
     assert "refute" in sender.payloads[1]["messages"][0]["content"].lower()
 
 
+def test_judges_receive_resolved_target_names_in_order_without_handles_or_claims():
+    sender = Sender([tool_reply("record_verdict", verdict("pass"))])
+    actions = [{"step": step, "tool": "tap_and_analyze", "arguments": {"id": "el:opaque"},
+                "resolved_target": {"text": label, "source": "previous_fresh_observation",
+                                    "source_evidence_ref": f"E{step:04d}"},
+                "reason": "untrusted controller narrative"}
+               for step, label in enumerate(("Pin", "Unpin", "Save"))]
+    asyncio.run(judge_outcome_votes(decider(sender), votes=1, goal="Review menu states",
+                                    final_frame=frame(), actions=actions))
+    evidence = sender.payloads[0]["messages"][1]["content"]
+    assert evidence.index('"text": "Pin"') < evidence.index('"text": "Unpin"') < evidence.index('"text": "Save"')
+    assert "E0000" in evidence and "E0002" in evidence
+    assert "el:opaque" not in evidence and "untrusted controller narrative" not in evidence
+
+
 def test_contract_token_budget_scales_for_exact_per_criterion_output():
     contract = "\n".join(f"- criterion {index}" for index in range(21))
     assert contract_max_tokens(1200, contract) == 2612

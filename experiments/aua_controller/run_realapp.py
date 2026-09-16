@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from experiments.aua_controller.action_evidence import judge_action_history
 from experiments.aua_controller.agent_loop import run_agent
 from experiments.aua_controller.compaction import FrameCompactor
 from experiments.aua_controller.hosted import BACKENDS, validate_endpoint, validate_request_config
@@ -1686,11 +1687,7 @@ async def run_realapp(
             if judgement_observation_frame(raw) is not None:
                 frames.append({"ref": entry["ref"], "tool": entry.get("tool"),
                                "step": evidence_steps.get(entry["ref"]), "raw": raw})
-        actions = [
-            {"step": call_record["step"], "tool": call_record["tool"], "arguments": call_record.get("arguments")}
-            for call_record in call_records
-            if call_record.get("executed") is True
-        ]
+        actions = judge_action_history(call_records, initial)
         # Recording is journey evidence, not judge latency evidence. Export it while the exact
         # device boot is still unquestionably alive; a slow pair of hosted judges used to keep
         # the encoder running long enough for a provisioned target failure to turn an otherwise

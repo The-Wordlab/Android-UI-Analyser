@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 import jsonschema
+from experiments.aua_controller.action_evidence import resolved_action_target
 from experiments.aua_controller.hosted import (
     BACKENDS,
     CostGuard,
@@ -625,6 +626,9 @@ async def run_agent(
                     continue
             call: dict[str, Any] = {"step": step, "actor": actor, "tool": name,
                                     "arguments": copy.deepcopy(arguments)}
+            target = resolved_action_target(name, arguments, latest_result, evidence_ref=latest_ref)
+            if target is not None:
+                call["resolved_target"] = target
             if actor == "model":
                 call["tool_call_id"] = native["id"]
             else:

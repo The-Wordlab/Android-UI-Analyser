@@ -951,7 +951,8 @@ async def judge_outcome(
     context = {
         "goal": goal,
         # Judges never act, so element handles are removed from the action log as well.
-        "action_log": [_strip_ids({key: value for key, value in action.items() if key in ("step", "tool", "arguments")})
+        "action_log": [_strip_ids({key: value for key, value in action.items()
+                                   if key in ("step", "tool", "arguments", "resolved_target")})
                        for action in list(actions)[-30:]],
         # The rendered-image cap is not a text-evidence cap. A long route may need more compact
         # hierarchy frames to prove distinct screens while still sending only four screenshots.
