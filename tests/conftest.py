@@ -704,6 +704,12 @@ def _aua_isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("AUA_PERF__ASYNC_MEMORY", "false")
     monkeypatch.setenv("AUA_PERF__PREFETCH", "false")
     monkeypatch.setenv("AUA_PERF__AUTO_DAEMON", "false")
+    # CLI tests load Config through environment overrides rather than ``make_config``.
+    # Keep ordinary hierarchy tests off host Apple OCR too: under xdist a cold OCR task can
+    # exceed its bounded budget and emit a legitimate stderr warning into CliRunner's merged
+    # capture, making otherwise valid JSON/TSV assertions host-load dependent. Focused OCR
+    # tests opt in explicitly, just as they already do through ``make_config``.
+    monkeypatch.setenv("AUA_OCR__AUGMENT_HIERARCHY", "false")
     # Unstyled `--help`: several tests assert an option name appears in the output, and rich
     # splits those names with styling escapes ("--max-back" arriving as bold segments) whenever
     # it believes it is writing to a capable terminal. Whether it believes that depends on the
