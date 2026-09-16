@@ -424,6 +424,9 @@ def watchdog_alive(
 def _retire_watchdog(ref: TargetRef, pid: int, fingerprint: str) -> bool:
     """Stop a proven stale watchdog so another adapter config can replace it."""
 
+    if not _pid_exists(pid):
+        _clear_watchdog_registration(ref, pid=pid, options_fingerprint=fingerprint)
+        return True
     identity = _is_target_watchdog(pid, ref)
     if identity is False:
         _clear_watchdog_registration(
@@ -444,14 +447,43 @@ def _retire_watchdog(ref: TargetRef, pid: int, fingerprint: str) -> bool:
     except (PermissionError, OSError) as exc:
         logger.warning("cannot stop stale teardown watchdog pid %s: %s", pid, exc)
         return False
+    def exited() -> bool:
+        # The session process may also be the watchdog's parent. Reap that child:
+        # kill(pid, 0) alone reports a terminated zombie as still alive indefinitely.
+        if hasattr(os, "WNOHANG"):
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    return True
+            except (ChildProcessError, OSError):
+                pass  # A detached watchdog from another caller is not our child.
+        return not _pid_exists(pid)
+
     deadline = time.monotonic() + 2.0
-    while _pid_exists(pid) and time.monotonic() < deadline:
+    while not exited() and time.monotonic() < deadline:
         time.sleep(0.05)
-    if _pid_exists(pid):
+    if not exited():
         logger.warning("stale teardown watchdog pid %s did not stop", pid)
         return False
     _clear_watchdog_registration(ref, pid=pid, options_fingerprint=fingerprint)
     return True
+
+
+def retire_stopped_target_watchdog(target: TargetLike) -> dict[str, Any] | None:
+    """Retire supervision after the caller proved its exact owned target boot stopped.
+
+    The caller must hold the target's exclusive device transaction through this call
+    and lease release, preventing a successor from installing a new guard meanwhile.
+    Pending undo records are deliberately untouched: an old/unproven boot may still
+    need explicit recovery, but a stopped target needs no detached polling process.
+    """
+    ref = target_ref(target)
+    registration = _read_watchdog_registration(ref)
+    if registration is None:
+        return None
+    pid, fingerprint = registration
+    stopped = _retire_watchdog(ref, pid, fingerprint)
+    return {"ok": stopped, "stopped": stopped, "pending_undos_preserved": True,
+            "detail": "watchdog retired" if stopped else "watchdog termination could not be verified"}
 
 
 def ensure_watchdog(
@@ -544,6 +576,7 @@ def ensure_watchdog(
 __all__ = [
     "ensure_watchdog",
     "reap",
+    "retire_stopped_target_watchdog",
     "sweep",
     "watchdog_alive",
     "watchdog_pid_path",

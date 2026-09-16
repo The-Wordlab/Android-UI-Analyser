@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Finishing an unattended session now retires its registered teardown watchdog after the
+  exact owned virtual-target boot stops and before lease release. An old boot's unreplayable
+  undo records remain available for deliberate recovery without an orphan polling process;
+  unverified watchdog termination remains a cleanup failure. Child watchdogs are also reaped.
+
 ## [0.27.2] - 2026-09-16
 
 ### Fixed

@@ -72,6 +72,14 @@ that deliberate recovery is required, without replaying onto an unproven boot. T
 to target-facing services such as helper removal. Host-only residue can still be cleaned.
 Missing backup files and unreadable ledgers are failures, never successful empty cleanup.
 
+When unattended session cleanup confirms that its exact AUA-started virtual-target boot stopped,
+it also retires the registered teardown watchdog before releasing the target lease. Both operations
+stay inside the exclusive device transaction so a successor's guard cannot be terminated. Process
+identity must match the watchdog module, platform and target; unverifiable termination is a cleanup
+failure. Reused targets and warm handoffs retain their supervision. This does not discard or replay
+old-boot undo records: they remain visible for deliberate recovery, without a detached process
+polling a target that this session has explicitly stopped.
+
 ### Explicit recovery when the original boot or configuration is gone
 
 `aua teardown status` reports each blocked target or corrupt ledger file separately. A malformed

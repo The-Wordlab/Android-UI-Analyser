@@ -12,6 +12,9 @@ down where a stranger can find it, and replayed by someone else.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -615,9 +618,57 @@ def test_stale_watchdog_metadata_never_signals_an_unrelated_recycled_pid(
         ref, pid=444, options_fingerprint="legacy-fingerprint"
     )
     signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(teardown, "_pid_exists", lambda _pid: True)
     monkeypatch.setattr(teardown, "_is_target_watchdog", lambda _pid, _ref: False)
     monkeypatch.setattr(teardown.os, "kill", lambda pid, sig: signalled.append((pid, sig)))
 
     assert teardown._retire_watchdog(ref, 444, "legacy-fingerprint") is True
     assert signalled == []
     assert not teardown.watchdog_pid_path(ref).exists()
+
+
+def test_stopped_target_without_a_registered_watchdog_needs_no_process_action(monkeypatch):
+    monkeypatch.setattr(teardown, "_retire_watchdog", lambda *_: pytest.fail("nothing to retire"))
+    assert teardown.retire_stopped_target_watchdog(teardown.target_ref("absent-guard")) is None
+
+
+def test_stopped_target_retirement_refuses_unknown_process_identity_and_preserves_undos(monkeypatch):
+    ref = teardown.target_ref("same-id", platform="example-os")
+    device_ledger.record(ref, key="http_proxy", kind="http_proxy", op="set_http_proxy",
+                         args={"host_port": None}, instance_token="old-boot")
+    before = device_ledger.ledger_path(ref).read_bytes()
+    teardown._write_watchdog_registration(ref, pid=444, options_fingerprint="recorded-options")
+    monkeypatch.setattr(teardown, "_pid_exists", lambda _pid: True)
+    monkeypatch.setattr(teardown, "_is_target_watchdog", lambda _pid, _ref: None)
+    monkeypatch.setattr(teardown.os, "kill", lambda *_: pytest.fail("Never signal an unproven process"))
+    result = teardown.retire_stopped_target_watchdog(ref)
+    assert result["ok"] is False
+    assert teardown._read_watchdog_registration(ref) == (444, "recorded-options")
+    assert device_ledger.ledger_path(ref).read_bytes() == before
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX child retirement and reaping")
+def test_stopped_target_guard_is_reaped_without_erasing_old_boot_undo(monkeypatch):
+    ref = teardown.target_ref("retired-target", platform="example-os")
+    sibling = teardown.target_ref("retired-target", platform="other-os")
+    device_ledger.record(ref, key="http_proxy", kind="http_proxy", op="set_http_proxy",
+                         args={"host_port": None}, instance_token="old-boot")
+    before = device_ledger.ledger_path(ref).read_bytes()
+    # Only a test-owned inert child is signalled; no target, adapter or device runs.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        teardown._write_watchdog_registration(ref, pid=child.pid, options_fingerprint="options")
+        teardown._write_watchdog_registration(sibling, pid=12345, options_fingerprint="sibling")
+        monkeypatch.setattr(teardown, "_is_target_watchdog", lambda pid, target: pid == child.pid and target == ref)
+        result = teardown.retire_stopped_target_watchdog(ref)
+        assert result["ok"] is True and result["stopped"] is True
+        assert result["pending_undos_preserved"] is True
+        assert device_ledger.ledger_path(ref).read_bytes() == before
+        assert teardown._read_watchdog_registration(ref) is None
+        assert teardown._read_watchdog_registration(sibling) == (12345, "sibling")
+        with pytest.raises(ProcessLookupError):
+            os.kill(child.pid, 0)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)

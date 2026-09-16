@@ -2202,7 +2202,7 @@ def session_finish(
     # reused device and cannot race a new claimant inside the device transaction.
     lease_serial = getattr(self, "_lease_serial", None)
     if not errors and lease_serial == state.serial and lease_owner:
-        from . import leases
+        from . import leases, teardown
 
         self.release_device_use()
         started_target = bool(state.virtual_target_started or state.emulator_started)
@@ -2226,11 +2226,19 @@ def session_finish(
                         )
                         retired = state.serial in stopped.get("stopped_target_ids", [])
                         if retired:
-                            released = leases.release(
-                                self._lease_registry_dir,
-                                target,
-                                owner=lease_owner,
-                            )
+                            watchdog = teardown.retire_stopped_target_watchdog(target)
+                            if watchdog is not None:
+                                cleanup.append({"action": "teardown_watchdog_retire",
+                                                "ok": watchdog["ok"], "result": watchdog})
+                                if not watchdog["ok"]:
+                                    errors.append({"action": "teardown_watchdog_retire",
+                                                   "message": str(watchdog["detail"])})
+                            if not errors:
+                                released = leases.release(
+                                    self._lease_registry_dir,
+                                    target,
+                                    owner=lease_owner,
+                                )
                     cleanup.append({
                         "action": "owned_virtual_target_stop",
                         "virtual_target": {

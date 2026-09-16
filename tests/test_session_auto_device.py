@@ -513,9 +513,13 @@ def test_session_finish_releases_the_automatic_process_lease(
 
 
 @pytest.mark.parametrize("recovered_provision", [False, True])
+@pytest.mark.parametrize("watchdog_ok", [None, True, False])
+@pytest.mark.parametrize("stop_ok", [True, False])
 def test_session_finish_can_stop_only_the_exact_target_it_started(
-    tmp_path: Path, monkeypatch: Any, recovered_provision: bool,
+    tmp_path: Path, monkeypatch: Any, recovered_provision: bool, watchdog_ok: bool | None, stop_ok: bool,
 ) -> None:
+    from android_ui_analyser import teardown
+
     cfg = make_config(
         cache={"dir": str(tmp_path / "run")},
         lease={"registry_dir": str(tmp_path / "coordination")},
@@ -564,9 +568,19 @@ def test_session_finish_can_stop_only_the_exact_target_it_started(
 
     def stop_instance(instance_token: str, **kwargs: Any) -> dict[str, Any]:
         stopped.append({"instance_token": instance_token, **kwargs})
-        return {"ok": True, "stopped_target_ids": [serial]}
+        return {"ok": stop_ok, "stopped_target_ids": [serial] if stop_ok else []}
+
+    retired_watchdogs = []
+
+    def retire_watchdog(target):
+        assert stop_ok and stopped, "Never retire supervision before the exact target stop is proved"
+        assert leases.read_lease(cfg.lease.registry_dir, serial) is not None
+        assert target.target_id == serial and target.platform == engine.platform.name
+        retired_watchdogs.append(target)
+        return None if watchdog_ok is None else {"ok": watchdog_ok, "detail": "watchdog result"}
 
     monkeypatch.setattr(engine, "virtual_target_stop_instance", stop_instance)
+    monkeypatch.setattr(teardown, "retire_stopped_target_watchdog", retire_watchdog)
     monkeypatch.setattr(engine, "session_review", lambda _session_id: {"ok": True})
 
     finished = engine.session_finish(
@@ -575,23 +589,34 @@ def test_session_finish_can_stop_only_the_exact_target_it_started(
         retain_started_target=False,
     )
 
-    assert finished["ok"] is True
-    assert leases.read_lease(cfg.lease.registry_dir, serial) is None
+    expected_ok = stop_ok and watchdog_ok is not False
+    assert finished["ok"] is expected_ok
+    assert (leases.read_lease(cfg.lease.registry_dir, serial) is None) is expected_ok
+    assert len(retired_watchdogs) == int(stop_ok)
     assert stopped == [{
         "instance_token": token,
         "owner": owner,
         "requested_by": "session-finish",
     }]
-    assert [item["action"] for item in finished["cleanup"]] == [
+    assert [item["action"] for item in finished["cleanup"]] == (
+        ["teardown_watchdog_retire"] if stop_ok and watchdog_ok is not None else []
+    ) + [
         "owned_virtual_target_stop",
         "lease_release",
     ]
-    assert finished["cleanup"][0]["virtual_target"]["instance_token"] == token
+    target_cleanup = next(item for item in finished["cleanup"] if item["action"] == "owned_virtual_target_stop")
+    assert target_cleanup["virtual_target"]["instance_token"] == token
+    if stop_ok and watchdog_ok is False:
+        assert any(item["action"] == "teardown_watchdog_retire" for item in finished["errors"])
 
 
 def test_stop_started_target_never_stops_a_reused_target(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
+    from android_ui_analyser import teardown
+
+    monkeypatch.setattr(teardown, "retire_stopped_target_watchdog",
+                        lambda _target: pytest.fail("A reused target still needs its watchdog"))
     cfg = make_config(
         cache={"dir": str(tmp_path / "run")},
         lease={"registry_dir": str(tmp_path / "coordination")},
