@@ -75,7 +75,7 @@ def contract_criteria(contract: str | None) -> list[str]:
 
 
 def contract_max_tokens(requested: int, contract: str | None) -> int:
-    """Reserve enough output for every exact criterion plus concise evidence."""
+    """Reserve enough output for compact criterion indexes plus concise evidence."""
     criteria = contract_criteria(contract)
     if not criteria:
         return requested
@@ -95,14 +95,14 @@ def outcome_schema(contract: str | None) -> dict[str, Any]:
         "items": {
             "type": "object",
             "properties": {
-                "criterion": {"type": "string", "enum": criteria},
+                "criterion_index": {"type": "integer", "minimum": 0, "maximum": len(criteria) - 1},
                 "result": {
                     "type": "string",
                     "enum": ["verified", "failed", "not_verified", "not_applicable"],
                 },
                 "evidence": {"type": "string", "minLength": 1, "maxLength": 400},
             },
-            "required": ["criterion", "result", "evidence"],
+            "required": ["criterion_index", "result", "evidence"],
             "additionalProperties": False,
         },
     }
@@ -110,12 +110,10 @@ def outcome_schema(contract: str | None) -> dict[str, Any]:
     return schema
 
 
-def normalize_contract_answer(answer: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
-    """Repair identity-preserving formatting only; missing evidence stays not verified."""
-    criteria_schema = schema.get("properties", {}).get("criteria")
-    if not criteria_schema or "criteria" not in answer:
+def normalize_contract_answer(answer: dict[str, Any], expected: Sequence[str]) -> dict[str, Any]:
+    """Normalize to unique source-ordered wire indexes; missing evidence is not verified."""
+    if not expected or "criteria" not in answer:
         return answer
-    expected = criteria_schema["items"]["properties"]["criterion"]["enum"]
 
     def key(value: str) -> str:
         text = unicodedata.normalize("NFKC", value).translate(str.maketrans({
@@ -123,7 +121,7 @@ def normalize_contract_answer(answer: dict[str, Any], schema: dict[str, Any]) ->
         }))
         return re.sub(r"\s+", " ", text).strip().removesuffix(".").casefold()
 
-    canonical = {key(item): item for item in expected}
+    canonical = {key(item): index for index, item in enumerate(expected)}
     if len(canonical) != len(expected):
         raise RunError("contract contains ambiguous duplicate criterion labels")
     supplied = answer["criteria"]
@@ -132,27 +130,36 @@ def normalize_contract_answer(answer: dict[str, Any], schema: dict[str, Any]) ->
                     for label, entry in supplied.items()]
     if not isinstance(supplied, list) or not supplied:
         raise RunError("criteria must be a non-empty list of criterion/result/evidence objects")
-    found: dict[str, dict[str, Any]] = {}
+    found: dict[int, dict[str, Any]] = {}
     for raw in supplied:
         if not isinstance(raw, dict):
             raise RunError("each criteria entry needs criterion, result, and observed evidence")
         entry = dict(raw)
         if "criterion" not in entry and "name" in entry:
             entry["criterion"] = entry.pop("name")
-        label = entry.get("criterion")
-        if isinstance(label, list) and len(label) == 1:
-            label = label[0]
-        if not isinstance(label, str) or key(label) not in canonical:
-            raise RunError("criterion must identify exactly one authored bullet, not the whole list")
-        label = canonical[key(label)]
-        if label in found:
+        if "criterion_index" in entry:
+            index = entry["criterion_index"]
+            if type(index) is not int or not 0 <= index < len(expected):
+                raise RunError("criterion_index must be an integer in the authored zero-based range")
+            if "criterion" in entry:
+                raise RunError("use only criterion_index, not both an index and a criterion label")
+        else:
+            # Compatibility for older saved/fake model replies. This long-label shape is
+            # never advertised in the native tool schema or requested in the prompt.
+            label = entry.pop("criterion", None)
+            if isinstance(label, list) and len(label) == 1:
+                label = label[0]
+            if not isinstance(label, str) or key(label) not in canonical:
+                raise RunError("criterion must identify exactly one authored bullet, not the whole list; use criterion_index")
+            index = canonical[key(label)]
+        if index in found:
             raise RunError("criteria contains a duplicate authored bullet; return each exactly once")
-        entry["criterion"] = label
-        found[label] = entry
+        entry["criterion_index"] = index
+        found[index] = entry
     result = copy.deepcopy(answer)
-    result["criteria"] = [found.get(label, {
-        "criterion": label, "result": "not_verified", "evidence": "Judge omitted this criterion; no evidence was supplied.",
-    }) for label in expected]
+    result["criteria"] = [found.get(index, {
+        "criterion_index": index, "result": "not_verified", "evidence": "Judge omitted this criterion; no evidence was supplied.",
+    }) for index in range(len(expected))]
     statuses = [item.get("result") for item in result["criteria"]]
     if "failed" in statuses:
         result["verdict"] = "fail"
@@ -474,6 +481,7 @@ class Decider:
         name: str,
         images: Sequence[str] = (),
         max_tokens: int | None = None,
+        criteria_order: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Ask one question; return the validated object plus usage and cost accounting.
 
@@ -636,8 +644,17 @@ class Decider:
                 message, native = completion(response)
                 if native is None or native.get("name") != name:
                     raise RunError("decider did not answer with the required tool call")
-                answer = normalize_contract_answer(native["arguments"], schema)
+                answer = normalize_contract_answer(native["arguments"], criteria_order)
                 jsonschema.validate(answer, schema)
+                if criteria_order:
+                    indexes = [entry["criterion_index"] for entry in answer["criteria"]]
+                    if indexes != list(range(len(criteria_order))):
+                        raise RunError("return every criterion_index exactly once in source order")
+                    answer["criteria"] = [
+                        {"criterion": criteria_order[entry["criterion_index"]],
+                         **{key: value for key, value in entry.items() if key != "criterion_index"}}
+                        for entry in answer["criteria"]
+                    ]
                 result = answer
                 break
             except (RunError, jsonschema.ValidationError) as exc:
@@ -718,8 +735,10 @@ async def judge_outcome(
     question = ("Was this goal achieved, as shown by the frames? The final frame is the current screen.")
     if contract:
         question = ("Judge the run against `authored_contract`, which is the authority here. Every "
-                    "criterion it states must hold. Return one `criteria` entry for every exact "
-                    "markdown bullet, in source order, with observed evidence. A negative criterion "
+                    "criterion it states must hold. Return one compact `criteria` entry per "
+                    "markdown bullet, identified ONLY by `criterion_index`: zero-based source order "
+                    "(first bullet is 0). Never repeat the criterion text. Include each index exactly "
+                    "once, in source order, with a result and concise observed evidence. A negative criterion "
                     "is verified by evidence that the forbidden state is absent throughout its "
                     "relevant journey; do not mark it not_applicable merely because the forbidden "
                     "state did not occur. Reserve not_applicable for a genuinely conditional clause "
@@ -732,6 +751,7 @@ async def judge_outcome(
         question=question, context=context, schema=outcome_schema(contract), name="record_verdict",
         images=images,
         max_tokens=contract_max_tokens(decider.max_tokens, contract),
+        criteria_order=criteria,
     )
     if criteria:
         returned = [item.get("criterion") for item in decision["result"].get("criteria", [])]

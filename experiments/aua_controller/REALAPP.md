@@ -31,6 +31,16 @@ must be supported by the target app/platform; unsupported access leaves the prer
 
 ## What broke on a real application
 
+The judge's native tool schema uses compact entries such as
+`{"criterion_index":0,"result":"verified","evidence":"Selected option is visible"}`.
+Indexes refer to the authored markdown bullets in zero-based source order. The tool schema never
+enumerates the long criterion strings, and the prompt asks the model not to repeat them. Before
+combining votes or writing output, the host validates unique in-range integer identities, orders
+them by source, and restores the exact authored `criterion` labels. Missing entries become
+`not_verified`, never fabricated passes; duplicate, ambiguous or out-of-range identities enter
+the bounded repair/fallback path. Legacy exact-label replies remain readable internally, but are
+not advertised as the model's output format.
+
 Judge latency is bounded independently of the controller: `Decider` defaults to 45 seconds per
 provider/model route (including every transport retry, backoff and schema repair), and 90 seconds
 per vote. Each route gets at most its fair share of remaining time divided by remaining routes,

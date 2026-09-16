@@ -178,7 +178,8 @@ def test_reasoning_exhaustion_route_relaxation_and_schema_repair_have_separate_b
         tool_reply("record_verdict", invalid), tool_reply("record_verdict", usable)])
     subject = decider(sender, fallbacks=[("fictional/fallback", SETTINGS)])
     result = asyncio.run(subject.decide(role="judge", instructions="i", question="q", context={},
-                                       schema=outcome_schema(contract), name="record_verdict"))
+                                       schema=outcome_schema(contract), name="record_verdict",
+                                       criteria_order=contract_criteria(contract)))
     assert result["result"]["verdict"] == "unverified"
     assert result["result"]["criteria"][1]["result"] == "not_verified"
     assert [item["model"] for item in sender.payloads] == [
@@ -324,6 +325,57 @@ def test_criterion_reordering_and_missing_evidence_never_invent_a_pass():
     assert [item["criterion"] for item in result["criteria"]] == contract_criteria(contract)
     assert result["criteria"][-1]["result"] == "not_verified"
     assert result["verdict"] == "unverified"
+
+
+def test_wire_schema_uses_only_indexes_and_host_restores_exact_authored_labels():
+    labels = ["The first long authored product criterion must remain byte-for-byte intact.",
+              "The second criterion includes apostrophes, punctuation, and exact casing."]
+    contract = "\n".join("- " + label for label in labels)
+    answer = {**verdict("pass"), "criteria": [
+        {"criterion_index": 1, "result": "verified", "evidence": "second visible"},
+        {"criterion_index": 0, "result": "verified", "evidence": "first visible"},
+    ]}
+    sender = Sender([tool_reply("record_verdict", answer)])
+    result = asyncio.run(judge_outcome_votes(decider(sender), votes=1, goal="verify", final_frame=frame(),
+                                             contract=contract))
+    wire_schema = sender.payloads[0]["tools"][0]["function"]["parameters"]
+    properties = wire_schema["properties"]["criteria"]["items"]["properties"]
+    assert properties["criterion_index"] == {"type": "integer", "minimum": 0, "maximum": 1}
+    assert "criterion" not in properties
+    assert not any(label in json.dumps(wire_schema) for label in labels)
+    assert [item["criterion"] for item in result["criteria"]] == labels
+    assert [item["criterion"] for item in result["votes"][0]["criteria"]] == labels
+    assert "criterion_index" not in json.dumps(result)
+    assert "Never repeat the criterion text" in sender.payloads[0]["messages"][1]["content"]
+
+
+@pytest.mark.parametrize("indexes", [[0, 0], [0, 2], [-1, 1], [True, 1], ["0", 1]])
+def test_invalid_or_duplicate_indexes_use_schema_repair_before_a_verdict(indexes):
+    contract = "- First.\n- Second."
+
+    def indexed_answer(values):
+        return {**verdict("pass"), "criteria": [
+            {"criterion_index": index, "result": "verified", "evidence": "visible"}
+            for index in values
+        ]}
+
+    sender = Sender([tool_reply("record_verdict", indexed_answer(indexes)),
+                     tool_reply("record_verdict", indexed_answer([0, 1]))])
+    result = asyncio.run(judge_outcome_votes(decider(sender), votes=1, goal="verify", final_frame=frame(),
+                                             contract=contract))
+    assert len(sender.payloads) == 2 and result["verdict"] == "pass"
+    assert [item["criterion"] for item in result["criteria"]] == ["First.", "Second."]
+
+
+def test_omitted_index_maps_to_not_verified_not_an_invented_pass():
+    answer = {**verdict("pass"), "criteria": [{"criterion_index": 0, "result": "verified", "evidence": "visible"}]}
+    sender = Sender([tool_reply("record_verdict", answer)])
+    result = asyncio.run(judge_outcome_votes(decider(sender), votes=1, goal="verify", final_frame=frame(),
+                                             contract="- First.\n- Device default."))
+    assert result["verdict"] == "unverified"
+    assert result["criteria"][1]["criterion"] == "Device default."
+    assert result["criteria"][1]["result"] == "not_verified"
+    assert "omitted" in result["criteria"][1]["evidence"]
 
 
 def test_duplicate_criteria_fail_inside_the_repair_loop_not_after_it():

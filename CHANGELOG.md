@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Judge tool replies identify contract bullets by compact zero-based indexes instead of
+  repeating long criterion strings. The host validates identities and restores exact authored
+  labels in source order; duplicates/out-of-range values require repair, and omissions stay unverified.
 - Reasoning-only judge responses advance immediately even when providers label them normal
   completions. Remaining routes share the vote deadline fairly, and judges request a separate
   2048-token reasoning budget without changing controller profiles. Reported upstream charges
