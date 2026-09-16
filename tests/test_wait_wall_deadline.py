@@ -284,8 +284,24 @@ def test_await_retries_a_failed_passive_read_within_the_same_deadline(monkeypatc
 
 
 @pytest.mark.parametrize("predicate", ["text:Ready", "!text:Loading"])
-def test_repeated_passive_read_errors_timeout_and_never_prove_absence(monkeypatch, predicate):
+@pytest.mark.parametrize("scheduler_pause", [0.0, 0.15], ids=["repeated-polls", "deadline-after-first"])
+def test_repeated_passive_read_errors_timeout_and_never_prove_absence(
+    monkeypatch, predicate, scheduler_pause
+):
+    # Poll count is a clock property, not a guarantee that a loaded CI worker will
+    # be scheduled twice within 150 ms. Exercise both schedules deterministically;
+    # the slow-runtime tests above independently enforce the real wall deadline.
+    now = [100.0]
+
+    def sleep(seconds):
+        now[0] += max(seconds, scheduler_pause)
+
+    monkeypatch.setattr(
+        engine_waits, "time",
+        SimpleNamespace(monotonic=lambda: now[0], sleep=sleep, time=time.time),
+    )
     runtime = Runtime()
+    monkeypatch.setattr(runtime, "_wait", lambda seconds: None)
     eng = engine(runtime)
     probes = []
 
@@ -294,12 +310,16 @@ def test_repeated_passive_read_errors_timeout_and_never_prove_absence(monkeypatc
         raise DeviceError("passive UI read failed")
 
     monkeypatch.setattr(runtime, "find_text", probe)
-    started = time.monotonic()
     result = eng.await_predicate(predicate, timeout_ms=150, poll_ms=10,
                                  rich_ui=False, observe=False)
-    assert time.monotonic() - started < 0.8
+    assert now[0] == pytest.approx(100.15)
+    assert result.wait_budget_ms == 150
     assert not result.ok and result.await_outcome == "timeout"
-    assert len(probes) >= 2 and len(set(probes)) == 1
+    if scheduler_pause:
+        assert len(probes) == 1
+    else:
+        assert len(probes) >= 2
+    assert set(probes) == {100.15}
     assert result.await_terms[0]["satisfied"] is False
     assert result.await_terms[0]["reason"] == "ui_read_failed"
     assert read_budget.current() is None
