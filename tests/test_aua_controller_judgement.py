@@ -19,6 +19,7 @@ from experiments.aua_controller.judgement import (
     contract_criteria,
     contract_max_tokens,
     judge_outcome_votes,
+    judge_route_budget,
     outcome_schema,
     summarize_route,
 )
@@ -259,8 +260,41 @@ def test_total_decision_deadline_bounds_all_routes(tmp_path):
     with pytest.raises(RunError, match="decision deadline"):
         asyncio.run(subject.decide(role="judge", instructions="i", question="q", context={},
                                    schema=OUTCOME_SCHEMA, name="record_verdict"))
-    assert calls == ["fictional/model", "fictional/second"]
-    assert subject.report()["unreported_cost_requests"] == 2
+    assert calls == ["fictional/model", "fictional/second", "fictional/third"]
+    assert subject.report()["unreported_cost_requests"] == 3
+
+
+def test_remaining_routes_receive_a_fair_slice_without_extending_total_deadline():
+    assert judge_route_budget(90, 4, 45) == 22.5
+    assert judge_route_budget(60, 3, 45) == 20
+    assert judge_route_budget(50, 1, 45) == 45
+
+
+@pytest.mark.parametrize("completion,reasoning,finish", [(9285, 9285, "stop"),
+                                                        (429, 429, "stop"), (8192, 8192, "length")])
+def test_reasoning_only_usage_skips_schema_repair_and_counts_upstream_charge(completion, reasoning, finish):
+    exhausted = {"model": "fictional/model", "usage": {
+        "cost": 0, "cost_details": {"upstream_inference_cost": 0.0146829},
+        "completion_tokens": completion, "completion_tokens_details": {"reasoning_tokens": reasoning},
+    }, "choices": [{"finish_reason": finish, "message": {"role": "assistant", "content": ""}}]}
+    sender = Sender([exhausted, tool_reply("record_verdict", verdict("pass"), cost=0.0005)])
+    subject = decider(sender, fallbacks=[("fictional/fallback", SETTINGS)])
+    result = asyncio.run(subject.decide(role="judge", instructions="i", question="q", context={},
+                                       schema=OUTCOME_SCHEMA, name="record_verdict"))
+    assert [item["model"] for item in sender.payloads] == ["fictional/model", "fictional/fallback"]
+    assert result["cost"] == pytest.approx(0.0151829)
+    assert subject.report()["reported_usd"] == pytest.approx(0.0151829)
+
+
+def test_judge_requests_reasoning_budget_without_mutating_controller_profile():
+    original = copy.deepcopy(SETTINGS)
+    sender = Sender([tool_reply("record_verdict", verdict("pass"))])
+    asyncio.run(decider(sender, max_tokens=8192).decide(
+        role="judge", instructions="i", question="q", context={},
+        schema=OUTCOME_SCHEMA, name="record_verdict"))
+    assert sender.payloads[0]["reasoning"] == {"max_tokens": 2048, "exclude": False}
+    assert original == SETTINGS
+    assert sender.payloads[0]["max_tokens"] == 8192
 
 
 def test_default_judge_deadlines_do_not_change_controller_request_timeout():

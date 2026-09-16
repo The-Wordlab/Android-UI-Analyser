@@ -13,6 +13,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Reasoning-only judge responses advance immediately even when providers label them normal
+  completions. Remaining routes share the vote deadline fairly, and judges request a separate
+  2048-token reasoning budget without changing controller profiles. Reported upstream charges
+  count toward spend limits and totals when the provider's top-level cost is zero.
 - Judge requests now share a 45-second route deadline across transport retries/backoff and schema
   repairs, with a 90-second deadline per vote. Stalled routes advance promptly; cancellation
   preserves cleanup and result artifacts, and requests without usage mark reported cost incomplete.

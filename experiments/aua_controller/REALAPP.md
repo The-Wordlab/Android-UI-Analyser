@@ -33,7 +33,10 @@ must be supported by the target app/platform; unsupported access leaves the prer
 
 Judge latency is bounded independently of the controller: `Decider` defaults to 45 seconds per
 provider/model route (including every transport retry, backoff and schema repair), and 90 seconds
-per vote. Two-vote judging therefore takes at most roughly three minutes of model requests, not
+per vote. Each route gets at most its fair share of remaining time divided by remaining routes,
+so early stalls cannot starve the last fallback. Responses whose reasoning tokens consume every
+completion token (without a native answer) advance immediately, even with `finish_reason: stop`.
+Two-vote judging therefore takes at most roughly three minutes of model requests, not
 120-second HTTP timeouts multiplied by four transport attempts and repair rounds. A timeout
 cancels that transport coroutine, emits a `route_timeout` diagnostic immediately, and advances
 the configured ladder while the decision deadline remains. Controller request limits are unchanged.
@@ -42,6 +45,15 @@ Reported charges are retained after failure. A timed-out or cancelled request ha
 not proven zero cost: `cost_complete: false` and `unreported_cost_requests` in the decider report
 make that gap explicit, and the run's cost summary is marked incomplete. Graceful cancellation
 still writes an unverified result and performs session cleanup; it cannot produce a passing vote.
+
+Judge payloads with a sufficiently large output budget request `reasoning.max_tokens: 2048` and
+`exclude: false`, replacing effort on the outgoing judge payload only. Controller profiles and
+the comparison manifest remain unchanged. This is a requested budget, not a verified provider
+guarantee: [OpenRouter's reasoning documentation](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)
+states that effort-only models may map a token budget to effort. Wall deadlines and usage-based
+fallback therefore remain mandatory. Nonzero `usage.cost_details.upstream_inference_cost` is
+counted once when `usage.cost` is zero, including in the spend guard; absent timeout usage remains
+unknown rather than a fabricated zero.
 
 | Symptom | Measured | Cause |
 |---|---|---|

@@ -148,15 +148,21 @@ class CostGuard:
         if self.total >= self.limit:
             raise HostedError("reported OpenRouter cost limit reached; further model requests stopped")
 
-    def consume(self, response: dict[str, Any]) -> None:
+    def consume(self, response: dict[str, Any]) -> float:
         usage = response.get("usage")
         try:
             cost = _nonnegative(usage.get("cost") if isinstance(usage, dict) else None, "usage.cost")
+            # Some providers report zero at the top level while disclosing a real upstream
+            # charge. Count that charge once, without replacing an already nonzero total.
+            details = usage.get("cost_details") if isinstance(usage, dict) else None
+            if cost == 0 and isinstance(details, dict) and "upstream_inference_cost" in details:
+                cost = _nonnegative(details["upstream_inference_cost"], "upstream_inference_cost")
         except HostedError:
             self.missing = True
             raise HostedError("reported usage.cost missing or invalid; further model requests stopped") from None
         self.total += cost
         self.responses += 1
+        return float(cost)
 
     def report(self) -> dict[str, Any]:
         return {"reported_usd": float(self.total), "limit_usd": float(self.limit),

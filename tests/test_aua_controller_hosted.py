@@ -109,6 +109,19 @@ def test_reported_spend_boundary_tracks_zero_and_stops_after_exact_limit():
         guard.before_request()
 
 
+@pytest.mark.parametrize("cost,upstream,expected", [(0, 0.0146829, 0.0146829),
+                                                    (0.002, 0.01, 0.002), (0, 0, 0)])
+def test_upstream_charge_is_counted_once_when_top_level_is_zero(cost, upstream, expected):
+    guard = CostGuard(0.01)
+    assert guard.consume({"usage": {"cost": cost, "cost_details": {
+        "upstream_inference_cost": upstream,
+    }}}) == pytest.approx(expected)
+    assert guard.report()["reported_usd"] == pytest.approx(expected)
+    if expected >= 0.01:
+        with pytest.raises(HostedError, match="limit reached"):
+            guard.before_request()
+
+
 def test_candidate_manifest_configurations_are_supported():
     path = Path(__file__).resolve().parents[1] / "experiments/aua_controller/openrouter-comparison.json"
     if not path.exists():

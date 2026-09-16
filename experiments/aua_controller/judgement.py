@@ -161,6 +161,31 @@ def normalize_contract_answer(answer: dict[str, Any], schema: dict[str, Any]) ->
     return result
 
 
+def reasoning_only_response(response: dict[str, Any]) -> bool:
+    """Recognize exhausted reasoning even when a provider mislabels finish_reason as stop."""
+    choices = response.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+        return False
+    if choices[0].get("finish_reason") == "length":
+        return True
+    message = choices[0].get("message") or {}
+    if isinstance(message, dict) and message.get("tool_calls"):
+        return False
+    usage = response.get("usage") or {}
+    if not isinstance(usage, dict):
+        return False
+    details = usage.get("completion_tokens_details") or {}
+    completed = usage.get("completion_tokens")
+    reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    return (type(completed) is int and completed > 0 and type(reasoning) is int
+            and reasoning >= completed)
+
+
+def judge_route_budget(remaining: float, routes_left: int, route_limit: float) -> float:
+    """Reserve a fair share for every remaining route instead of starving the final fallback."""
+    return max(0.0, min(route_limit, remaining / routes_left))
+
+
 SCREEN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -388,6 +413,7 @@ class Decider:
         repair_budget: int = 1,
         route_timeout_s: float = 45,
         decision_timeout_s: float = 90,
+        reasoning_max_tokens: int | None = 2048,
         fallbacks: Sequence[tuple[str, dict[str, Any] | None]] = (),
         output: Path | None = None,
     ) -> None:
@@ -397,6 +423,8 @@ class Decider:
             raise RunError("decider budgets must be positive integers")
         if not (0 < route_timeout_s < float("inf") and 0 < decision_timeout_s < float("inf")):
             raise RunError("decider deadlines must be finite and positive")
+        if reasoning_max_tokens is not None and (type(reasoning_max_tokens) is not int or reasoning_max_tokens <= 0):
+            raise RunError("judge reasoning budget must be a positive integer or None")
         self.send = send
         self.model = model
         self.backend = backend
@@ -406,6 +434,7 @@ class Decider:
         self.repair_budget = repair_budget
         self.route_timeout_s = route_timeout_s
         self.decision_timeout_s = decision_timeout_s
+        self.reasoning_max_tokens = reasoning_max_tokens
         self.unreported_cost_requests = 0
         # Rungs tried in order once the model in hand has spent its repair budget. A judge
         # that cannot produce its own schema is not going to produce it on the fourth ask;
@@ -478,7 +507,13 @@ class Decider:
         rung_attempts = 0
         request_start = len(self.request_ms)
         decision_deadline = time.monotonic() + self.decision_timeout_s
-        route_deadline = min(decision_deadline, time.monotonic() + self.route_timeout_s)
+
+        def new_route_deadline() -> float:
+            now = time.monotonic()
+            return now + judge_route_budget(decision_deadline - now, len(self.ladder) - rung,
+                                            self.route_timeout_s)
+
+        route_deadline = new_route_deadline()
         while rung < len(self.ladder):
             if time.monotonic() >= decision_deadline:
                 error = "judge decision deadline exceeded"
@@ -493,7 +528,7 @@ class Decider:
                 record["escalated_to"] = self.ladder[rung][0]
                 rung_attempts = 0
                 forced_choice = True
-                route_deadline = min(decision_deadline, time.monotonic() + self.route_timeout_s)
+                route_deadline = new_route_deadline()
             rung_model, rung_settings = self.ladder[rung]
             remaining = min(route_deadline, decision_deadline) - time.monotonic()
             if remaining <= 0:
@@ -511,6 +546,17 @@ class Decider:
             }
             if self.hosted:
                 payload = configure_payload(payload, rung_settings)
+                reasoning = dict(payload.get("reasoning") or {})
+                if (self.reasoning_max_tokens is not None and payload["max_tokens"] > self.reasoning_max_tokens
+                        and reasoning.get("enabled") is not False and reasoning.get("effort") != "none"):
+                    # Request an answer reserve without changing the controller or manifest.
+                    # Effort-only providers may map this budget rather than enforce a hard cap;
+                    # usage-based exhaustion detection and wall deadlines remain authoritative.
+                    reasoning.pop("effort", None)
+                    reasoning["max_tokens"] = min(int(reasoning.get("max_tokens") or self.reasoning_max_tokens),
+                                                   self.reasoning_max_tokens)
+                    reasoning["exclude"] = False
+                    payload["reasoning"] = reasoning
                 self.guard.before_request()
             else:
                 payload.update(copy.deepcopy(rung_settings))
@@ -550,7 +596,7 @@ class Decider:
                         record.setdefault("route_failures", []).append(str(exc)[:400])
                         rung_attempts = 0
                         forced_choice = True
-                        route_deadline = min(decision_deadline, time.monotonic() + self.route_timeout_s)
+                        route_deadline = new_route_deadline()
                         continue
                     if forced_choice:
                         # Every rung is exhausted and none can honour a *forced* tool choice.
@@ -577,8 +623,7 @@ class Decider:
             usage = response.get("usage") if isinstance(response, dict) else None
             record["usage"].append(usage)
             if self.guard is not None and isinstance(response, dict):
-                self.guard.consume(response)
-                spent = float((usage or {}).get("cost") or 0)
+                spent = self.guard.consume(response)
                 record["cost"] += spent
                 self.total_cost += spent
             try:
@@ -586,6 +631,8 @@ class Decider:
                     raise RunError("decider response must be a JSON object")
                 record["model"] = response.get("model")
                 record["provider"] = response.get("provider")
+                if reasoning_only_response(response):
+                    raise RunError("judge returned reasoning only or a truncated completion")
                 message, native = completion(response)
                 if native is None or native.get("name") != name:
                     raise RunError("decider did not answer with the required tool call")
@@ -603,10 +650,12 @@ class Decider:
                 record["repairs"] += 1
                 messages.append({"role": "user", "content": "Your previous answer was invalid: " + error
                                  + ". Answer again with exactly one valid call to " + name + "."})
-                if error == "model completion truncated" and rung + 1 < len(self.ladder):
+                if error in {"model completion truncated", "judge returned reasoning only or a truncated completion"}:
                     # Repeating the same reasoning-only token exhaustion wastes the repair
                     # budget; the configured next judge has a different completion envelope.
                     rung_attempts = self.repair_budget + 1
+                    self._log({**record, "event": "reasoning_exhausted", "route_index": rung,
+                               "route_model": rung_model, "error": error})
         record["request_ms"] = sum(self.request_ms[request_start:])
         if result is None:
             record["error"] = error
@@ -627,6 +676,7 @@ class Decider:
                 "ladder": [model for model, _ in self.ladder], "escalations": self.escalations,
                 "reported_usd": round(self.total_cost, 8), "request_ms": self.request_ms,
                 "route_timeout_s": self.route_timeout_s, "decision_timeout_s": self.decision_timeout_s,
+                "reasoning_max_tokens_requested": self.reasoning_max_tokens,
                 "unreported_cost_requests": self.unreported_cost_requests,
                 "cost_complete": self.unreported_cost_requests == 0,
                 "spend_guard": self.guard.report() if self.guard is not None else None}
