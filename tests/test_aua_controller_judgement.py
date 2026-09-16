@@ -315,26 +315,52 @@ def test_route_deadline_covers_transport_backoff_and_advances_without_repair(tmp
     assert logs[0]["event"] == "route_timeout" and logs[0]["cost_unreported"] is True
 
 
-def test_route_repairs_share_one_deadline_and_keep_already_reported_spend(tmp_path):
+@pytest.mark.parametrize("first_response_seconds", [15, 45])
+def test_route_repairs_share_one_deadline_and_keep_already_reported_spend(
+    tmp_path, monkeypatch, first_response_seconds,
+):
+    from experiments.aua_controller import judgement as module
+
+    # Schema validation and CI scheduling can consume a 10ms real deadline before
+    # the repair starts. Advance the judge's clock explicitly; cancellation itself
+    # is covered by the transport-backoff deadline test above.
+    clock = [100.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    real_timeout = asyncio.timeout
+    budgets = []
+
+    def capture_timeout(delay):
+        budgets.append(delay)
+        return real_timeout(delay)
+
+    monkeypatch.setattr(module.asyncio, "timeout", capture_timeout)
     requests = []
 
     async def send(payload):
         requests.append(payload["model"])
         if len(requests) == 1:
+            clock[0] += first_response_seconds
             return tool_reply("record_verdict", {"verdict": "invalid"}, cost=0.003)
         if payload["model"] == "fictional/model":
-            await asyncio.Event().wait()
+            clock[0] += 30
+            raise TimeoutError
         return tool_reply("record_verdict", verdict("pass"), cost=0.004)
 
-    subject = decider(send, route_timeout_s=0.01, decision_timeout_s=1,
+    subject = decider(send, route_timeout_s=45, decision_timeout_s=90,
                       fallbacks=[("fictional/fallback", SETTINGS)], output=tmp_path)
     result = asyncio.run(subject.decide(role="judge", instructions="i", question="q", context={},
                                        schema=OUTCOME_SCHEMA, name="record_verdict"))
-    assert requests == ["fictional/model", "fictional/model", "fictional/fallback"]
+    repair = first_response_seconds < 45
+    assert requests == ["fictional/model"] * (2 if repair else 1) + ["fictional/fallback"]
+    assert budgets == ([45, 30, 45] if repair else [45, 45])
     assert result["cost"] == pytest.approx(0.007)
+    assert subject.report()["unreported_cost_requests"] == int(repair)
     logs = [json.loads(line) for line in (tmp_path / "judge-events.jsonl").read_text().splitlines()]
     timeout = next(item for item in logs if item.get("event") == "route_timeout")
-    assert timeout["reported_cost_usd"] == pytest.approx(0.003)
+    assert timeout["cost"] == pytest.approx(0.003)
+    if repair:
+        assert timeout["reported_cost_usd"] == pytest.approx(0.003)
+        assert timeout["deadline_s"] == 30
 
 
 @pytest.mark.parametrize("fenced", [False, True])

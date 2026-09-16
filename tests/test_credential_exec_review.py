@@ -42,12 +42,15 @@ def test_wrapper_signal_reaches_consumer_cleanup_before_wrapper_exits(
         "signal.signal(signal.SIGINT, interrupt)\n"
         "signal.signal(signal.SIGTERM, interrupt)\n"
         "pid.write_text(str(__import__('os').getpid()))\n"
-        "ready.write_text('ready')\n"
         "try:\n"
+        # Readiness must mean cleanup is armed, not just handlers installed. A
+        # signal after writing ready but before entering try used to skip finally.
+        "    ready.write_text('ready')\n"
         "    while True: time.sleep(1)\n"
         "except InterruptedError:\n"
         "    pass\n"
         "finally:\n"
+        "    time.sleep(0.05)\n"  # The wrapper must wait for real consumer cleanup.
         "    cleaned.write_text(signal.Signals(received).name)\n"
     )
     outer_script = """import json, sys
