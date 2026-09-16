@@ -40,6 +40,44 @@ _ANIMATION_GOAL_RE = re.compile(
 )
 
 
+def _recover_pending_boot(self: Engine, prepared: dict[str, Any]) -> dict[str, Any]:
+    """Carry a refused provision's exact boot into its same-caller fallback session."""
+    from . import leases
+
+    pending = getattr(self, "_session_unclaimed_boot", None)
+    if not isinstance(pending, dict):
+        return prepared
+    boot = pending["boot"]
+    if (
+        not boot.get("instance_token")
+        or prepared.get("serial") != boot.get("target_id")
+        or pending["platform"] != self.platform.name
+        or pending["cache_dir"] != str(self.config.cache.dir)
+        or pending["scope"] != leases._worker_scope()
+        or not leases.same_owner_identity(
+            pending["owner"], leases.resolve_owner(self._lease_owner),
+        )
+    ):
+        return prepared
+    # A serial can now name a sibling/replacement boot. Only the selected adapter's exact
+    # local owned-instance record (token + pid) can transfer cleanup responsibility.
+    status = self.virtual_target_status()
+    matching = any(
+        item.get("target_id") == boot.get("target_id")
+        and item.get("instance_token") == boot.get("instance_token")
+        and item.get("pid") == boot.get("pid")
+        for item in status.get("owned", []) if isinstance(item, dict)
+    )
+    if not matching:
+        return prepared
+    self._session_unclaimed_boot = None
+    return {
+        **boot, **prepared, "instance": boot.get("instance_token"),
+        "emulator_started": True, "virtual_target_started": True,
+        "recovered_provision": True,
+    }
+
+
 def _release_new_bootstrap_lease(self: Engine) -> None:
     """Release a reused target claimed by a session start that never returned a session."""
     if (

@@ -512,8 +512,9 @@ def test_session_finish_releases_the_automatic_process_lease(
     assert release["ok"] is True
 
 
+@pytest.mark.parametrize("recovered_provision", [False, True])
 def test_session_finish_can_stop_only_the_exact_target_it_started(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: Any, recovered_provision: bool,
 ) -> None:
     cfg = make_config(
         cache={"dir": str(tmp_path / "run")},
@@ -528,6 +529,23 @@ def test_session_finish_can_stop_only_the_exact_target_it_started(
     engine._lease_owner_resolved = owner
     engine._lease_serial = serial
     engine._leased_serial_resolved = (True, serial)
+    prepared = {
+        "virtual_target_started": True, "emulator_started": True,
+        "definition_id": "Pixel_7", "instance_token": token,
+    }
+    if recovered_provision:
+        from android_ui_analyser import engine_sessions
+
+        boot = {**prepared, "target_id": serial, "pid": 1234}
+        engine._session_unclaimed_boot = {
+            "boot": boot, "owner": owner, "scope": leases._worker_scope(),
+            "platform": engine.platform.name, "cache_dir": str(cfg.cache.dir),
+        }
+        monkeypatch.setattr(engine, "virtual_target_status", lambda: {"owned": [boot]})
+        prepared = engine_sessions._recover_pending_boot(
+            engine, {"serial": serial, "emulator_started": False},
+        )
+        assert prepared["recovered_provision"] is True
     state = create_session_state(
         cfg.cache.dir,
         owner=str(owner),
@@ -537,10 +555,10 @@ def test_session_finish_can_stop_only_the_exact_target_it_started(
         recommended_cli="aua analyze",
         network_backup_preexisting=False,
         network_profile_preexisting=False,
-        virtual_target_started=True,
-        virtual_target_definition_id="Pixel_7",
-        virtual_target_instance_token=token,
-        emulator_started=True,
+        virtual_target_started=prepared["virtual_target_started"],
+        virtual_target_definition_id=prepared["definition_id"],
+        virtual_target_instance_token=prepared["instance_token"],
+        emulator_started=prepared["emulator_started"],
     )
     stopped: list[dict[str, Any]] = []
 

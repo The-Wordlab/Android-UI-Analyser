@@ -356,6 +356,7 @@ class Engine:
         self._claimed_instance_token: str | None = None
         # Transient rollback context exists only until session_start returns a persisted session.
         self._session_bootstrap_prepared: dict[str, Any] | None = None
+        self._session_unclaimed_boot: dict[str, Any] | None = None
         self._session_bootstrap_animation: tuple[Path, str] | None = None
         self._action_recording_suppression = 0
         # Set only by the warm daemon/MCP job manager. Supported wait loops consult the event
@@ -719,11 +720,11 @@ class Engine:
         requested_definition = virtual_target or avd
 
         if self._device is not None:
-            return {
+            return engine_sessions._recover_pending_boot(self, {
                 "serial": self._device.serial,
                 "emulator_started": False,
                 "lease_waited_ms": 0,
-            }
+            })
 
         self._lease_wait_s = float(wait_for_lease_s)
         self._lease_waited_ms = 0
@@ -775,11 +776,11 @@ class Engine:
                             )
                         continue
                 self.config.device.serial = selected
-                return {
+                return engine_sessions._recover_pending_boot(self, {
                     "serial": selected,
                     "emulator_started": False,
                     "lease_waited_ms": self._lease_waited_ms,
-                }
+                })
             if required_app and selection_error is None:
                 detail = (
                     f"; checked without finding it on {', '.join(sorted(excluded_for_missing_app))}"
@@ -846,13 +847,19 @@ class Engine:
                 # serial was somebody else's leased device.
                 if claimed == serial:
                     self._release_failed_bootstrap_target(serial)
+                self._session_unclaimed_boot = {
+                    "boot": dict(boot), "owner": boot_owner, "scope": leases._worker_scope(),
+                    "platform": self.platform.name, "cache_dir": str(self.config.cache.dir),
+                }
                 with contextlib.suppress(Exception):
-                    self.virtual_target_stop_instance(
+                    rollback = self.virtual_target_stop_instance(
                         str(boot.get("instance_token") or ""),
                         expected_pid=boot.get("pid"),
                         owner=boot_owner,
                         requested_by="session-start-claim-rollback",
                     )
+                    if serial in rollback.get("stopped_target_ids", []):
+                        self._session_unclaimed_boot = None
                 raise
             return {
                 **boot,

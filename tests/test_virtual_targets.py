@@ -16,6 +16,7 @@ from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import (
     DeviceError,
+    DeviceLeasedError,
     InvalidPlatformCapabilityError,
     UnsupportedPlatformCapabilityError,
 )
@@ -407,6 +408,60 @@ def test_session_provisioning_uses_neutral_service_and_exact_rollback_token(
     assert isinstance(rollback[0], OwnedVirtualTargetStopRequest)
     assert rollback[0].instance_token == "owned-boot-token"
     assert all(name != "stop" for name, _request in service.calls)
+
+
+@pytest.mark.parametrize("replacement", [None, "token", "pid", "scope", "owner", "cache"])
+def test_fallback_session_recovers_only_its_own_failed_provision_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str | None,
+) -> None:
+    class PreservedBootService(_StrictVirtualTargets):
+        def stop_virtual_target_instance(self, request):
+            self.calls.append(("stop_instance", request))
+            return VirtualTargetStopResult(preserved_target_ids=("attached-target",))
+
+        def virtual_target_status(self, *, cache_dir):
+            self.calls.append(("status", cache_dir))
+            boot = VirtualTargetInstance(
+                target_id="attached-target", definition_id="small-simulator",
+                instance_token="sibling-boot-token" if replacement == "token" else "owned-boot-token",
+                pid=999 if replacement == "pid" else None,
+            )
+            return VirtualTargetStatus(running=(boot,), owned=(boot,))
+
+    service = PreservedBootService()
+    engine = _engine(tmp_path, service)
+    attempts = iter([None, DeviceLeasedError("sibling briefly holds target"), "attached-target"])
+
+    def claim(**kwargs):
+        value = next(attempts)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(engine, "_lease_device", claim)
+    with pytest.raises(DeviceLeasedError):
+        engine._prepare_session_target(wait_for_lease_s=0, provision_target=True,
+                                       headed=False, audio=False)
+    assert engine._session_unclaimed_boot is not None
+    if replacement in {"scope", "owner", "cache"}:
+        key = "cache_dir" if replacement == "cache" else replacement
+        engine._session_unclaimed_boot[key] = "different-worker"
+    prepared = engine._prepare_session_target(wait_for_lease_s=600, provision_target=False,
+                                              headed=False, audio=False)
+    if replacement is None:
+        assert prepared["virtual_target_started"] is True
+        assert prepared["instance_token"] == "owned-boot-token"
+        assert prepared["recovered_provision"] is True
+        assert engine._session_unclaimed_boot is None
+    else:
+        assert prepared["emulator_started"] is False
+        assert not prepared.get("virtual_target_started")
+        assert not prepared.get("instance_token")
+    # Only the failed claim's exact-token rollback was attempted; fallback never stops a
+    # sibling by serial. The session now retains its own token for stop-started-target cleanup.
+    stops = [request for name, request in service.calls if name == "stop_instance"]
+    assert len(stops) == 1
+    assert stops[0].instance_token == "owned-boot-token"
 
 
 @pytest.mark.parametrize("outcome", ["stopped", "preserved", "failed", "foreign"])

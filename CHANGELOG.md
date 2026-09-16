@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A failed provision claim retains its exact boot identity for a same-worker retry. When the
+  fallback acquires that same target, unattended session cleanup retires the original boot;
+  replacement boots and different worker, owner, or cache scopes are never adopted.
 - Explicit teardown discard can archive a lost target's undo records while its own process-bound
   lease is still alive, allowing cleanup and release without reconnecting to the missing target.
   Other owners and sibling worker scopes remain protected.
