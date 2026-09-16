@@ -11,6 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.27.5] - 2026-09-16
+
+### Fixed
+
+- Release validation no longer assumes a second passive-read retry can be scheduled inside a
+  150 ms wall deadline on a loaded macOS runner; deterministic coverage still verifies retries,
+  strict deadline reuse, and that read failures never prove UI absence.
+
 ## [0.27.4] - 2026-09-16
 
 ### Fixed
@@ -1074,5 +1082,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 [0.27.2]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.2
 [0.27.3]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.3
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.27.4...HEAD
 [0.27.4]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.4
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.27.5...HEAD
+[0.27.5]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.5
