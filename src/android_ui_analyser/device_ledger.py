@@ -479,7 +479,7 @@ def blocked_ledgers() -> list[dict[str, Any]]:
 
 def discard(
     target: TargetLike, *, keys: list[str], reason: str, confirmed: bool,
-    lease_registry_dir: str | Path,
+    lease_registry_dir: str | Path, owner: str | None = None,
 ) -> dict[str, Any]:
     """Archive then drop explicitly named undos, without connecting or restoring a device.
 
@@ -496,10 +496,12 @@ def discard(
     ):
         entries = read_ledger(ref)
         for directory in _lease_dirs(entries, lease_registry_dir):
-            if leases.read_lease(directory, ref) is not None:
+            entry = leases.read_lease(directory, ref)
+            if entry is not None and (owner is None or not leases.entry_owned_by(entry, owner)):
                 raise UsageError(
                     "cannot discard recovery evidence for a leased target",
-                    hint="Finish or release the session before explicitly discarding stale undos.",
+                    hint=("Only its owning process and worker scope may discard a leased target's "
+                          "undos. Use that session's original run cache, or wait for its owner to exit."),
                     code="teardown_discard_leased",
                 )
         selected = set(keys)

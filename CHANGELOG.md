@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Explicit teardown discard can archive a lost target's undo records while its own process-bound
+  lease is still alive, allowing cleanup and release without reconnecting to the missing target.
+  Other owners and sibling worker scopes remain protected.
+
 ## [0.26.1] - 2026-09-14
 
 ### Fixed

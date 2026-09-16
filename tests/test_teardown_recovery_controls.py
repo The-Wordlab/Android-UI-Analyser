@@ -124,6 +124,43 @@ def test_a_live_lease_protects_its_undo_from_discard(
     assert device_ledger.read_ledger(ref)
 
 
+@pytest.mark.parametrize("platform_name", ["android", "uninstalled-fixture"])
+def test_owner_can_discard_lost_target_undo_and_release_without_connecting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform_name: str,
+) -> None:
+    engine = _unavailable_plugin_engine(tmp_path, monkeypatch)
+    engine.config.device.platform = platform_name
+    ref = TargetRef(platform_name, "lost-target")
+    owner = leases.resolve_owner(None)
+    _stale(ref)
+    assert leases.acquire(engine.config.lease.registry_dir, ref, owner=owner)
+    result = engine.teardown_discard(
+        serial=ref.target_id, keys=["screen_recording"],
+        reason="disposable boot is gone", confirmed=True,
+    )
+    assert result["device_touched"] is False
+    assert result["restored"] is False
+    assert result["remaining"] == 0
+    assert Path(result["archive_path"]).is_file()
+    assert leases.release(engine.config.lease.registry_dir, ref, owner=owner)
+
+
+def test_sibling_worker_cannot_discard_even_with_same_process_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _unavailable_plugin_engine(tmp_path, monkeypatch)
+    ref = TargetRef("uninstalled-fixture", "lost-target")
+    owner = leases.resolve_owner(None)
+    _stale(ref)
+    monkeypatch.setenv("AUA_WORKER_SCOPE", "first-worker")
+    assert leases.acquire(engine.config.lease.registry_dir, ref, owner=owner)
+    monkeypatch.setenv("AUA_WORKER_SCOPE", "second-worker")
+    with pytest.raises(UsageError, match="leased target"):
+        engine.teardown_discard(serial=ref.target_id, keys=["screen_recording"],
+                                reason="disposable boot is gone", confirmed=True)
+    assert device_ledger.read_ledger(ref)
+
+
 def test_discard_clears_a_stale_recording_gate_without_replaying_it(tmp_path: Path) -> None:
     device = FakeDevice(serial="recording-target")
     engine = Engine(make_config(cache={"dir": str(tmp_path)}, lease={"enabled": False}), device=device)

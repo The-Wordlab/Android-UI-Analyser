@@ -31,12 +31,13 @@ def teardown_discard(
     self: Engine, *, serial: str, keys: list[str], reason: str, confirmed: bool = False,
 ) -> dict[str, Any]:
     """Explicitly abandon named stale undos; no platform loading or target connection."""
-    from . import device_ledger
+    from . import device_ledger, leases
 
     name = self._platform.name if self._platform is not None else self.config.device.platform
     return device_ledger.discard(
         TargetRef(name, serial), keys=keys, reason=reason, confirmed=confirmed,
         lease_registry_dir=self._lease_registry_dir,
+        owner=self._lease_owner_resolved or leases.resolve_owner(self._lease_owner),
     )
 
 

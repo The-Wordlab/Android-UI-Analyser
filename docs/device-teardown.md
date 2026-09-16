@@ -85,7 +85,7 @@ Credential rotation while undos are pending therefore blocks new mutations until
 value is restored and the pending changes are undone.
 
 If an operator has established that a disposable boot is permanently gone, they can explicitly
-abandon individual recovery records after finishing/releasing its lease:
+abandon individual recovery records, including while holding its own lease on a lost target:
 
 ```sh
 aua --platform example-os teardown discard --serial-target retired-target \
@@ -96,8 +96,11 @@ This command never loads an adapter or connects to a target, so it also works fo
 plugin or lost configuration key. It archives the named entries, reason, and requester pid under
 the ledger directory's private `discarded/` directory **before** removing them from automatic
 replay. The result names that recoverable archive and explicitly says `restored: false`.
-Other undo keys remain pending. A live lease refuses discard; confirmation is not authority to
-destroy another worker's recovery evidence. This is a deliberate operator decision, not an
+Other undo keys remain pending. A live lease permits discard only for its exact owner process and
+worker scope (use the original run cache); a foreign or sibling lease still refuses it. This breaks
+the lost-target cycle where release needs cleanup but cleanup cannot reach the target. After all
+pending keys are deliberately discarded, release the lease normally. Confirmation is not authority
+to destroy another worker's recovery evidence. This is a deliberate operator decision, not an
 automatic retry strategy or proof that device state was restored. MCP exposes the same Engine
 operations as `teardown_status`, `teardown_run`, and `teardown_discard`.
 
