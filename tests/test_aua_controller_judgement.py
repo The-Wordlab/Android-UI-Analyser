@@ -19,6 +19,7 @@ from experiments.aua_controller.judgement import (
     combine_votes,
     contract_criteria,
     contract_max_tokens,
+    evidence_frame,
     judge_outcome_votes,
     judge_route_budget,
     normalize_optional_summaries,
@@ -674,6 +675,47 @@ def test_judges_receive_resolved_target_names_in_order_without_handles_or_claims
     assert evidence.index('"text": "Pin"') < evidence.index('"text": "Unpin"') < evidence.index('"text": "Save"')
     assert "E0000" in evidence and "E0002" in evidence
     assert "el:opaque" not in evidence and "untrusted controller narrative" not in evidence
+
+
+def test_judge_relative_positions_prove_order_changes_without_pixel_bounds():
+    frames = []
+    for step, labels in ((20, ("First item", "Named item")),
+                         (22, ("Named item", "First item")),
+                         (24, ("First item", "Named item"))):
+        raw = frame(f"fp-{step}", labels)
+        raw["_judge_evidence"] = {"ref": f"E{step}", "after_step": step}
+        raw["observation"]["elements"][0]["bounds"] = [10, 380, 600, 424]
+        raw["observation"]["elements"][1]["bounds"] = [10, 496, 600, 540]
+        frames.append(raw)
+    originals = copy.deepcopy(frames)
+    compact = [evidence_frame(raw) for raw in frames]
+    for value in compact:
+        elements = value["observation"]["elements"]
+        assert elements[0]["center_pct"][1] < elements[1]["center_pct"][1]
+        assert elements[0]["center_pct"] == [42.4, 31.4]
+        assert all("id" not in element and "bounds" not in element for element in elements)
+    assert [value["observation"]["elements"][0]["text"] for value in compact] == [
+        "First item", "Named item", "First item"]
+    assert frames == originals
+
+
+@pytest.mark.parametrize("bounds", [[0, 0, float("nan"), 20], [0, 0, 0, 0],
+                                    [0, -200, 10, -100], [0, 0, True, 5], [0, 1]])
+def test_judge_rejects_invalid_relative_geometry(bounds):
+    raw = frame()
+    raw["observation"]["elements"][0]["bounds"] = bounds
+    raw["observation"]["elements"][0]["center_pct"] = [99, 99]  # never trust supplied values
+    assert "center_pct" not in evidence_frame(raw)["observation"]["elements"][0]
+
+
+def test_judge_does_not_invent_positions_for_unlabeled_noninteractive_or_sizeless_frames():
+    raw = frame()
+    raw["observation"]["elements"][0].pop("text")
+    raw["observation"]["elements"][1].pop("clickable")
+    assert all("center_pct" not in item for item in evidence_frame(raw)["observation"]["elements"])
+    raw = frame()
+    raw["observation"]["screen"].pop("height")
+    assert all("center_pct" not in item for item in evidence_frame(raw)["observation"]["elements"])
 
 
 def test_contract_token_budget_scales_for_exact_per_criterion_output():

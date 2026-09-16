@@ -13,6 +13,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Judge evidence retains relative positions for labeled controls and prioritizes captured
+  form-validation outcomes. Image selection spreads across the journey even without screen names,
+  rather than omitting later observed states; raw handles and pixel bounds remain excluded.
+
 - Predicate waits treat a failed bounded passive UI read as an unconfirmed poll and retry within
   the original deadline. They never reconnect the automation server or infer absence from a read
   failure; cancellation and unsupported-capability errors remain immediate.

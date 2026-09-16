@@ -1761,7 +1761,7 @@ async def run_realapp(
                 # frame with the screenshot AUA already captured for it, oldest first, so the
                 # final screen is the last image the judge sees.
                 shot_index = screenshot_index(aua_artifacts_dir / "manifest.json")
-                image_frames = judge_image_frames(positioned_frames, final, shot_index)
+                image_frames = judge_image_frames(positioned_frames, final, shot_index, actions=actions)
                 for frame in image_frames:
                     shot = screenshot_for(shot_index, frame_fingerprint(frame))
                     encoded = encode_image(shot) if shot else None

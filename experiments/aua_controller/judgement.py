@@ -19,6 +19,7 @@ import base64
 import copy
 import io
 import json
+import math
 import re
 import time
 import unicodedata
@@ -325,16 +326,44 @@ ROUTE_INSTRUCTIONS = (
 
 def _strip_ids(value: Any) -> Any:
     if isinstance(value, dict):
-        # Geometry helps controllers distinguish targets; judges have bounded images instead.
+        # Judges get relative positions, not actionable handles or pixel rectangles.
         return {key: _strip_ids(item) for key, item in value.items() if key not in {"id", "bounds"}}
     if isinstance(value, list):
         return [_strip_ids(item) for item in value]
     return value
 
 
+def _judge_positions(compact: dict[str, Any]) -> None:
+    """Retain bounded, host-derived layout evidence for labeled clickable controls."""
+    observation = compact.get("observation")
+    if not isinstance(observation, dict):
+        return
+    screen = observation.get("screen") or {}
+    width, height = screen.get("width"), screen.get("height")
+
+    def finite(value: Any) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+    if not all(finite(value) and value > 0 for value in (width, height)):
+        return
+    for element in observation.get("elements", []):
+        bounds = element.get("bounds")
+        if (element.get("clickable") is not True
+                or not any(element.get(key) for key in ("text", "desc", "content_desc"))
+                or not isinstance(bounds, (list, tuple)) or len(bounds) != 4
+                or not all(finite(value) for value in bounds)):
+            continue
+        left, top, right, bottom = bounds
+        x, y = (left + right) / 2, (top + bottom) / 2
+        if left < right and top < bottom and 0 <= x <= width and 0 <= y <= height:
+            element["center_pct"] = [round(100 * x / width, 1), round(100 * y / height, 1)]
+
+
 def evidence_frame(result: Any, *, max_elements: int = 40, keep_ids: bool = False) -> Any:
     """Compact one raw AUA result for judgement input. Judges do not act, so ids are dropped."""
     compact = compact_frame(result, max_elements=max_elements, max_text=100, keep_ids=keep_ids)
+    if isinstance(compact, dict):
+        _judge_positions(compact)
     if (isinstance(compact, dict) and observation_frame(result) is None
             and judgement_observation_frame(result) is not None):
         compact["evidence_usage"] = {"action_safe": False, "observed_transient_state": "loading",
@@ -486,13 +515,33 @@ def image_frame_sample(frames: Sequence[Any], limit: int = MAX_IMAGES - 1) -> li
 
 
 def judge_image_frames(frames: Sequence[Any], final: Any, index: Mapping[str, str],
-                       limit: int = MAX_IMAGES) -> list[Any]:
-    """Prefer a same-screen observed state pair; never spend two image slots on the final state."""
+                       limit: int = MAX_IMAGES, *, actions: Sequence[dict[str, Any]] = ()) -> list[Any]:
+    """Prefer named form-action outcomes and changed pairs, then spread remaining images."""
     if limit <= 0:
         return []
     limit = min(limit, MAX_IMAGES)
     candidates = []
     signatures = []
+    actions_by_step = {action.get("step"): action for action in actions}
+
+    def action_priority(frame):
+        action = actions_by_step.get(frame.get("_judge_evidence", {}).get("after_step"), {})
+        target = action.get("resolved_target") or {}
+        labels = {target.get(key) for key in ("text", "desc", "content_desc") if target.get(key)}
+        if (not labels or target.get("source") != "previous_fresh_observation"
+                or action.get("tool") not in {"tap", "tap_and_analyze"}):
+            return 0
+        observation = evidence_frame(frame).get("observation") or {}
+        elements = observation.get("elements", [])
+        # A named tap that leaves its form visible may expose validation or a disabled
+        # submit control. Its image matters even when no semantic state changed; the
+        # selector does not infer whether validation succeeded or the control was enabled.
+        target_remains = any(labels.intersection(element.get(key) for key in
+                                ("text", "desc", "content_desc")) for element in elements)
+        editors = [element for element in elements if element.get("editable")]
+        if target_remains and editors:
+            return 3 if any(not element.get("text") for element in editors) else 2
+        return 1
     try:
         from PIL import Image, ImageChops, ImageStat
     except ImportError:
@@ -518,16 +567,26 @@ def judge_image_frames(frames: Sequence[Any], final: Any, index: Mapping[str, st
         current = signature(frame)
         if current is None or (final_signature is not None and similar(frame, current, final, final_signature)):
             continue
-        if any(similar(frame, current, previous_frame, previous)
-               for previous_frame, previous in zip(candidates, signatures, strict=True)):
-            continue
+        duplicate = next((item for item, (previous_frame, previous) in enumerate(
+            zip(candidates, signatures, strict=True))
+            if similar(frame, current, previous_frame, previous)), None)
+        if duplicate is not None:
+            # Keep the post-action capture instead of an identical pre-action form.
+            if action_priority(frame) > action_priority(candidates[duplicate]):
+                candidates.pop(duplicate)
+                signatures.pop(duplicate)
+            else:
+                continue
         signatures.append(current)
         candidates.append(frame)
     slots = limit - int(final_signature is not None)
     selected: set[int] = set()
     pairs = []
     traits = [_frame_traits(frame) for frame in candidates]
-    if slots >= 2:
+    priorities = [action_priority(frame) for frame in candidates]
+    if slots and priorities and max(priorities) >= 2:
+        selected.add(max(range(len(candidates)), key=lambda item: (priorities[item], -item)))
+    if slots - len(selected) >= 2:
         for right in range(1, len(candidates)):
             for left in range(right):
                 a, b = traits[left], traits[right]
@@ -537,11 +596,15 @@ def judge_image_frames(frames: Sequence[Any], final: Any, index: Mapping[str, st
         if pairs:
             *_, left, right = max(pairs)
             selected.update((left, right))
-    # Cover another screen family before spending a remaining slot on a repeat.
+    # Cover another known family, then the widest chronological gap. With absent family
+    # metadata the old tie-break always picked the first few frames and missed later proof.
     used = {traits[item][0] for item in selected}
-    for item in sorted(range(len(candidates)), key=lambda item: (traits[item][0] in used, item)):
-        if len(selected) >= slots:
-            break
+    while len(selected) < min(slots, len(candidates)):
+        anchors = selected | {len(candidates)}  # separately retained final image
+        item = max((item for item in range(len(candidates)) if item not in selected), key=lambda item: (
+            bool(traits[item][0]) and traits[item][0] not in used,
+            min(abs(item - anchor) for anchor in anchors), -item,
+        ))
         selected.add(item)
         used.add(traits[item][0])
     result = [candidates[item] for item in sorted(selected)]
@@ -958,6 +1021,11 @@ async def judge_outcome(
         # hierarchy frames to prove distinct screens while still sending only four screenshots.
         "intermediate_frames": [evidence_frame(frame) for frame in list(frames)[:MAX_TEXT_FRAMES]],
         "final_frame": evidence_frame(final_frame),
+        "layout_evidence_note": (
+            "center_pct is the host-observed control center as [horizontal, vertical] percentages "
+            "of its screen; lower vertical values are higher on screen. It proves relative layout, "
+            "not enabled/disabled appearance or whether an action succeeded."
+        ),
     }
     if image_evidence:
         context["image_evidence"] = list(image_evidence)[:MAX_IMAGES]

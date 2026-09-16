@@ -155,6 +155,53 @@ def test_sparse_or_absent_observation_payloads_are_safe():
     assert judged_frame_sample(frames, 13) == frames[:-1]
 
 
+def _render_test_frames(tmp_path, frames):
+    from PIL import Image
+
+    index = {}
+    for value in frames:
+        fingerprint = frame_fingerprint(value)
+        path = tmp_path / (fingerprint + ".png")
+        Image.new("RGB", (24, 48), (90, 90, 90)).save(path)
+        index[fingerprint] = str(path)
+    return index
+
+
+def test_unnamed_screen_images_span_journey_instead_of_selecting_first_three(tmp_path):
+    frames = [{"observation": {"screen": {}, "meta": {"fingerprint": f"f{i}"},
+                               "elements": [{"text": f"Control {i}", "clickable": True}]}}
+              for i in range(12)]
+    picked = judge_image_frames(frames[:-1], frames[-1], _render_test_frames(tmp_path, frames))
+    positions = [frames.index(value) for value in picked]
+    assert len(picked) == 4 and picked[-1] is frames[-1]
+    assert positions == sorted(positions)
+    assert positions[0] == 0 and any(4 <= value <= 8 for value in positions[:-1])
+    assert positions != [0, 1, 2, 11]
+
+
+def test_image_selection_retains_named_empty_form_outcome_not_pre_action_duplicate(tmp_path):
+    frames = []
+    for step in range(27):
+        elements = [{"text": f"Control {step}", "clickable": True}]
+        if step in (14, 15):
+            elements = [{"type": "EditText", "clickable": True},
+                        {"text": "Save", "clickable": True}, {"text": "0/30"}]
+        frames.append({"observation": {"screen": {"width": 360, "height": 640},
+                                        "meta": {"fingerprint": f"f{step}"}, "elements": elements},
+                       "_judge_evidence": {"after_step": step, "ref": f"E{step}", "sequence": step}})
+    actions = [{"step": 15, "tool": "tap_and_analyze", "resolved_target": {
+        "text": "Save", "source": "previous_fresh_observation", "observation_fingerprint": "f14"}}]
+    index = _render_test_frames(tmp_path, frames)
+    picked = judge_image_frames(frames[:-1], frames[-1], index, actions=actions)
+    assert len(picked) == 4 and picked[-1] is frames[-1]
+    assert frames[15] in picked and frames[14] not in picked
+    assert [frames.index(value) for value in picked] == sorted(frames.index(value) for value in picked)
+    assert len(judge_image_frames(frames, frames[-1], index, limit=1, actions=actions)) == 1
+    # A controller's invented target cannot influence the evidence priorities.
+    actions[0]["resolved_target"]["source"] = "controller_claim"
+    assert frames[15] not in judge_image_frames(frames[:-1], frames[-1], index, actions=actions)
+
+
 # --------------------------------------------------------------------------- image pairing
 
 
