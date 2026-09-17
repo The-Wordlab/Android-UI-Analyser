@@ -11,7 +11,21 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- The experimental real-app controller can opt into `voice-input`, exposing a
+  `speak_into_microphone` action that injects synthetic speech while holding or toggling the
+  app's record control. Voice scenarios no longer record emulator silence and misreport the
+  app's correct "nothing heard" response as a product failure.
+
+- Real-app controller results now warn when the current screen belongs to another package,
+  helping the controller return to the app under test without blocking legitimate system flows
+  such as document pickers.
+
 ### Fixed
+
+- Outcome judges now verify action-result criteria only from the frame produced by that action.
+  A later recovery action reaching the expected screen can no longer hide the original failure.
 
 - `aua record stop` no longer fails a recording whose screen never changed at all. A wholly
   static window makes `screenrecord` emit a single frame, so its media length is exactly 0.0s,
