@@ -695,6 +695,42 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def note_if_off_app(payload: Any, package: str) -> None:
+    """Tell the controller, in its own tool result, when the screen is not the app under test.
+
+    Every observation already carries `screen.package`; nothing said anything about it, so a run
+    could leave the app and never notice. On 2026-09-17 threads-character-lobby-starts-new-thread
+    tapped an attachment affordance into `com.android.documentsui` and spent its last six steps
+    browsing Downloads, verifying 1 of 10 criteria -- twice, in two separate runs.
+
+    A note rather than a refusal: some scenarios legitimately drive the system picker, and the hard
+    `--forbid-foreground-package` guard exists for the different job of never touching the
+    production build.
+    """
+    # Deliberately not `observation_frame`: that resolver refuses anything short of proof-grade
+    # freshness, which is right for authorizing an action and wrong for a hint -- the partial frames
+    # most likely to catch a wandering run are exactly the ones it discards. Read only the payload's
+    # own current observation, never a history array, so a past screen is never reported as now.
+    if not isinstance(payload, dict):
+        return
+    observation = payload.get("observation")
+    if not isinstance(observation, dict):
+        observation = payload if isinstance(payload.get("screen"), dict) else None
+    if not isinstance(observation, dict):
+        return
+    screen = observation.get("screen")
+    if not isinstance(screen, dict):
+        return
+    current = screen.get("package")
+    if not current or current == package:
+        return
+    payload["foreground_note"] = (
+        f"This screen belongs to {current}, not to {package}, the app under test. If you did "
+        "not mean to leave it, return before continuing -- a contract about the app cannot be "
+        "satisfied or refuted from another app's screen."
+    )
+
+
 def forbidden_foreground(payload: dict[str, Any], forbidden: Sequence[str]) -> str | None:
     """Read current foreground identity, never package inventories or historical frames."""
     current = observation_frame(payload)
@@ -1215,6 +1251,7 @@ async def run_realapp(
                 and name not in {"app_status", "session_finish"}):
             raise RunError("action targets a forbidden foreground package")
         raw = await raw_call_tool(name, controller_observation_arguments(name, arguments, schemas))
+        note_if_off_app(tool_result(raw), package)
         if forbidden_foreground_packages:
             identity = forbidden_foreground(tool_result(raw), forbidden_foreground_packages)
             if identity:
