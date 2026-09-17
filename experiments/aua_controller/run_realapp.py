@@ -110,8 +110,12 @@ CONTRACT_TOOL = "expect_and_analyze"
 #: every extra argument is another one a small model can get wrong.
 CONTRACT_TOOL_PROPERTIES = ("rid", "text", "desc", "exists", "absent", "text_contains")
 CONTROLLER_CAPABILITIES = frozenset({
-    "network", "wall-clock-wait", "async-ui-wait", "app-lifecycle",
+    "network", "wall-clock-wait", "async-ui-wait", "app-lifecycle", "voice-input",
 })
+#: Speaking into the emulator microphone. Named for what the controller is doing rather than for
+#: the transport, because the model has to pick it from a list: a scenario that asks for a voice
+#: message needs to *say* something, not to know that AUA synthesizes with `say` and streams PCM.
+VOICE_INPUT_TOOL = "speak_into_microphone"
 WALL_CLOCK_WAIT_TOOL = "wait_uninterrupted_620_seconds"
 WALL_CLOCK_WAIT_SECONDS = 620
 # Boundary clock reads, detached-job dispatch and the first/last status poll sit outside the
@@ -570,6 +574,49 @@ def realapp_tools(
                 },
             },
         })
+    if "voice-input" in requested:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": VOICE_INPUT_TOOL,
+                "description": (
+                    "Speak into the device microphone while holding a record control: press it, "
+                    "play synthetic speech, release. Use this for any voice/audio message -- the "
+                    "emulator has no real microphone, so a recording made without this captures "
+                    "silence and the app will correctly report that it heard nothing."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "speech": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Exactly the words to say.",
+                        },
+                        "rid": {
+                            "type": "string",
+                            "description": "resource-id of the record control to hold.",
+                        },
+                        "text": {"type": "string", "description": "Label of the record control."},
+                        "desc": {
+                            "type": "string",
+                            "description": "content-desc of the record control.",
+                        },
+                        "control_mode": {
+                            "type": "string",
+                            "enum": ["hold", "toggle"],
+                            "default": "hold",
+                            "description": (
+                                "hold = press, speak, release (a push-to-talk button). "
+                                "toggle = tap to start, tap to stop."
+                            ),
+                        },
+                    },
+                    "required": ["speech"],
+                    "additionalProperties": False,
+                },
+            },
+        })
     if "app-lifecycle" in requested:
         for name, description in (
             ("app_force_stop", "Force-stop only the package under test without clearing its data."),
@@ -722,7 +769,7 @@ async def export_primary_flow(call, output: Path) -> dict[str, Any]:
         "tap_and_analyze", "long_press_and_analyze", "input_and_analyze",
         "scroll_and_analyze", "swipe_and_analyze", "back_gesture_and_analyze",
         "key_and_analyze", "open_link_and_analyze", "app_force_stop",
-        "app_relaunch_and_analyze",
+        "app_relaunch_and_analyze", VOICE_INPUT_TOOL,
     }
     read_tools = {"analyze_screen", "wait_and_analyze", "session_progress", "session_finish"}
     path = output / "controller/tool-calls.jsonl"
@@ -1508,6 +1555,12 @@ async def run_realapp(
                 return {"ok": False, "finished": False, "claim_recorded": True}
             if name == "session_progress":
                 arguments = {"session_id": session_id}
+            if name == VOICE_INPUT_TOOL:
+                # The emulator's microphone is silent unless something injects into it, so this is
+                # the only way a voice bullet can be driven at all. Without it a run records
+                # silence, the app answers that it heard nothing, and that correct behaviour reads
+                # as a product failure (`docs/aua-deferred-fixes.md` item 85).
+                return await call("mic_speak_and_analyze", arguments, "controller")
             if name == "app_force_stop":
                 return await call(
                     "app", {"action": "stop", "package": package}, "controller"
