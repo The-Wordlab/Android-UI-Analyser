@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-17
+
 ### Added
 
 - The experimental real-app controller can opt into `voice-input`, exposing a
@@ -1109,5 +1111,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.27.4]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.4
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.27.5...HEAD
 [0.27.5]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.5
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.28.0
