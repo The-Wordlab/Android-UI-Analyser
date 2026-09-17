@@ -1164,7 +1164,16 @@ async def judge_outcome(
                  "itself creates such a frame, and crediting it to the original action reports a "
                  "broken contract as met. If the frame produced by the action does not show the "
                  "asserted state, the criterion failed, whatever later frames show. If no frame is "
-                 "attributable to that action, mark it not_verified rather than assuming.")
+                 "attributable to that action, mark it not_verified rather than assuming."
+                 " This binds a criterion to the action that COMPLETES it, which is not always the "
+                 "one that starts it. When the criterion itself describes an outcome that arrives "
+                 "later -- work continuing in the background, a result that is there 'on return', a "
+                 "state checked after re-entering a screen -- the completing action is that return, "
+                 "re-entry or wait, and the frame IT produced is the evidence. Do not fail such a "
+                 "criterion because the frame from the starting action shows work still in progress; "
+                 "that is what the contract says should happen. The rule above exists to stop a "
+                 "later UNRELATED action supplying the proof, not to require an outcome before the "
+                 "contract says it arrives.")
     criteria = contract_criteria(contract)
     decision = await decider.decide(
         role="outcome judge (" + stance + ")", instructions=JUDGE_INSTRUCTIONS[stance] + CLAIM_NOTE,
