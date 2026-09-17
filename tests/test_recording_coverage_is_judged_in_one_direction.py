@@ -77,6 +77,21 @@ def test_a_shortfall_is_never_negative() -> None:
 # idle at home, so the check was guaranteed to fail exactly the runs it was meant to protect.
 #
 # Only a recording that captured nothing can still fail on coverage.
+#
+# --- 2026-09-17, third correction --------------------------------------------------------
+#
+# "Captured nothing" and "nothing happened" turned out to be the same number. A screen that
+# never changes at all makes `screenrecord` emit ONE frame, and one frame is 0.0 seconds of
+# media. An 8.02s recording of an idle screen wrote a valid 37,320-byte MP4 (`nb_frames=1`)
+# and still exited 3 with `recording_coverage_failed`, because the aggregate "media_total <= 0"
+# guard fired underneath the per-segment rule that had just excused the same stillness.
+#
+# So a partly idle window passed and a wholly idle one failed -- exactly inverted. Zero media
+# now fails only where no `static_screen_no_frames` gap accounts for it. Everything a dead
+# recorder actually produces (no segments, no finish event, an unreadable file, a non-zero
+# exit, an encoder that was not running) is judged before that point and still fails.
+
+IDLE_RUN = {"wall_s": 8.33, "media_s": 0.0}
 
 A1_RUN = {"wall_s": 168.17, "media_s": 130.001, "frames": 126}
 
@@ -103,10 +118,66 @@ def test_the_shortfall_is_still_reported_rather_than_hidden(monkeypatch):
     assert "static_screen_no_frames" in reasons
 
 
-def test_capturing_nothing_at_all_still_fails(monkeypatch):
-    # The one coverage result a screen that did not change cannot explain.
-    report = _timeline(media_s=0.0, monkeypatch=monkeypatch)
+def test_a_wholly_static_window_is_zero_media_and_still_passes(monkeypatch):
+    """The reported bug: one frame over the whole window is 0.0s of media, not lost evidence."""
+    report = _timeline(media_s=IDLE_RUN["media_s"], wall_s=IDLE_RUN["wall_s"], monkeypatch=monkeypatch)
+
+    assert report["media_duration_s"] == 0.0
+    assert report["duration_check"] == "passed"
+
+
+def test_a_wholly_static_window_still_reports_its_shortfall(monkeypatch):
+    """Passing is not hiding: the whole window is still named as stillness, not as coverage."""
+    report = _timeline(media_s=IDLE_RUN["media_s"], wall_s=IDLE_RUN["wall_s"], monkeypatch=monkeypatch)
+
+    assert report["coverage_shortfall_s"] == pytest.approx(IDLE_RUN["wall_s"], abs=0.05)
+    assert [gap["reason"] for gap in report["gaps"]] == ["static_screen_no_frames"]
+    assert report["encoder_idle_gaps"] == []
+
+
+def test_a_static_window_that_rotated_segments_also_passes(monkeypatch):
+    """Rotation is why the excuse is keyed to stillness found, not to stillness alone.
+
+    A window longer than the native segment limit rotates, and rotation adds its own gap. If a
+    zero-media recording were only excused when *every* gap is stillness, the same idle screen
+    would pass at 8 seconds and fail at 400.
+    """
+    from android_ui_analyser.platforms import android_recording as rec
+
+    monkeypatch.setattr(rec, "media_duration", lambda path: 0.0)
+    events = ("begin 0 100\nend 0 280 0\nbegin 1 280.4\nend 1 460.4 0\n"
+              "begin 2 460.9\nend 2 500.0 0\nfinish 500.0 stopped\n")
+    report = rec.timeline(events, [Path(f"segment-{i}.mp4") for i in range(3)],
+                          stop_uptime_s=500.0, start_uptime_s=100.0)
+
+    assert report["media_duration_s"] == 0.0
+    assert "segment_rotation" in {gap["reason"] for gap in report["gaps"]}
+    assert report["duration_check"] == "passed"
+
+
+def test_capturing_nothing_that_stillness_cannot_explain_still_fails(monkeypatch):
+    """Zero media across segments too short to raise a stillness gap keeps failing."""
+    from android_ui_analyser.platforms import android_recording as rec
+
+    monkeypatch.setattr(rec, "media_duration", lambda path: 0.0)
+    events = "begin 0 100\nend 0 101.2 0\nbegin 1 101.4\nend 1 102.6 0\nfinish 102.6 stopped\n"
+    report = rec.timeline(events, [Path("segment-0.mp4"), Path("segment-1.mp4")],
+                          stop_uptime_s=102.6, start_uptime_s=100.0)
+
+    assert not any(gap["reason"] == "static_screen_no_frames" for gap in report["gaps"])
     assert report["duration_check"] == "failed"
+
+
+def test_a_recorder_that_produced_no_segment_at_all_still_fails():
+    """The dead recorder: the window was requested, nothing ever began, nothing can excuse it."""
+    from android_ui_analyser.platforms import android_recording as rec
+
+    report = rec.timeline("", [], stop_uptime_s=1000.0 + A1_RUN["wall_s"], start_uptime_s=1000.0)
+
+    assert report["segments"] == []
+    assert report["media_duration_s"] == 0.0
+    assert report["duration_check"] == "failed"
+    assert report["encoder_idle_gaps"][0]["reason"] == "encoder_startup"
 
 
 def test_a_recorder_that_died_still_fails(monkeypatch):

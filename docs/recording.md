@@ -33,9 +33,13 @@ positive check that the directory is absent. Unverified ownership retains the pe
 Inspect `segments`, `gaps`, `finish`, and `duration_check`. Lifecycle timestamps use target
 boot uptime, so changing the device wall clock cannot shorten a measured pause. The native
 movie duration is compared with the encoder process window and the requested recording
-window, with a two-second tolerance. A duration shortfall or missing supervisor completion
-returns `ok=false` after evidence collection. After encoder failure or incomplete supervisor
-lifecycle, stop exports all finalized segments in order into the requested playable MP4.
+window, with a two-second tolerance. Missing supervisor completion, an unreadable or unfinished
+segment, and stretches where the encoder was not running return `ok=false` after evidence
+collection. A shortfall while the encoder was running is reported as a `static_screen_no_frames`
+gap and `coverage_shortfall_s` instead: `screenrecord` emits a frame when the screen changes, so
+a window whose screen never changed is 0.0 seconds of media rather than lost footage. After
+encoder failure or incomplete supervisor lifecycle, stop exports all finalized segments in
+order into the requested playable MP4.
 Every lifecycle segment has a `status` (`finalized`, `missing`, or `corrupt`) and `exported`
 flag. Corrupt/partial files are copied unchanged into the segment directory. Missing footage
 is explicitly unexported; absence requires a successful inspection with a known missing-file

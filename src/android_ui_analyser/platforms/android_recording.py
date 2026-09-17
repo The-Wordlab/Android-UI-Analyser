@@ -544,13 +544,22 @@ def timeline(
     if stop_uptime_s - previous > 0:
         gaps.append({"start_uptime_s": previous, "end_uptime_s": stop_uptime_s, "reason": "recording_ended_before_stop"})
     requested = max(0.0, stop_uptime_s - first)
-    # Two coverage results a static screen cannot explain, and only these still fail: capturing
-    # nothing at all, and stretches where the encoder was not running. Short media while the
+    # Only stretches where the encoder was not running still fail here. Short media while the
     # encoder WAS running is the static-screen case and is reported instead.
     not_running = {"encoder_startup", "segment_rotation", "recording_ended_before_stop"}
     dark = [gap for gap in gaps if gap["reason"] in not_running
             and (gap["end_uptime_s"] or 0) - (gap["start_uptime_s"] or 0) > _COVERAGE_TOLERANCE_S]
-    failed = failed or bool(dark) or (requested > _COVERAGE_TOLERANCE_S and media_total <= 0)
+    # "Captured nothing at all" is not a separate result from stillness. A window whose screen
+    # never changed once encodes a single frame, so its media length is exactly 0.0: a 2026-09-17
+    # idle run wrote a valid 37,320-byte MP4 with nb_frames=1 over 8.02s and was failed by this
+    # guard -- the very recording the per-segment rule above was written to keep. A partly idle
+    # window was tolerated and a wholly idle one was not. So zero media only fails where no
+    # static_screen_no_frames gap already accounts for the stillness. A recorder that really
+    # captured nothing is caught before this line: no segments, no finish event, an encoder
+    # failure, a missing or unreadable segment file, or a non-zero recorder exit.
+    stillness = any(gap["reason"] == "static_screen_no_frames" for gap in gaps)
+    captured_nothing = requested > _COVERAGE_TOLERANCE_S and media_total <= 0 and not stillness
+    failed = failed or bool(dark) or captured_nothing
     return {
         "mode": "native_segments", "state": "finalized", "segments": list(segments.values()),
         "requested_duration_s": requested, "media_duration_s": media_total,

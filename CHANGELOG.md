@@ -11,6 +11,17 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- `aua record stop` no longer fails a recording whose screen never changed at all. A wholly
+  static window makes `screenrecord` emit a single frame, so its media length is exactly 0.0s,
+  and the aggregate "captured nothing at all" guard fired underneath the per-segment rule that
+  already excuses stillness: an 8.02s idle recording exited 3 with `recording_coverage_failed`
+  while holding a valid 37 KB MP4. A partly idle window passed and a wholly idle one did not.
+  Zero media now fails only where no `static_screen_no_frames` gap accounts for it. No segments,
+  a missing supervisor completion, an unreadable or unfinished segment, a non-zero recorder exit,
+  and stretches where the encoder was not running all still fail.
+
 ## [0.27.5] - 2026-09-16
 
 ### Fixed
