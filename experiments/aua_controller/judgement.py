@@ -1149,6 +1149,22 @@ async def judge_outcome(
     question += (" Frames labeled observed_transient_state=loading prove only what was visible at "
                  "that capture, including a pending indicator. They do not prove a settled destination, "
                  "completion or reusable action selectors; use later evidence for those claims.")
+    # A criterion of the form "doing X leaves you at Y" is verified by the frame X produced, and by
+    # no other. On 2026-09-17 a run where back from a deeplinked screen went to Home was passed 8/8
+    # because the controller then tapped the Tools tab to recover, and that tap's frame showed the
+    # grid the criterion described; both judges cited it. The controller's recovery from a defect
+    # had manufactured the evidence that hid the defect, and the better the recovery the more
+    # convincing the false pass. Every frame already carries evidence_position.after_step, so the
+    # attribution is checkable -- it was simply not required.
+    question += (" When a criterion says that a particular action produces or leads to some state, "
+                 "verify it ONLY from the frame that action produced: the one whose "
+                 "evidence_position.after_step is that action's step. A later frame showing the "
+                 "asserted state does not verify it if a different action produced that frame -- "
+                 "a controller that recovers from a failure by navigating to the expected place "
+                 "itself creates such a frame, and crediting it to the original action reports a "
+                 "broken contract as met. If the frame produced by the action does not show the "
+                 "asserted state, the criterion failed, whatever later frames show. If no frame is "
+                 "attributable to that action, mark it not_verified rather than assuming.")
     criteria = contract_criteria(contract)
     decision = await decider.decide(
         role="outcome judge (" + stance + ")", instructions=JUDGE_INSTRUCTIONS[stance] + CLAIM_NOTE,
