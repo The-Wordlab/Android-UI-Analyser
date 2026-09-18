@@ -52,7 +52,7 @@ jobs:
       # tesseract, and easyocr to report *unavailable*, so `--all-extras` would fail it. The
       # `apple` extra is marker-gated to darwin and installs nothing on Linux, where those
       # provider tests skip instead.
-      - run: uv sync --frozen --extra dev --extra apple --extra rapidocr --extra audio
+      - run: uv sync --frozen --extra dev --extra apple --extra rapidocr --extra audio --extra web
       # `-n auto` comes from pyproject addopts; runners are small, so cap the shard count to
       # avoid oversubscribing two cores.
       - run: uv run pytest -n 2

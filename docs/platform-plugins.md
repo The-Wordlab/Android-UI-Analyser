@@ -321,5 +321,6 @@ point in a fresh isolated Python process, blocks Android imports and native subp
 and runs this profile. That gate proves the published surface is sufficient for an independently
 packaged attached-target plugin; it is separate from a plugin's own native transport tests.
 
-The contract does not itself implement iOS, web, or another native transport, and it does not
-rename the `aua` command or project.
+The same contract backs AUA's built-in Android, iOS-simulator, and Playwright web adapters. It does
+not rename the `aua` command or project, and external transports still register through the same
+entry-point boundary.

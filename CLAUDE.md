@@ -107,8 +107,9 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
 ### Platform boundary — mandatory for new features
 
 `PlatformAdapter` is the gateway between AUA's reusable agent layer (`analyze`, actions, `goto`,
-history, maps, flows) and native automation tooling. Android is the only built-in adapter today and
-remains the default, but new work must preserve the ability to plug in iOS, web, or another runtime.
+history, maps, flows) and platform automation tooling. Android remains the default; iOS simulators
+and Playwright web browsers are also built in, and new work must preserve the ability to plug in
+another runtime.
 
 - Do **not** add direct `adb`, `adbutils`, `uiautomator2`, emulator-console, `dumpsys`, `logcat`,
   `run-as`, or other platform SDK/tool calls to `engine.py`, CLI, MCP, daemon, or generic services.

@@ -1,6 +1,12 @@
 # android-ui-analyser (`aua`)
 
-`aua` is a configurable CLI that gives an AI agent structured "what's on screen and where" for Android UI testing. It reads the accessibility/view hierarchy first, returning elements with tracked IDs, types, text, and bounding boxes. Image-based detection, OCR, and optional grounding cover screens with incomplete accessibility data. The agent sends a published ID to `aua tap-and-analyze <id>` or `aua input-and-analyze <id> "hello"`; AUA resolves the element on the current screen and computes the coordinates.
+`aua` is a configurable CLI that gives an AI agent structured "what's on screen and where" for
+Android, iOS-simulator, and web UI testing. It reads the native accessibility/view hierarchy or
+browser DOM first, returning elements with tracked IDs, types, text, and bounding boxes.
+Image-based detection, OCR, and optional grounding cover screens with incomplete accessibility
+data. The agent sends a published ID to `aua tap-and-analyze <id>` or
+`aua input-and-analyze <id> "hello"`; AUA resolves the element on the current screen and computes
+the coordinates.
 
 > **New here?** Start with [Installation help](#installation-help). Claude Code and Codex users
 > can install one plugin that supplies the AUA skill and starts the matching released MCP server;
@@ -24,19 +30,23 @@ the local MCP server from the Git tag matching the plugin version.
 
 ### Prerequisites
 
-`aua` is a Python CLI that talks to an Android device or emulator over **adb**, using [`uiautomator2`](https://github.com/openatx/uiautomator2). Every installation path needs these four things on the host:
+`aua` is a Python CLI with separate Android, iOS-simulator, and web platform adapters. Every
+installation needs Python; the target-specific transport is needed only for the platform you use:
 
 | Requirement | Version | Why / how to get it |
 |---|---|---|
 | **Python** | **3.11 or newer** | Runs the CLI. Check with `python3 --version`. |
 | **uv** | any recent | Runs AUA without a permanent install (`uvx`) and powers the Claude/Codex plugins. ([install](https://docs.astral.sh/uv/getting-started/installation/)) |
-| **Android platform-tools (`adb`)** | any recent | `aua` discovers devices and `uiautomator2` drives them through `adb`. Must be on your `PATH`. ([install](#installing-adb-platform-tools)) |
-| **An Android device or emulator** | Android 7.0 (API 24) or newer | The screen `aua` inspects — a running AVD emulator **or** a USB-attached phone with USB debugging enabled. ([setup](#connect-a-device-or-emulator)) |
+| **Android platform-tools (`adb`)** | any recent | Android only: discovers devices and lets `uiautomator2` drive them. ([install](#installing-adb-platform-tools)) |
+| **An Android device or emulator** | Android 7.0 (API 24) or newer | Android only: a running AVD or USB-attached phone. ([setup](#connect-a-device-or-emulator)) |
 
 You do **not** need Android Studio's IDE, Gradle, or the app's source code — `aua` works against any app already installed on the device, including release builds. (Android Studio is just the easiest way to obtain `adb` and an emulator.)
 
 Optional, only for specific features:
 - **Xcode 26+ and [AXe](https://github.com/cameroncooke/AXe)** (`brew tap cameroncooke/axe && brew install axe`) — only for [iOS simulators](#ios-simulators) via `--platform ios`.
+- **Playwright plus a supported browser** — only for [web pages](#web-browsers) via
+  `--platform web`; install the `web` extra and run `playwright install chromium`, or use an
+  installed Chrome channel.
 - **`tesseract`** system binary — only if you enable the `tesseract` OCR extra.
 - A **GPU** (CUDA / Apple Metal) — speeds up the `yolo`/`omniparser` detectors and local grounding, but everything also runs on CPU.
 - **API keys** (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) — only if you opt into a commercial grounding provider (off by default).
@@ -113,7 +123,8 @@ Clone the repository and run the idempotent bootstrap:
 ```bash
 git clone https://github.com/The-Wordlab/Android-UI-Analyser.git
 cd Android-UI-Analyser
-./install.sh                       # add --with-policy for the optional local policy runtime
+./install.sh                       # add --with-web for browser support
+                                   # add --with-policy for the optional local policy runtime
 ./install.sh --print-plan          # preview without changing anything
 ```
 
@@ -179,13 +190,13 @@ Base install (macOS / Apple Silicon, recommended extras — Python 3.11+ per
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-uv pip install -e ".[dev,apple,rapidocr,audio]"
+uv pip install -e ".[dev,apple,rapidocr,audio,web]"
 ```
 
 Or without uv:
 
 ```bash
-pip install -e ".[dev,apple,rapidocr,audio]"
+pip install -e ".[dev,apple,rapidocr,audio,web]"
 ```
 
 Global install (no extras):
@@ -255,6 +266,7 @@ cd ~ && command -v aua && aua --version
 | `tesseract` | `pytesseract` | Requires system `tesseract` binary |
 | `easyocr` | `easyocr` | Optional OCR engine |
 | `audio` | `grpcio` | Authenticated PCM injection into an Android Emulator microphone |
+| `web` | `playwright` | Web DOM, screenshots, and input; install a browser with `playwright install chromium` |
 | `yolo` | `ultralytics`, `torch` | UI element detection with user-supplied weights |
 | `omniparser` | `ultralytics`, `torch`, `huggingface-hub` | OmniParser detection — **AGPL-3.0, opt-in** |
 | `functiongemma` | `mlx-lm` | Apple-silicon-only local policy runtime; base model stays external. Not in the default install — opt in with `./install.sh --with-policy` |
@@ -262,7 +274,7 @@ cd ~ && command -v aua && aua --version
 | `proxy` | `mitmproxy` | Headless HTTPS mock / record / replay (`aua proxy`, `aua mock`) |
 | `lxml` | `lxml` | Faster XML parse for huge hierarchy dumps |
 | `dev` | pytest, ruff, mypy, respx | Development and test tooling |
-| `all` | Perception, proxy, and XML extras | Excludes platform-specific `functiongemma`; add it explicitly |
+| `all` | Perception, web, proxy, and XML extras | Excludes platform-specific `functiongemma`; add it explicitly |
 
 Heavy deps are **lazy-imported** — a missing optional extra never breaks the core CLI. The two
 policy extras are the only ones `install.sh` will not install unless asked (`--with-policy`), since
@@ -1187,10 +1199,32 @@ Elements, ids, `has`/`wait`, flows and maps behave as on Android; `resource_id` 
 `iphonesimulator` `.app` bundle. Physical iPhones are not supported. Details, the capability table
 and troubleshooting: [docs/ios.md](docs/ios.md).
 
+## Web browsers
+
+The built-in `web` platform launches an isolated Playwright browser and keeps the same AUA
+commands and element schema:
+
+```bash
+uv pip install -e '.[web]'
+playwright install chromium
+aua --platform web --serial https://example.test/app doctor
+aua --platform web --serial https://example.test/app --format compact analyze
+aua --platform web --serial https://example.test/app tap-and-analyze --rid continue
+```
+
+`data-testid` and HTML `id` become `resource_id`; only viewport-intersecting DOM nodes satisfy
+`has`, waits, and `scroll-to`. Chromium, Firefox, and WebKit can run headed or headless. The warm
+daemon keeps one isolated browser context alive across commands; `storage_state` can seed login
+state without writing changes back. AUA can fuse its existing OCR, detection, and grounding
+providers over Playwright's native viewport screenshot for canvas or incomplete DOM semantics.
+Current limitations include iframe DOMs, popup/tab switching, attaching to an existing browser,
+and device-style app/database/network controls. Configuration, the exact capability boundary, and
+troubleshooting: [docs/web.md](docs/web.md).
+
 ## Adding a platform adapter
 
-Android is the default platform and iOS simulators are the second built-in, both selected through
-a platform strategy. `device.platform`, `--platform`, or `AUA_PLATFORM` can select an installed adapter;
+Android is the default platform; iOS simulators and web browsers are also built in, all selected
+through a platform strategy. `device.platform`, `--platform`, or `AUA_PLATFORM` can select an installed adapter;
 third-party packages register adapters through the `aua.platforms` Python entry-point group.
 The choice is process/config scoped (not repeated on every command), and both target actions and
 optional services are gated: another platform never silently falls back to ADB.
@@ -1232,7 +1266,10 @@ Each provider must implement `is_available() -> tuple[bool, str]` to declare whe
 
 ## Daemon mode
 
-The daemon holds a warm `uiautomator2` connection and loaded vision models, eliminating per-call cold-start overhead. The CLI auto-detects a running daemon via a unix socket and forwards requests to it; without a daemon it runs in-process (always correct, pays startup cost).
+The daemon holds a warm target runtime (`uiautomator2`, AXe/simctl, or Playwright) and loaded vision
+models, eliminating per-call cold-start overhead. The CLI auto-detects a running daemon via a unix
+socket and forwards requests to it; without a daemon it runs in-process (always correct, pays
+startup cost).
 
 ```bash
 aua daemon start          # start the background daemon (+ the app orientation blob)

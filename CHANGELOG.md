@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- A built-in Playwright-backed `web` platform reuses AUA's semantic `analyze`, stable selectors,
+  actions, screenshots, waits, flows, maps and sessions for HTTP(S) pages. DOM test ids and HTML
+  ids become `resource_id`; only viewport-intersecting nodes satisfy presence checks.
+
 ## [0.29.0] - 2026-09-18
 
 ### Added

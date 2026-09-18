@@ -50,7 +50,7 @@ _SECRET_KEY_PARTS = {
 
 class DeviceCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # Strategy name registered in ``aua.platforms``. Android remains the only built-in.
+    # Strategy name registered in ``aua.platforms``. Android, iOS and web are built in.
     platform: str = "android"
     serial: str | None = None  # null = auto-detect
     backend: str = "uiautomator2"  # uiautomator2 | accessibility (future)

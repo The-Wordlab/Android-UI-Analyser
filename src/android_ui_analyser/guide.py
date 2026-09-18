@@ -1551,8 +1551,8 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("# android-ui-analyser (`aua`) — agent operating manual")
     p.append("")
     p.append(
-        "`aua` reports **what's on an Android screen and where** (iOS simulators too, with "
-        "`--platform ios`), so you act on **stable "
+        "`aua` reports **what's on screen and where** on Android, iOS (`--platform ios`), "
+        "and web (`--platform web`), so you act on **stable "
         "element IDs, not pixels**. It reads the accessibility/view hierarchy first (fast, "
         "exact) and falls back to image vision (detection + OCR, optional grounding VLM) on "
         "screens the hierarchy can't see. It remembers each app's layout so you start each "
@@ -1674,6 +1674,21 @@ def render_markdown(*, brief: bool = False) -> str:
         "at session cleanup. Physical iPhones and network-offline control remain unsupported. "
         "Logs, recording and `virtual-target` provisioning are not available on iOS yet; those "
         "calls return `platform_capability_unsupported`. Details: `docs/ios.md`."
+    )
+
+    p.append("")
+    p.append("## Web browsers (`--platform web`)")
+    p.append(
+        "Install the optional `web` extra and a Playwright browser, then target an HTTP(S) URL: "
+        "`aua --platform web --serial https://example.test/app analyze`. The same `analyze`, "
+        "`has`, waits, actions, screenshots, flows, maps and sessions apply. `data-testid`, "
+        "`data-test-id`, `data-test`, then HTML `id` become `resource_id` for `--rid`; DOM nodes "
+        "outside the viewport do not satisfy presence checks. Open shadow roots work; iframe "
+        "documents, popup/tab switching and attachment to an existing browser do not yet. "
+        "The default daemon preserves one isolated browser context across commands; "
+        "`platforms.web.storage_state` can seed authentication. App install/lifecycle, private "
+        "databases and device network controls return `platform_capability_unsupported`. "
+        "Details: `docs/web.md`."
     )
 
     p.append("")

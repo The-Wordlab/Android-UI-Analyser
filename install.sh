@@ -5,12 +5,14 @@
 # Installs the `aua` CLI GLOBALLY (so it's on PATH in every project) and installs the
 # equivalent user-level skills so agents discover it in every project. Idempotent.
 #
-# Usage:  ./install.sh [--with-policy[=hybrid]] [--print-plan]
+# Usage:  ./install.sh [--with-web] [--with-policy[=hybrid]] [--print-plan]
 #
+#   --with-web            install Playwright plus its Chromium browser
 #   --with-policy         also install the optional LOCAL POLICY runtime (see below)
 #   --with-policy=hybrid  ... including the larger MLX-VLM reviewer
 #   --print-plan          print what would be installed and exit, touching nothing
 #   AUA_INSTALL_POLICY=1  same as --with-policy (=hybrid also accepted)
+#   AUA_INSTALL_WEB=1     same as --with-web
 #
 # We intentionally do NOT use `set -e`: global installs are attempted with explicit
 # fallback to a project-local venv, so a failed `uv`/`pipx` step must not abort the script.
@@ -29,9 +31,11 @@ usage() {
 # An unknown option used to be ignored outright, so a typo'd opt-in installed a policy-less CLI
 # and still printed "Setup complete".
 WITH_POLICY="${AUA_INSTALL_POLICY:-}"
+WITH_WEB="${AUA_INSTALL_WEB:-}"
 PRINT_PLAN=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --with-web)         WITH_WEB=1 ;;
     --with-policy)      WITH_POLICY=1 ;;
     --with-policy=*)    WITH_POLICY="${1#*=}" ;;
     --print-plan)       PRINT_PLAN=1 ;;
@@ -53,6 +57,14 @@ AUDIO_PKGS=(grpcio)
 # failure to run time, in the global install that agents reach through PATH.
 PROXY_PKGS=(mitmproxy)
 FEATURE_PKGS=("${OCR_PKGS[@]}" "${AUDIO_PKGS[@]}" "${PROXY_PKGS[@]}")
+
+WEB_EXTRA_LIST=""
+case "$(printf '%s' "${WITH_WEB:-}" | tr '[:upper:]' '[:lower:]')" in
+  ""|0|no|false|off) : ;;
+  1|yes|true|on) WEB_EXTRA_LIST="web"; EXTRA="$EXTRA,web" ;;
+  *) echo "install.sh: --with-web expects no value (AUA_INSTALL_WEB accepts 1/true; got '${WITH_WEB}')" >&2
+     exit 2 ;;
+esac
 
 # ---------------------------------------------------------------- local policy (opt-in)
 # The optional local policy/autopilot needs an MLX runtime, and it is NOT in the default
@@ -89,16 +101,24 @@ fi
 TARGET="$REPO_DIR"
 if [ "${#POLICY_EXTRAS[@]}" -gt 0 ]; then
   POLICY_EXTRA_LIST="$(IFS=,; printf '%s' "${POLICY_EXTRAS[*]}")"
-  TARGET="$REPO_DIR[$POLICY_EXTRA_LIST]"
   EXTRA="$EXTRA,$POLICY_EXTRA_LIST"
 else
   POLICY_EXTRA_LIST=""
+fi
+INSTALL_EXTRA_LIST="$WEB_EXTRA_LIST"
+if [ -n "$POLICY_EXTRA_LIST" ]; then
+  [ -z "$INSTALL_EXTRA_LIST" ] || INSTALL_EXTRA_LIST="$INSTALL_EXTRA_LIST,"
+  INSTALL_EXTRA_LIST="$INSTALL_EXTRA_LIST$POLICY_EXTRA_LIST"
+fi
+if [ -n "$INSTALL_EXTRA_LIST" ]; then
+  TARGET="$REPO_DIR[$INSTALL_EXTRA_LIST]"
 fi
 
 if [ "$PRINT_PLAN" = 1 ]; then
   echo "target: $TARGET"
   echo "extras: $EXTRA"
   echo "with: ${FEATURE_PKGS[*]}"
+  echo "web-extra: ${WEB_EXTRA_LIST:-(none)}"
   echo "policy-extras: ${POLICY_EXTRA_LIST:-(none)}"
   echo "policy-runtime: $POLICY_RUNTIME"
   exit 0
@@ -158,6 +178,22 @@ install_global || install_venv
 # Resolve a runnable aua (prefer the global one; fall back to the venv path).
 if ! command -v "$AUA" >/dev/null 2>&1 && [ ! -x "$AUA" ]; then
   AUA="$REPO_DIR/.venv/bin/aua"
+fi
+
+if [ -n "$WEB_EXTRA_LIST" ]; then
+  echo "==> Installing Playwright Chromium for AUA web support..."
+  if command -v uvx >/dev/null 2>&1; then
+    uvx --from playwright playwright install chromium \
+      || echo "    Browser install failed; retry with: uvx --from playwright playwright install chromium"
+  elif [ -x "$REPO_DIR/.venv/bin/playwright" ]; then
+    "$REPO_DIR/.venv/bin/playwright" install chromium \
+      || echo "    Browser install failed; retry with: .venv/bin/playwright install chromium"
+  elif command -v pipx >/dev/null 2>&1; then
+    pipx run --spec playwright playwright install chromium \
+      || echo "    Browser install failed; retry with: pipx run --spec playwright playwright install chromium"
+  else
+    echo "    Playwright is installed, but Chromium still needs: playwright install chromium"
+  fi
 fi
 
 echo "==> Installing the Claude Code skill at user level (~/.claude/skills)..."

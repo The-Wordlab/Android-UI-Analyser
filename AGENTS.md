@@ -26,8 +26,8 @@ Design and rationale: `docs/device-teardown.md`.
 ## Keep platform operations behind the platform adapter
 
 `PlatformAdapter` is the gateway between AUA's agent-oriented core and native automation tools.
-Android is the default implementation today; it is not permission to make new core code Android-
-specific.
+Android is the default implementation; iOS simulators and web browsers are also built in. That is
+not permission to make new core code platform-specific.
 
 - Never add a new direct `adb`, `adbutils`, `uiautomator2`, emulator-console, `dumpsys`, `logcat`,
   `run-as`, or other native-tool call to the engine, CLI, MCP server, daemon, or a generic service.

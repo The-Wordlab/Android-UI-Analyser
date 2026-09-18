@@ -1,4 +1,4 @@
-"""Platform factory/strategy seam; Android remains the only built-in implementation."""
+"""Platform factory/strategy seam shared by built-in and external implementations."""
 
 from __future__ import annotations
 

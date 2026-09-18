@@ -27,6 +27,7 @@ _BUILTINS_LOADED = False
 _BUILTIN_MODULES: dict[str, str] = {
     "android": "android_ui_analyser.platforms.android",
     "ios": "android_ui_analyser.platforms.ios",
+    "web": "android_ui_analyser.platforms.web",
 }
 _ENTRY_POINTS: dict[str, list[metadata.EntryPoint]] | None = None
 

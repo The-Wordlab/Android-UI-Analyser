@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AUA web fixture</title>
+    <style>
+      body { font: 18px system-ui; margin: 32px; }
+      label, input, button { display: block; margin: 12px 0; }
+      input, button { font: inherit; padding: 10px; }
+      .space { height: 900px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Web checkout</h1>
+      <label for="email">Email address</label>
+      <input id="email" type="email" placeholder="name@example.test">
+      <button data-testid="continue" type="button">Continue</button>
+      <p id="result" aria-live="polite">Waiting for details</p>
+      <div class="space" aria-hidden="true"></div>
+      <button data-testid="finish" type="button">Finish checkout</button>
+    </main>
+    <script>
+      document.querySelector('[data-testid="continue"]').addEventListener('click', () => {
+        const email = document.querySelector('#email').value;
+        document.querySelector('#result').textContent = `Ready for ${email}`;
+      });
+    </script>
+  </body>
+</html>
