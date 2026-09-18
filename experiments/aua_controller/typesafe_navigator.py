@@ -41,12 +41,14 @@ real screens before anything depends on it.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 MODEL = "jev-latest"
 MIN_CONFIDENCE = 0.85  # measured: 0.80 gives 77% correct, 0.85 gives 93%
+MAX_JOURNEY_CHARS = 60_000  # state and question share a 32k-token budget
 MAX_OPTIONS = 60  # a Choice takes up to 255 options; a screen offering more is not a decision
 TAP_TOOL = "tap_and_analyze"
 
@@ -153,6 +155,14 @@ class TypeSafeNavigator:
         # loop that burned a whole run's budget. The chat model carries the transcript and can
         # see that, so a repeat is its problem, not this one's.
         self._seen: set[tuple[str, str]] = set()
+        # The journey so far, in the state rather than in the model. A System One model keeps
+        # nothing between calls, but it does not need to: the whole run fits in one request.
+        # Sending only tool names measured 33% target accuracy against 41% for the journey, and
+        # the 0.90 gate went from 83% correct to 100%. It is also what lets it see that a screen
+        # did not change, which is the loop it otherwise walks straight into.
+        self._journey: list[dict[str, Any]] = []
+        self._pending: dict[str, Any] | None = None
+        self._last_fingerprint: str | None = None
         self.proposals: list[dict[str, Any]] = []
         self.declined: dict[str, int] = {}
         self.requests = 0
@@ -165,6 +175,8 @@ class TypeSafeNavigator:
     def observed(self, tool: str) -> None:
         """Record what the run actually did, whoever chose it."""
         self.history.append(tool)
+        if self._pending is not None:
+            self._pending["you_chose"] = f"{tool} on '{self._pending.pop('_label', '?')}'"
 
     async def __call__(self, result: Any) -> dict[str, Any] | None:
         from experiments.aua_controller.compaction import compact_frame
@@ -182,7 +194,23 @@ class TypeSafeNavigator:
             self._decline("too_few_controls")
             return None
 
-        state = {"goal": self.goal, "actions_so_far": self.history[-20:], "screen": observation}
+        # Close the previous turn now that its result is on screen: whether the chosen action
+        # moved anything is the single most useful fact about it.
+        if self._pending is not None:
+            self._pending["what_happened"] = (
+                "SCREEN DID NOT CHANGE" if fingerprint == self._last_fingerprint else "screen changed"
+            )
+            self._journey.append(self._pending)
+            self._pending = None
+        self._last_fingerprint = fingerprint if isinstance(fingerprint, str) else None
+
+        journey = list(self._journey)
+        # State plus the longest question share a 32k-token budget, so the oldest turns go
+        # first; a loop is made of the recent ones.
+        while len(json.dumps(journey, default=str)) > MAX_JOURNEY_CHARS and journey:
+            journey.pop(0)
+        state = {"goal": self.goal, "journey_so_far": journey,
+                 "this_is_the_new_screen": observation}
         started = time.perf_counter()
         try:
             response = await self.client.system_one(
@@ -228,6 +256,9 @@ class TypeSafeNavigator:
         self.proposals.append(record)
         if fingerprint is not None:
             self._seen.add(pair)
+        self._pending = {"n": len(self._journey) + 1,
+                         "screen_you_saw": list(options.values())[:40],
+                         "_label": options[target.choice]}
         if self.shadow:
             self._decline("shadow")
             return None

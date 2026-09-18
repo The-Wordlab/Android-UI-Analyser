@@ -188,3 +188,43 @@ def test_the_same_tap_is_allowed_again_once_the_screen_has_moved_on() -> None:
     assert asyncio.run(navigator(SCREEN)) is not None
     moved = {"ok": True, "observation": {**SCREEN["observation"], "meta": {"fingerprint": "fp-2"}}}
     assert asyncio.run(navigator(moved)) is not None, "a new screen is a new decision"
+
+
+class RecordingClient(FakeClient):
+    """Keeps the state it was sent, so the journey can be read back."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.states: list[dict] = []
+
+    async def system_one(self, *, state, questions, model, timeout=None):
+        self.states.append(state)
+        return await super().system_one(state=state, questions=questions, model=model, timeout=timeout)
+
+
+def test_the_whole_journey_is_sent_not_a_list_of_tool_names() -> None:
+    # A System One model keeps nothing between calls, but the run fits in one request. Tool
+    # names alone measured 33% target accuracy against 41% for the journey.
+    client = RecordingClient()
+    navigator = TypeSafeNavigator("Open notification settings", client=client, tools=[TAP_TOOL])
+    asyncio.run(navigator(SCREEN))
+    navigator.observed(TAP_TOOL)
+    moved = {"ok": True, "observation": {**SCREEN["observation"], "meta": {"fingerprint": "fp-2"}}}
+    asyncio.run(navigator(moved))
+
+    first, second = client.states
+    assert first["journey_so_far"] == [], "nothing has happened yet"
+    turn = second["journey_so_far"][0]
+    assert turn["you_chose"] == f"{TAP_TOOL} on 'Notifications'"
+    assert turn["what_happened"] == "screen changed"
+    assert "Notifications" in turn["screen_you_saw"]
+
+
+def test_a_screen_that_did_not_move_is_said_so_in_the_journey() -> None:
+    # This is the fact that stops the loop: the model can see its own tap changed nothing.
+    client = RecordingClient()
+    navigator = TypeSafeNavigator("g", client=client, tools=[TAP_TOOL])
+    asyncio.run(navigator(SCREEN))
+    navigator.observed(TAP_TOOL)
+    asyncio.run(navigator(SCREEN))
+    assert client.states[1]["journey_so_far"][0]["what_happened"] == "SCREEN DID NOT CHANGE"
