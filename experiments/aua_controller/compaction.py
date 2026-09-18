@@ -80,8 +80,14 @@ def compact_element(element: dict[str, Any], *, max_text: int = 120, keep_id: bo
         if key == "id" and not keep_id:
             continue
         value = element[key]
-        if key in ("clickable", "editable", "checked", "selected", "scrollable", "focused") and value is not True:
-            continue  # False/None flags are the default; only positive state informs
+        # A false here really is the default and informs nothing, so it is dropped.
+        if key in ("clickable", "editable", "selected", "scrollable", "focused") and value is not True:
+            continue
+        # `checked` is not like those: an off switch IS the reading, and dropping the false
+        # makes it indistinguishable from an element that is no switch at all, which leaves
+        # "the X switch is off" unprovable. A None does mean no switch, and still goes.
+        if key == "checked" and value is None:
+            continue
         if key in ("text", "desc", "content_desc", "resource_id", "rid") and (not isinstance(value, str) or not value.strip()):
             continue
         out[key] = _trim(value, max_text)

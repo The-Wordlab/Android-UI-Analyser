@@ -86,6 +86,15 @@ notes, so you can check for a newer version — and read what changed — withou
 - Automatic cleanup no longer warns about a different platform on every command or reports
   failed cleanup as a successful reset. Pending cleanup remains visible in `teardown status`.
 
+### Fixed
+
+- The controller harness no longer hides an off switch from the model. Frame compaction drops
+  flags whose false is merely a default, and `checked` had been swept up with them, so a
+  switch that was off looked identical to an element that was no switch at all and a contract
+  bullet like "the X switch is off" could never be verified. A `checked` of false is now kept
+  (a `checked` of null, meaning no switch, is still dropped), matching what `aua` itself
+  reports. Everything else the projection trims is unchanged.
+
 ## [0.28.0] - 2026-09-17
 
 ### Added
