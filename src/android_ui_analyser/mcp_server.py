@@ -2780,7 +2780,8 @@ def _tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="app",
             description="Inspect or control the foreground app "
-            "(foreground|stop|kill|clear|grant|current). Use app_launch_and_analyze to launch.",
+            "(foreground|stop|kill|clear|grant|uninstall|current). Use app_launch_and_analyze to launch. "
+            "Uninstall removes the app and all its data; requires confirmed=true.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2788,6 +2789,7 @@ def _tool_definitions() -> list[types.Tool]:
                     "package": {"type": "string"},
                     "activity": {"type": "string"},
                     "clear_state": {"type": "boolean", "default": False},
+                    "confirmed": {"type": "boolean", "default": False},
                 },
                 "required": ["action"],
                 "additionalProperties": False,
@@ -4320,6 +4322,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 package=args.get("package"),
                 activity=args.get("activity"),
                 clear_state=args.get("clear_state", False),
+                confirmed=args.get("confirmed", False),
             )
         )
     if name == "app_launch_and_analyze":

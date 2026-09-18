@@ -966,6 +966,19 @@ def app(
             # prepended afterwards rather than passed in — it must not be silently dropped.
             launched.note = f"{launch_note} {launched.note}" if launched.note else launch_note
         return self._finalize_observed_action(launched)
+    if a == "uninstall":
+        if not package:
+            raise UsageError("app uninstall needs a package name")
+        if not confirmed:
+            raise UsageError("app uninstall removes the app and ALL its data — pass --yes to confirm")
+        installer = self.platform.adapter_capability("app.install")
+        with self._acting():
+            self._app_process_replaced(package)
+            installer.uninstall_app(device, package)
+        self._prefetch.invalidate()
+        self._last_hierarchy_hash = None
+        self._last_analyze_result = None
+        return ActionResult(ok=True, action="app-uninstall", detail=package)
     if a in ("kill", "force-stop"):
         if not package:
             raise UsageError("app kill needs a package name")
@@ -1034,7 +1047,7 @@ def app(
         return ActionResult(ok=True, action="app-grant", detail=package)
     raise UsageError(
         f"unknown app action '{action}'",
-        hint="foreground|launch|stop|kill|clear|grant|current",
+        hint="foreground|launch|stop|kill|clear|grant|uninstall|current",
     )
 
 

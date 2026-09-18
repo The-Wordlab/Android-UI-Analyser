@@ -1665,6 +1665,13 @@ def render_markdown(*, brief: bool = False) -> str:
         "which simulators are booted. `resource_id` is the accessibilityIdentifier (use `--rid`), "
         "`screen.package` is the bundle id, `key back` performs the edge-swipe back gesture, "
         "`aua install` takes an iphonesimulator `.app`, and non-ASCII text is pasted for you. "
+        "`has` and `scroll-to` exclude off-screen nodes retained by SwiftUI. "
+        "`app uninstall <bundle-id> --yes` removes an app and its data. "
+        "`db list/query/schema/execute/backup/restore` works on unencrypted SQLite in the app's "
+        "data container; use the relative path from `db list`. Configured `flags` deeplinks "
+        "verify UserDefaults (handle an initial Open-in prompt through the UI). "
+        "Flow `prefs_write` accepts an explicit `<bundle-id>.plist`, with the original restored "
+        "at session cleanup. Physical iPhones and network-offline control remain unsupported. "
         "Logs, recording and `virtual-target` provisioning are not available on iOS yet; those "
         "calls return `platform_capability_unsupported`. Details: `docs/ios.md`."
     )

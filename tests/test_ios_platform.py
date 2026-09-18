@@ -84,6 +84,9 @@ class FakeSimulatorHost:
             return self._simctl(argv, argv[2:], input_bytes)
         if tool == "axe":
             return self._axe(argv, argv[1:], input_bytes)
+        if tool == "ps":
+            assert argv[1:] == ("-p", "1234", "-o", "lstart=")
+            return self._ok(argv, b"Fri Sep 18 10:00:00 2026\n")
         raise AssertionError(f"unexpected host tool {argv!r}")
 
     @staticmethod
@@ -158,6 +161,8 @@ class FakeSimulatorHost:
                 for pid, bundle in self.running.items()
             )
             return self._ok(argv, rows.encode())
+        if verb == "spawn" and args[2:] == ("launchctl", "managerpid"):
+            return self._ok(argv, b"1234\n")
         if verb == "spawn" and args[2:] == ("defaults", "read", "-g", "AppleLocale"):
             return self._ok(argv, b"en_US@rg=eszzzz\n")
         if verb == "appinfo":
@@ -378,6 +383,7 @@ def test_connecting_a_named_shut_down_simulator_boots_it_first(
     runtime = adapter.connect("iPad Fixture")
 
     assert runtime.target_id == OTHER_UDID
+    assert runtime.instance_token() == "launchd:1234:Fri Sep 18 10:00:00 2026"
     assert host.argv_of("xcrun", "simctl", "boot", OTHER_UDID)
     assert host.argv_of("xcrun", "simctl", "bootstatus", OTHER_UDID, "-b")
     assert host.states[OTHER_UDID] == "Booted"
@@ -622,7 +628,6 @@ def test_peek_is_read_only_and_answers_for_a_target_nobody_connected(
 def test_optional_android_only_capabilities_refuse_with_a_typed_error(adapter: IOSPlatform) -> None:
     for name in (
         "device.logs",
-        "app_database",
         "virtual_targets",
         "device.shell",
         "device.orientation",

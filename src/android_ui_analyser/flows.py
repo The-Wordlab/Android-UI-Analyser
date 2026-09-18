@@ -125,7 +125,7 @@ _NETWORK_PROFILES = frozenset({"wifi-only", "cellular-only", "slow", "lossy"})
 # A prefs file is addressed by the basename Android stores it under, never by path: the step
 # replaces the file it names, so a traversal would replace a different one. Kept here as well as
 # in the device-side writer because a flow must be refused at load time, before it acts.
-_PREFS_FILE_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.xml$")
+_PREFS_FILE_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.(?:xml|plist)$")
 # Saved flows use a finite semantic vocabulary so misspellings fail while the flow is parsed.
 # The selected adapter still owns the native mapping and may explicitly reject a semantic key
 # during whole-graph preflight. KEYCODE_* and numeric values remain accepted only for backwards
@@ -453,15 +453,15 @@ def _tap_point(value: str, *, field: str, index: int) -> str:
 
 
 def _prefs_file(name: str, *, index: int) -> str:
-    """The basename Android stores, with the suffix supplied when the author left it off."""
+    """A preference basename; preserve explicit platform suffixes, default to Android XML."""
     value = name.strip()
-    if value and not value.endswith(".xml"):
+    if value and not value.endswith((".xml", ".plist")):
         value = f"{value}.xml"
     if not _PREFS_FILE_RE.fullmatch(value) or value.startswith("."):
         raise _step_error(
             index,
-            f"prefs_write `file:` must be a shared_prefs basename, got {name!r}",
-            hint="e.g. `example_settings` or `example_settings.xml` — not a path.",
+            f"prefs_write `file:` must be a preference basename, got {name!r}",
+            hint="Use an Android .xml or an iOS .plist basename — not a path.",
         )
     return value
 

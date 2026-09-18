@@ -11,6 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `aua app uninstall <app-id> --yes` and MCP `app` with `action=uninstall, confirmed=true`
+  remove an installed app through the selected platform adapter on Android and iOS.
+- iOS simulator app data: SQLite discovery, read-only WAL-aware queries, schema inspection,
+  confirmed data mutations and backup/restore; configured feature-flag deeplinks with UserDefaults
+  verification; `.plist` preference setup flows with journalled restoration at session cleanup.
+
 ### Fixed
 
 - iOS presence checks and `scroll-to` now exclude off-screen accessibility nodes retained by

@@ -57,6 +57,7 @@ Physical iPhones are not supported: AXe drives simulators only.
   need `--serial`. Naming a shut-down simulator boots it first (`boot_timeout_s`).
 - **Apps.** `aua install <Build.app>` installs an `iphonesimulator` `.app` bundle (not an
   `.ipa`); `aua app launch|stop|clear|grant|exists` map to `simctl launch|terminate|…`.
+  `aua app uninstall <bundle-id> --yes` removes the app and its data.
   `clear` empties the app's data container and resets its permissions. Permission grants use
   `simctl privacy`, which covers calendar, contacts, photos, media library, microphone, motion,
   reminders, Siri and location; grants it cannot express (camera, notifications) are left to the app's
@@ -70,9 +71,52 @@ Physical iPhones are not supported: AXe drives simulators only.
 | `device.touch` (held touches, single-attempt taps) | `device.recording` (`simctl io recordVideo`) |
 | `app.lifecycle`, `app.links`, `app.status`, `app.install` | `virtual_targets` (`aua virtual-target …` boot/create/delete) |
 | `device.clipboard`, `device.location` | `device.orientation`, `device.keyboard`, `device.clock`, `device.airplane`, `app.files` |
-| | Android-only services: `app_database`, `proxy`, `network*`, `feature_flags`, `microphone`, `device_agent`, `webview` |
+| `app_database` (SQLite), `feature_flags` (UserDefaults and configured deeplinks) | `proxy`, `network*`, `microphone`, `device_agent`, `webview` |
 
 A missing capability fails with `platform_capability_unsupported`; nothing falls back to `adb`.
+
+## App data and test setup
+
+SQLite databases are discovered inside the installed app's data container. Use the relative
+path returned by `db list`; encrypted stores, Keychain and shared app-group containers are not
+included. Reads use a consistent SQLite snapshot including committed WAL data without stopping
+the app. `--coherent` additionally stops it. Mutations accept a single data-only SQL statement,
+require `--yes`, create a restore point, validate integrity and relaunch by default.
+
+```bash
+aua --platform ios db list com.example.app
+aua --platform ios db query com.example.app Documents/example.sqlite 'SELECT * FROM items'
+aua --platform ios db execute com.example.app Documents/example.sqlite \
+  "UPDATE items SET label='Fixture' WHERE id=1" --yes
+aua --platform ios db backups com.example.app Documents/example.sqlite
+aua --platform ios db restore com.example.app Documents/example.sqlite <backup-id> --yes
+```
+
+Feature-flag deeplinks use the same `flags.templates` config as Android. Verification reads
+UserDefaults through the simulator's preferences service (not a potentially stale plist file).
+The default preference domain is the bundle id; `--prefs-file` can select another plist in that
+app's preferences directory. An initial iOS "Open in…" prompt must be handled through the UI;
+an unverified flag is reported as failure, not accepted as a test precondition.
+
+For direct setup without an app-owned deeplink, use a flow with an explicit `.plist` filename:
+
+```yaml
+name: fixture_setup
+app: com.example.app
+steps:
+  - prefs_write:
+      file: com.example.app.plist
+      values:
+        fixture_enabled: true
+```
+
+Run it with `aua --platform ios flow run --file fixture_setup.yaml`. Only string, boolean and
+number values are accepted; unrelated keys are preserved. The original preferences are recorded
+before writing and restored by session cleanup, including after repeated writes. This does not
+grant access to arbitrary server-side or remote-config flags: the app must use these values.
+
+Offline simulation and physical iPhones remain unsupported by this adapter. AUA does not change
+the Mac's network to simulate a disconnected iPhone.
 
 ## Troubleshooting
 

@@ -5805,10 +5805,10 @@ def app_cmd(
         ...,
         metavar="ACTION",
         help="exists|status|foreground|launch-and-analyze|launch|restart-and-analyze|restart|"
-        "stop|kill|clear|grant|current.",
+        "stop|kill|clear|grant|uninstall|current.",
     ),
     package: str | None = typer.Argument(
-        None, metavar="[PKG]", help="Package for exists/status/launch/stop/kill/clear/grant."
+        None, metavar="[PKG]", help="Package for exists/status/launch/stop/kill/clear/grant/uninstall."
     ),
     activity: str | None = typer.Option(
         None,
@@ -5824,7 +5824,7 @@ def app_cmd(
         False,
         "--yes",
         "--yes-wipe-flags",
-        help="Required for `clear` / `launch --clear`: confirms wiping app data "
+        help="Required for `uninstall` / `clear` / `launch --clear`: confirms wiping app data "
         "(feature-flag overrides, login session, local config, …).",
     ),
     observe: bool = typer.Option(
@@ -5912,6 +5912,11 @@ def app_cmd(
                 fmt,
             )
             return
+        if a == "uninstall" and not yes:
+            raise UsageError(
+                "app uninstall removes the app and ALL its data — pass --yes to confirm",
+                hint="Example: `aua app uninstall com.example.app --yes`.",
+            )
         wiping = a in ("clear", "clear-state", "clear_state") or (a == "launch" and clear_state)
         if wiping and not yes:
             raise UsageError(

@@ -60,6 +60,8 @@ class IOSPlatform(PlatformAdapter):
             "app.lifecycle",
             "app.links",
             "app.status",
+            "app_database",
+            "feature_flags",
             "device.clipboard",
             "device.location",
             "device.touch",
@@ -108,6 +110,17 @@ class IOSPlatform(PlatformAdapter):
     def prepare_host(self) -> None:
         self.tools.resolve_xcrun()
         self.tools.resolve_axe()
+
+    def load_capability(self, capability: str) -> object | None:
+        if capability == "app_database":
+            from .ios_database import IOSDatabase
+
+            return IOSDatabase(self.tools)
+        if capability == "feature_flags":
+            from .ios_preferences import IOSPreferences
+
+            return IOSPreferences(self.tools)
+        return None
 
     def normalize_key(self, name: str) -> str:
         candidate = super().normalize_key(name)
@@ -228,7 +241,7 @@ class IOSPlatform(PlatformAdapter):
             self.tools,
             sim.udid,
             geometry=self._probe_geometry(sim.udid),
-            boot_token=sim.last_booted_at,
+            boot_token=sim.last_booted_at or self.tools.boot_identity(sim.udid),
             data_path=sim.data_path,
         )
 

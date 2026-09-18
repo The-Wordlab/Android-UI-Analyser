@@ -252,6 +252,17 @@ class IOSTools:
     def find_simulator(self, udid: str) -> SimulatorInfo | None:
         return next((sim for sim in self.list_simulators() if sim.udid == udid), None)
 
+    def boot_identity(self, udid: str) -> str:
+        """Identify the actual boot when simctl inventory omits lastBootedAt."""
+        pid = self.simctl("spawn", udid, "launchctl", "managerpid").text.strip()
+        if not pid.isdigit():
+            raise DeviceError("simulator launchd PID unavailable", code="ios_boot_identity_missing")
+        result = self._runner.run(["ps", "-p", pid, "-o", "lstart="], timeout_s=5.0)
+        started = result.text.strip()
+        if not result.ok or not started:
+            raise DeviceError("simulator launchd identity unavailable", code="ios_boot_identity_missing")
+        return f"launchd:{pid}:{started}"
+
     def plist_json(self, data: bytes) -> Any:
         """Convert simctl's OpenStep-style plist output into JSON via ``plutil``."""
 

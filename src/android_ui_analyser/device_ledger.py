@@ -1264,8 +1264,15 @@ MUTATION_CATALOGUE: dict[str, Mutation] = {
         "app_bundle_uninstall",
         "platforms/android.py:uninstall_app",
         None,
-        "Fresh install explicitly removes the prior app and all of its data after confirmation; "
+        "Fresh install or app uninstall explicitly removes the app and its data after confirmation; "
         "that destructive intent cannot be reconstructed by teardown.",
+    ),
+    "ios_app_bundle_uninstall": Mutation(
+        "app_bundle_uninstall",
+        "platforms/ios.py:uninstall_app",
+        None,
+        "Explicit confirmed uninstall removes the app and its data; AUA has no prior bundle "
+        "or data with which to reconstruct it.",
     ),
     "explicit_device_agent_install": Mutation(
         "explicit_device_agent_install",
@@ -1302,6 +1309,26 @@ MUTATION_CATALOGUE: dict[str, Mutation] = {
         None,
         "`db execute` already creates its own restore point and requires --yes; "
         "`aua db restore` is the documented rollback.",
+    ),
+    "ios_app_database": Mutation(
+        "app_database",
+        "platforms/ios_database.py:execute_database",
+        None,
+        "Explicit confirmed data mutation creates a SQLite restore point first; "
+        "`aua db restore` is its documented rollback, as on Android.",
+    ),
+    "ios_app_database_restore": Mutation(
+        "app_database",
+        "platforms/ios_database.py:restore_database",
+        None,
+        "Explicit confirmed restoration creates a pre-restore backup before replacing data.",
+    ),
+    "ios_app_preferences": Mutation(
+        "app_prefs",
+        "platforms/ios_preferences.py:write_prefs",
+        "restore_app_prefs",
+        "Engine.prefs_write saves the original plist and journals the shared restore_app_prefs "
+        "undo before importing UserDefaults; teardown replays it through feature_flags.",
     ),
     "app_datastore": Mutation(
         "app_datastore",
