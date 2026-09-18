@@ -42,7 +42,11 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     monkeypatch.setattr(
         engine_mod.Engine,
         "_connect_target",
-        lambda _engine, serial=None: FakeDevice(hierarchy_xml=_XML, serial=serial or "fake-emulator-5554"),
+        lambda _engine, serial=None: FakeDevice(
+            hierarchy_xml=_XML,
+            serial=serial or "fake-emulator-5554",
+            resource_index={"continue_btn": (40, 200, 1040, 320)},
+        ),
     )
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
 
@@ -95,6 +99,22 @@ def test_restart_without_a_package_says_so(calls: list[dict[str, Any]]) -> None:
     combined = result.output + str(result.stderr or "")
     assert "package" in combined, combined
     assert not calls, "nothing should have been done to the device"
+
+
+def test_restart_until_after_subcommand_returns_a_result(calls: list[dict[str, Any]]) -> None:
+    import json
+
+    # Exercise the real console's global-option preprocessing, not Typer alone.
+    argv = cli_mod.hoist_global_options([
+        "app", "restart-and-analyze", "com.example.app", "--until", "rid:continue_btn",
+    ])
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["await_outcome"] == "satisfied"
+    assert payload["observation"]["elements"]
+    assert [c["action"] for c in calls] == ["stop", "launch"]
 
 
 def test_plain_app_lifecycle_commands_use_the_shared_routed_path(

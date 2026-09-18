@@ -1108,7 +1108,16 @@ class Engine:
             logger.debug("teardown sweep skipped: %s", exc)
             return
         for report in reports:
-            logger.warning(
+            # Foreign-platform recovery is not a warning about this command's target.
+            log = logger.warning if report.get("platform") == self.platform.name else logger.debug
+            failures = report.get("failed") or []
+            if failures or report.get("code"):
+                log("cleanup pending on %s: %s; inspect `aua teardown status`",
+                    report.get("serial"), report.get("code") or failures)
+                continue
+            if not report.get("undone"):
+                continue
+            log(
                 "reset abandoned changes on %s (%s): %s",
                 report.get("serial"),
                 report.get("reason"),

@@ -352,7 +352,10 @@ class IOSSimulatorRuntime(TargetRuntime):
         result = self._tools.simctl(
             "terminate", self.target_id, app_id, timeout_s=30.0, check=False
         )
-        if not result.ok and "nothing to terminate" not in result.error_text.casefold():
+        # simctl puts the idempotent "already stopped" explanation below its generic
+        # NSPOSIXErrorDomain header. error_text intentionally contains only the first line.
+        detail = (result.stderr.decode("utf-8", "replace") or result.text).casefold()
+        if not result.ok and "found nothing to terminate" not in detail:
             raise self._tools.error(result, "simctl terminate")
 
     def clear_app(self, app_id: str) -> str | None:

@@ -44,6 +44,10 @@ Physical iPhones are not supported: AXe drives simulators only.
   taps line up with the PNG `analyze` returns.
 - **Foreground app.** `screen.package` is the bundle identifier of the process that owns the
   screen (`com.apple.springboard` on the home screen).
+- **Viewport checks.** `has`, selector waits and `scroll-to` reject accessibility nodes entirely
+  outside the screen, including off-screen rows retained by SwiftUI. They use the same viewport
+  bounds as `analyze`. Intersecting bounds are not proof that another view does not cover a node;
+  use the screenshot for visual assertions.
 - **Keys.** `enter`, `delete`/`backspace`, `tab`, `space`, `escape`, arrow keys, `home`, `lock`,
   `siri`, `side_button`, `apple_pay`, and `hid:<usage-code>` for anything else. There is no back
   key on iOS: `aua key-and-analyze back` performs the system back gesture (a swipe in from the left edge).

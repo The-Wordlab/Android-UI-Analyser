@@ -156,6 +156,24 @@ def test_off_screen_and_zero_area_nodes_are_dropped() -> None:
     assert "Ghost" not in texts and "Nothing" not in texts
 
 
+@pytest.mark.parametrize("by", ["text", "id", "rid", "desc"])
+def test_presence_lookup_skips_offscreen_duplicates_until_the_visible_match(by: str) -> None:
+    hidden = node("StaticText", 10, 240, 80, 10, AXLabel="Target", AXUniqueId="Target")
+    visible = node("StaticText", 10, 50, 80, 10, AXLabel="Target", AXUniqueId="Target")
+    raw = json.dumps([hidden])
+    assert ios_tree.find_bounds(raw, geometry=GEOMETRY, query="Target", by=by) is None
+    raw = json.dumps([hidden, visible])
+    assert ios_tree.find_bounds(raw, geometry=GEOMETRY, query="Target", by=by) == (30, 150, 270, 180)
+
+
+@pytest.mark.parametrize("y, expected", [(-20, False), (-5, True), (195, True), (200, False)])
+def test_presence_and_analyze_agree_at_viewport_edges(y: int, expected: bool) -> None:
+    raw = json.dumps([node("StaticText", 10, y, 80, 10, AXLabel="Target")])
+    tree = ios_tree.normalize(raw, SCREEN, geometry=GEOMETRY)
+    assert bool(tree.elements) is expected
+    assert (ios_tree.find_bounds(raw, geometry=GEOMETRY, query="Target") is not None) is expected
+
+
 def test_rows_link_to_their_scroll_container_so_movement_can_be_verified() -> None:
     tree = ios_tree.normalize(raw_tree(), SCREEN, geometry=GEOMETRY)
 
@@ -247,7 +265,7 @@ def test_find_bounds_matches_text_identifier_and_description_in_canonical_pixels
     assert ios_tree.find_bounds(
         raw, geometry=GEOMETRY, query=r"Card (Alpha|Beta)", match="regex"
     ) == (30, 180, 270, 210)
-    assert ios_tree.find_bounds(raw, geometry=GEOMETRY, query="Ghost") == (1500, 1500, 1530, 1530)
+    assert ios_tree.find_bounds(raw, geometry=GEOMETRY, query="Ghost") is None
     assert ios_tree.find_bounds(raw, geometry=GEOMETRY, query="absent") is None
 
 

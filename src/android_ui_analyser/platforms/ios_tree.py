@@ -422,7 +422,10 @@ def find_bounds(
             if native is None:
                 continue
             bounds = geometry.bounds_to_canonical(native)
-            if bounds[2] > bounds[0] and bounds[3] > bounds[1]:
+            # SwiftUI keeps off-screen rows in its accessibility tree. Presence checks,
+            # waits and scroll-to must use the same viewport as normalize()/analyze.
+            if (bounds[2] > bounds[0] and bounds[3] > bounds[1]
+                    and _on_screen(bounds, geometry.canonical_size)):
                 return bounds
     return None
 

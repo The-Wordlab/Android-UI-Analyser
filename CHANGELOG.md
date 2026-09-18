@@ -11,6 +11,15 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- iOS presence checks and `scroll-to` now exclude off-screen accessibility nodes retained by
+  SwiftUI, matching the viewport used by `analyze`.
+- iOS restart now launches an already-stopped app instead of aborting on simctl's multiline
+  "found nothing to terminate" response.
+- Automatic cleanup no longer warns about a different platform on every command or reports
+  failed cleanup as a successful reset. Pending cleanup remains visible in `teardown status`.
+
 ## [0.28.0] - 2026-09-17
 
 ### Added

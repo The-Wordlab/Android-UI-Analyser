@@ -632,6 +632,29 @@ def test_optional_android_only_capabilities_refuse_with_a_typed_error(adapter: I
         assert exc.value.code == "platform_capability_unsupported"
 
 
+@pytest.mark.parametrize("already_stopped", [True, False])
+def test_stop_handles_multiline_simctl_errors_without_hiding_other_failures(
+    adapter: IOSPlatform, host: FakeSimulatorHost, monkeypatch, already_stopped: bool,
+) -> None:
+    runtime = adapter.connect(UDID)
+    original = host._simctl
+
+    def simctl(argv, args, input_bytes):
+        if args[0] == "terminate":
+            return host._fail(argv,
+                "An error was encountered processing the command (domain=NSPOSIXErrorDomain, code=3):\n"
+                "Simulator device failed to terminate the app.\n"
+                + ("found nothing to terminate" if already_stopped else "Permission denied"), 3)
+        return original(argv, args, input_bytes)
+
+    monkeypatch.setattr(host, "_simctl", simctl)
+    if already_stopped:
+        runtime.stop_app(APP_ID)
+    else:
+        with pytest.raises(DeviceError):
+            runtime.stop_app(APP_ID)
+
+
 def test_app_exit_evidence_recognises_a_fall_back_to_the_home_screen(adapter: IOSPlatform) -> None:
     from android_ui_analyser.schema import AppContext
 
