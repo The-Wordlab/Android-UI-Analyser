@@ -23,6 +23,11 @@ notes, so you can check for a newer version — and read what changed — withou
 - The experimental controller harness can judge a finished run against its authored contract
   with a TypeSafe System One model (`jev-latest`), as an alternative to the existing
   chat-model judge. Each contract bullet is scored on a four-level evidence ladder and two
+
+### Added
+
+- `run_realapp.py --judge-engine typesafe` judges a finished run against its authored contract
+  with a TypeSafe System One model (`jev-latest`) instead of the chat-model judge ladder. Each contract bullet is scored on a four-level evidence ladder and two
   yes/no questions ask whether something outside the feature stopped the run and whether the
   run ever arrived; the five-way verdict is then composed in ordinary code from those numbers,
   against thresholds a caller can read and change. One run costs one request. Install with the

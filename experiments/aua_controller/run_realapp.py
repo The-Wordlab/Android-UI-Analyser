@@ -38,6 +38,7 @@ from experiments.aua_controller.judgement import (
     Decider,
     ScreenNamer,
     annotate_judge_frames,
+    contract_criteria,
     encode_image,
     frame_fingerprint,
     judge_image_frames,
@@ -58,6 +59,7 @@ from experiments.aua_controller.run_live import (
 )
 from experiments.aua_controller.session_state import judgement_observation_frame, observation_frame
 from experiments.aua_controller.transport import resilient_request, retryable_http_status
+from experiments.aua_controller.typesafe_judge import TypeSafeJudge
 
 from android_ui_analyser.engine_support import _parse_await_terms
 from android_ui_analyser.errors import UsageError
@@ -1161,6 +1163,7 @@ async def run_realapp(
     judge_fallbacks: Sequence[tuple[str, dict[str, Any] | None]] = (),
     judge: bool = True,
     judge_votes: int = 2,
+    judge_engine: str = "chat",
     judge_frames: int = 8,
     judge_images: int = 4,
     name_screens: bool = False,
@@ -1827,10 +1830,16 @@ async def run_realapp(
         elif stop in (
             "terminal_claimed", "model_text", "no_progress", "conversation_budget", "step_budget"
         ) and judge:
-            decider = Decider(send, model=judging_model, backend=backend,
-                              request_config=judge_settings, fallbacks=judge_fallbacks,
-                              max_tokens=judge_max_tokens, cost_limit_usd=judge_cost_limit_usd,
-                              output=output / "judge")
+            # A System One judge scores authored bullets; with none there is nothing to ask,
+            # and a silent fall back to the chat judge would hide which model gave the verdict.
+            criteria = contract_criteria(contract) if judge_engine == "typesafe" else []
+            if judge_engine == "typesafe" and not criteria:
+                raise RunError("--judge-engine typesafe needs an authored contract to score")
+            if judge_engine == "chat":
+                decider = Decider(send, model=judging_model, backend=backend,
+                                  request_config=judge_settings, fallbacks=judge_fallbacks,
+                                  max_tokens=judge_max_tokens, cost_limit_usd=judge_cost_limit_usd,
+                                  output=output / "judge")
             # AUA's goal_progress without an authored contract is always 0/1 active; it would
             # only mislead a judge, so real-app mode does not pass it.
             context_actions = list(actions)
@@ -1847,7 +1856,12 @@ async def run_realapp(
             )
             images: list[str] = []
             image_evidence: list[dict[str, Any]] = []
-            if vision:
+            if vision and judge_engine == "typesafe":
+                # Jev accepts text only, so a screenshot would be silently ignored rather
+                # than read. Say so in the result instead of reporting images that no model saw.
+                result["vision"] = {"requested": True, "supported": False,
+                                    "note": "A System One judge reads text only; no screenshots were sent."}
+            elif vision:
                 # Element text cannot answer a question about appearance. Pair each judged
                 # frame with the screenshot AUA already captured for it, oldest first, so the
                 # final screen is the last image the judge sees.
@@ -1868,11 +1882,20 @@ async def run_realapp(
                                     "image_evidence": image_evidence,
                                     "text_evidence_source_count": len(positioned_frames),
                                     "text_evidence": [frame.get("_judge_evidence", {}) for frame in judged_frames]}
-            verdict = await judge_outcome_votes(
-                decider, votes=judge_votes, goal=goal, final_frame=final,
-                frames=judged_frames, actions=context_actions,
-                images=images, image_evidence=image_evidence, contract=contract,
-            )
+            if judge_engine == "typesafe":
+                system_one = TypeSafeJudge()
+                verdict = system_one.judge(goal=goal, criteria=criteria, final_frame=final,
+                                           frames=judged_frames, actions=context_actions)
+                # Both keys are read off every verdict downstream. A System One judge runs no
+                # vote ladder, and its output tokens are not billed.
+                verdict["votes"] = []
+                verdict["cost"] = 0.0
+            else:
+                verdict = await judge_outcome_votes(
+                    decider, votes=judge_votes, goal=goal, final_frame=final,
+                    frames=judged_frames, actions=context_actions,
+                    images=images, image_evidence=image_evidence, contract=contract,
+                )
             if stop == "no_progress" and verdict["verdict"] == "pass":
                 verdict["verdict"] = "pass_with_warning"
                 verdict["reasons"].insert(0, "Controller stalled on an unchanged screen before finishing.")
@@ -1886,8 +1909,12 @@ async def run_realapp(
                 )
             verdict["controller_stop_reason"] = stop
             result["verdict"] = verdict
-            result["cost"]["judge"] = {"model": judging_model, "provider": (verdict["votes"][0].get("provider") if verdict["votes"] else None),
-                                       "usd": verdict["cost"], "decider": decider.report()}
+            if judge_engine == "typesafe":
+                result["cost"]["judge"] = {"model": system_one.model, "provider": "typesafe",
+                                           "usd": 0.0, "decider": system_one.report()}
+            else:
+                result["cost"]["judge"] = {"model": judging_model, "provider": (verdict["votes"][0].get("provider") if verdict["votes"] else None),
+                                           "usd": verdict["cost"], "decider": decider.report()}
         else:
             reason = report.get("error") or f"controller stopped with {stop}"
             result["verdict"] = {"oracle": "none", "verified": False, "verdict": "unverified",
@@ -2203,6 +2230,12 @@ def main() -> int:
                         help="Stronger manifest candidate to ask when the judge cannot produce "
                              "its schema. Repeatable; tried in the order given.")
     parser.add_argument("--no-judge", action="store_true")
+    parser.add_argument("--judge-engine", choices=("chat", "typesafe"), default="chat",
+                        help="chat: the OpenRouter judge ladder, which writes its own reasons. "
+                             "typesafe: one TypeSafe System One request scoring each authored "
+                             "contract bullet on an evidence ladder. Needs an authored contract, "
+                             "TYPESAFE_API_KEY and the `typesafe` extra; returns no written "
+                             "rationale and reads no screenshots.")
     parser.add_argument("--judge-votes", type=int, default=2, choices=[1, 2])
     parser.add_argument("--judge-frames", type=int, default=8,
                         help="How many observations to show the judge, spread across the whole "
@@ -2405,6 +2438,7 @@ def main() -> int:
                     judge_request_config=judge_config,
                     judge_fallbacks=judge_fallbacks,
                     judge=not args.no_judge, judge_votes=args.judge_votes,
+                    judge_engine=args.judge_engine,
                     judge_frames=args.judge_frames, judge_images=args.judge_images, name_screens=args.map,
                     max_steps=args.max_steps, time_limit_s=args.time_limit, max_tokens=args.max_tokens,
                     preserve_end_state=args.preserve_end_state,
