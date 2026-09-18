@@ -91,6 +91,14 @@ notes, so you can check for a newer version — and read what changed — withou
 - Automatic cleanup no longer warns about a different platform on every command or reports
   failed cleanup as a successful reset. Pending cleanup remains visible in `teardown status`.
 
+- `run_realapp.py --nav-engine typesafe` lets a TypeSafe System One model answer the narrow
+  "which control moves toward the goal" steps while the controller model keeps the rest. It is
+  gated on the model's own confidence (`--nav-min-confidence`, default 0.80) and proposes taps
+  only: stopping, going back, scrolling and typing all stay with the controller model, because
+  a wrong stop corrupts a verdict where a wrong tap costs a step. `--nav-shadow` records what it
+  would have chosen without letting it act. Navigation is where a run spends its requests — tens
+  per run against the judge's two — so this is the half worth making cheap.
+
 ### Fixed
 
 - The controller harness no longer hides an off switch from the model. Frame compaction drops

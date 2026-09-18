@@ -60,6 +60,7 @@ from experiments.aua_controller.run_live import (
 from experiments.aua_controller.session_state import judgement_observation_frame, observation_frame
 from experiments.aua_controller.transport import resilient_request, retryable_http_status
 from experiments.aua_controller.typesafe_judge import TypeSafeJudge
+from experiments.aua_controller.typesafe_navigator import TypeSafeNavigator
 
 from android_ui_analyser.engine_support import _parse_await_terms
 from android_ui_analyser.errors import UsageError
@@ -1164,6 +1165,9 @@ async def run_realapp(
     judge: bool = True,
     judge_votes: int = 2,
     judge_engine: str = "chat",
+    nav_engine: str = "chat",
+    nav_shadow: bool = False,
+    nav_min_confidence: float = 0.80,
     judge_frames: int = 8,
     judge_images: int = 4,
     name_screens: bool = False,
@@ -1725,8 +1729,24 @@ async def run_realapp(
             return await call_tool(name, arguments)
 
         compactor = FrameCompactor(max_elements=max_elements)
+        # The navigator answers the narrow "which control" steps and declines everything
+        # else, so `host_next` returning None simply leaves the step with the chat model.
+        navigator = None
+        if nav_engine == "typesafe":
+            navigator = TypeSafeNavigator(
+                goal, tools=[tool.get("name") for tool in tools if isinstance(tool, dict)],
+                min_confidence=nav_min_confidence, shadow=nav_shadow,
+            )
+        async def navigated_call(name, arguments):
+            # Whoever chose the step, the navigator judges the next one against what the run
+            # has actually done -- the same history the offline measurement gave it.
+            if navigator is not None:
+                navigator.observed(name)
+            return await controller_call(name, arguments)
+
         report = await run_agent(
-            send=send, call_tool=controller_call, tools=tools,
+            send=send, call_tool=navigated_call if navigator is not None else controller_call,
+            tools=tools, host_next=navigator,
             system_prompt=SYSTEM + compact_system_prompt(
                 preserve_end_state=preserve_end_state, semantic_selectors=True,
             ) + (
@@ -1745,6 +1765,8 @@ async def run_realapp(
             terminal_tools=frozenset({"session_finish"}), terminal_claim_limit=terminal_claim_limit,
             no_progress_limit=no_progress_limit,
         )
+        if navigator is not None:
+            result["navigator"] = navigator.report()
         result["controller"] = {
             key: report.get(key) for key in (
                 "stop_reason", "error", "steps_consumed", "model_requests", "tool_calls_executed",
@@ -2230,6 +2252,16 @@ def main() -> int:
                         help="Stronger manifest candidate to ask when the judge cannot produce "
                              "its schema. Repeatable; tried in the order given.")
     parser.add_argument("--no-judge", action="store_true")
+    parser.add_argument("--nav-engine", choices=("chat", "typesafe"), default="chat",
+                        help="chat: every step is decided by the controller model. typesafe: a "
+                             "TypeSafe System One model answers the confident taps and hands "
+                             "every other step, and every stop, back, scroll and typed string, "
+                             "back to the controller model.")
+    parser.add_argument("--nav-shadow", action="store_true",
+                        help="With --nav-engine typesafe, record what the navigator would have "
+                             "done without letting it act. Proves the gate on real screens.")
+    parser.add_argument("--nav-min-confidence", type=float, default=0.80,
+                        help="Confidence a System One tap must clear to be taken (default 0.80).")
     parser.add_argument("--judge-engine", choices=("chat", "typesafe"), default="chat",
                         help="chat: the OpenRouter judge ladder, which writes its own reasons. "
                              "typesafe: one TypeSafe System One request scoring each authored "
@@ -2438,7 +2470,8 @@ def main() -> int:
                     judge_request_config=judge_config,
                     judge_fallbacks=judge_fallbacks,
                     judge=not args.no_judge, judge_votes=args.judge_votes,
-                    judge_engine=args.judge_engine,
+                    judge_engine=args.judge_engine, nav_engine=args.nav_engine,
+                    nav_shadow=args.nav_shadow, nav_min_confidence=args.nav_min_confidence,
                     judge_frames=args.judge_frames, judge_images=args.judge_images, name_screens=args.map,
                     max_steps=args.max_steps, time_limit_s=args.time_limit, max_tokens=args.max_tokens,
                     preserve_end_state=args.preserve_end_state,
