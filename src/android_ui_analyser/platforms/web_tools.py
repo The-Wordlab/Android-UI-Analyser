@@ -668,6 +668,10 @@ class PlaywrightConnection:
         def capture() -> str:
             merged: list[dict[str, Any]] = []
             top = self._page
+            # Sync Playwright dispatches route/response callbacks while an API call is active.
+            # Give a just-completed intercepted response one event-loop turn before reading DOM
+            # text, otherwise the hierarchy can capture the pre-promise "loading" value.
+            top.wait_for_timeout(0)
             for frame in list(top.frames):
                 try:
                     payload = dict(frame.evaluate(_DOM_SNAPSHOT_SCRIPT))

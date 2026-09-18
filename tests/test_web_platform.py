@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -451,3 +452,45 @@ def test_playwright_connection_keeps_sync_transport_off_the_async_mcp_thread() -
         "playwright",
     ]
     assert {thread for _name, thread in calls} == {owner_thread}
+
+
+def test_web_snapshot_pumps_intercepted_responses_before_reading_dom() -> None:
+    calls: list[str] = []
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    class Page:
+        frames: tuple = ()
+        url = URL
+
+        def wait_for_timeout(self, timeout_ms: int) -> None:
+            assert timeout_ms == 0
+            calls.append("event-loop")
+
+        def title(self) -> str:
+            calls.append("title")
+            return "Fixture"
+
+    class Closable:
+        def close(self) -> None:
+            pass
+
+    class Playwright:
+        def stop(self) -> None:
+            pass
+
+    connection = PlaywrightConnection(
+        executor,
+        Playwright(),
+        Closable(),
+        object(),
+        WebLaunchOptions(),
+        URL,
+    )
+    connection._context = Closable()
+    connection._page = Page()
+
+    payload = json.loads(connection.snapshot())
+    connection.close()
+
+    assert payload["url"] == URL
+    assert calls == ["event-loop", "title"]
