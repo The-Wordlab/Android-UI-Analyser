@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-18
+
 ### Added
 
 - `aua app uninstall <app-id> --yes` and MCP `app` with `action=uninstall, confirmed=true`
@@ -1132,5 +1134,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.27.5]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.27.5
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.28.0...HEAD
 [0.28.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.28.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.29.0
