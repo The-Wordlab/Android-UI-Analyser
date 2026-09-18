@@ -169,3 +169,22 @@ def test_plain_names_still_work_and_an_unknown_shape_offers_nothing() -> None:
 
     assert tool_names([TAP_TOOL]) == {TAP_TOOL}
     assert tool_names([{"type": "function"}, 7, None]) == set()
+
+
+def test_the_same_tap_is_not_proposed_twice_for_an_unchanged_screen() -> None:
+    # Observed live: a System One model reads each screen from scratch, so on a screen its own
+    # tap failed to change it confidently proposes that tap again, and the run loops until the
+    # step budget ends it. The chat model holds the transcript and can see the repeat.
+    client = FakeClient()
+    navigator = TypeSafeNavigator("g", client=client, tools=[TAP_TOOL])
+    assert asyncio.run(navigator(SCREEN)) is not None
+    assert asyncio.run(navigator(SCREEN)) is None
+    assert navigator.report()["declined"] == {"repeat_on_unchanged_screen": 1}
+
+
+def test_the_same_tap_is_allowed_again_once_the_screen_has_moved_on() -> None:
+    client = FakeClient()
+    navigator = TypeSafeNavigator("g", client=client, tools=[TAP_TOOL])
+    assert asyncio.run(navigator(SCREEN)) is not None
+    moved = {"ok": True, "observation": {**SCREEN["observation"], "meta": {"fingerprint": "fp-2"}}}
+    assert asyncio.run(navigator(moved)) is not None, "a new screen is a new decision"

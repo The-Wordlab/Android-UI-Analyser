@@ -8,8 +8,21 @@ returning ``None`` simply hands the step back to the chat model and nothing else
 
 It declines far more than it answers, on purpose. Measured over 120 saved real steps, the
 unfiltered pick matched the chat controller's 42% of the time — useless alone — but the model's
-own confidence separates those cases sharply (mean 0.80 when right against 0.46 when wrong), so
-at a 0.80 gate it answers about 30% of steps at about 90% fidelity and passes the rest on.
+own confidence separates those cases sharply (mean 0.80 when right against 0.46 when wrong).
+Counting every step it would actually take, including the ones whose right answer was not a tap
+at all:
+
+===========  ========  =========
+gate         coverage  correct
+===========  ========  =========
+0.80         18%       77%
+**0.85**     **12%**   **93%**
+0.90         8%        100%
+===========  ========  =========
+
+Hence the 0.85 default. The earlier reading of this that quoted 30% coverage at 90% fidelity
+was scoring only steps that were already taps, so it never counted wanting to tap when the run
+should have scrolled, typed or stopped; those are the misses that matter.
 
 Two refusals are structural rather than tuned:
 
@@ -33,7 +46,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 MODEL = "jev-latest"
-MIN_CONFIDENCE = 0.80
+MIN_CONFIDENCE = 0.85  # measured: 0.80 gives 77% correct, 0.85 gives 93%
 MAX_OPTIONS = 60  # a Choice takes up to 255 options; a screen offering more is not a decision
 TAP_TOOL = "tap_and_analyze"
 
@@ -134,6 +147,12 @@ class TypeSafeNavigator:
         offered = tool_names(tools)
         self.can_tap = not offered or TAP_TOOL in offered
         self.history: list[str] = []
+        # (screen fingerprint, target) pairs already proposed. A System One model answers each
+        # screen from scratch with no memory of the last one, so on a screen that did not change
+        # it confidently repeats the tap that failed to change it -- observed live as a 20-step
+        # loop that burned a whole run's budget. The chat model carries the transcript and can
+        # see that, so a repeat is its problem, not this one's.
+        self._seen: set[tuple[str, str]] = set()
         self.proposals: list[dict[str, Any]] = []
         self.declined: dict[str, int] = {}
         self.requests = 0
@@ -155,6 +174,8 @@ class TypeSafeNavigator:
             return None
         compact = compact_frame(result, keep_ids=True)
         observation = compact.get("observation") if isinstance(compact, Mapping) else None
+        meta = observation.get("meta") if isinstance(observation, Mapping) else None
+        fingerprint = meta.get("fingerprint") if isinstance(meta, Mapping) else None
         options = candidates(observation)
         if len(options) < 2:
             # One control is not a choice, and none is not a screen this can help with.
@@ -197,8 +218,16 @@ class TypeSafeNavigator:
             self.proposals.append(record)
             return None
 
+        pair = (str(fingerprint), target.choice)
+        if fingerprint is not None and pair in self._seen:
+            self._decline("repeat_on_unchanged_screen")
+            record["accepted"] = False
+            self.proposals.append(record)
+            return None
         record["accepted"] = not self.shadow
         self.proposals.append(record)
+        if fingerprint is not None:
+            self._seen.add(pair)
         if self.shadow:
             self._decline("shadow")
             return None

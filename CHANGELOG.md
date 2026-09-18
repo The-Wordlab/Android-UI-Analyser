@@ -96,8 +96,10 @@ notes, so you can check for a newer version — and read what changed — withou
   gated on the model's own confidence (`--nav-min-confidence`, default 0.80) and proposes taps
   only: stopping, going back, scrolling and typing all stay with the controller model, because
   a wrong stop corrupts a verdict where a wrong tap costs a step. `--nav-shadow` records what it
-  would have chosen without letting it act. Navigation is where a run spends its requests — tens
-  per run against the judge's two — so this is the half worth making cheap.
+  would have chosen without letting it act. It also never repeats a tap on a screen that has
+  not changed, because a System One model reads each screen from scratch and would otherwise
+  loop. Navigation is where a run spends its requests — tens per run against the judge's
+  two — so this is the half worth making cheap.
 
 ### Fixed
 
