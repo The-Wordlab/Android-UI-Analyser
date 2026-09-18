@@ -6433,6 +6433,292 @@ def datastore_restore_cmd(
     _run(ctx, go)
 
 
+browser_app = typer.Typer(
+    help="Browser storage, diagnostics, network, request, page, and trace controls.",
+    no_args_is_help=True,
+)
+app.add_typer(browser_app, name="browser")
+
+
+def _browser_run(ctx: typer.Context, call: Callable[[], dict[str, Any]]) -> None:
+    try:
+        _emulator_emit(call(), ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+def _browser_pairs(values: list[str], *, label: str) -> dict[str, str]:
+    pairs: dict[str, str] = {}
+    for value in values:
+        key, separator, item = value.partition("=")
+        if not separator or not key.strip():
+            raise UsageError(f"{label} must be NAME=VALUE, got {value!r}")
+        pairs[key.strip()] = item
+    return pairs
+
+
+@browser_app.command("status")
+def browser_status_cmd(ctx: typer.Context) -> None:
+    """Show the selected page plus active browser controls."""
+
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_status())
+
+
+@browser_app.command("logs")
+def browser_logs_cmd(
+    ctx: typer.Context,
+    limit: int = typer.Option(100, "--limit", min=1),
+    kind: list[str] | None = typer.Option(None, "--kind"),
+    since_ms: int | None = typer.Option(None, "--since-ms", min=0),
+) -> None:
+    """Read console, page error, request, response, and WebSocket events."""
+
+    _browser_run(
+        ctx,
+        lambda: _opts(ctx).engine().browser_logs(
+            limit=limit, kinds=kind or [], since_ms=since_ms
+        ),
+    )
+
+
+@browser_app.command("clear-logs")
+def browser_clear_logs_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_logs_clear())
+
+
+@browser_app.command("storage")
+def browser_storage_cmd(
+    ctx: typer.Context,
+    include_values: bool = typer.Option(
+        False, "--include-values", help="Include cookie and storage values (may be sensitive)."
+    ),
+) -> None:
+    """Inspect cookies, local/session storage, IndexedDB, CacheStorage, and workers."""
+
+    _browser_run(
+        ctx,
+        lambda: _opts(ctx).engine().browser_storage(include_values=include_values),
+    )
+
+
+@browser_app.command("storage-export")
+def browser_storage_export_cmd(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_storage_export(path))
+
+
+@browser_app.command("storage-import")
+def browser_storage_import_cmd(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_storage_import(path))
+
+
+@browser_app.command("storage-clear")
+def browser_storage_clear_cmd(
+    ctx: typer.Context,
+    kind: list[str] | None = typer.Option(
+        None,
+        "--kind",
+        help="cookies, local, session, indexeddb, cache, service-workers; omit for all.",
+    ),
+) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_storage_clear(kind or []))
+
+
+@browser_app.command("cache-clear")
+def browser_cache_clear_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_cache_clear())
+
+
+@browser_app.command("reset")
+def browser_reset_cmd(ctx: typer.Context) -> None:
+    """Reset storage and every browser control to configured startup state."""
+
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_reset())
+
+
+@browser_app.command("network")
+def browser_network_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_network_status())
+
+
+@browser_app.command("offline")
+def browser_offline_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_offline(True))
+
+
+@browser_app.command("online")
+def browser_online_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_offline(False))
+
+
+@browser_app.command("throttle")
+def browser_throttle_cmd(
+    ctx: typer.Context,
+    latency_ms: int = typer.Option(0, "--latency-ms", min=0),
+    download_kbps: int = typer.Option(0, "--download-kbps", min=0),
+    upload_kbps: int = typer.Option(0, "--upload-kbps", min=0),
+) -> None:
+    """Set network latency/bandwidth; all zeros clear throttling."""
+
+    _browser_run(
+        ctx,
+        lambda: _opts(ctx).engine().browser_throttle(
+            latency_ms=latency_ms,
+            download_kbps=download_kbps,
+            upload_kbps=upload_kbps,
+        ),
+    )
+
+
+@browser_app.command("cors-add")
+def browser_cors_add_cmd(
+    ctx: typer.Context,
+    origin: str = typer.Option(..., "--origin"),
+    host: list[str] = typer.Option(..., "--host"),
+    method: list[str] | None = typer.Option(None, "--method"),
+    header: list[str] | None = typer.Option(None, "--header"),
+    credentials: bool = typer.Option(False, "--credentials"),
+) -> None:
+    """Add scoped response-header CORS handling for selected hosts."""
+
+    _browser_run(
+        ctx,
+        lambda: _opts(ctx).engine().browser_cors_add(
+            origin=origin,
+            hosts=host,
+            methods=method or [],
+            headers=header or [],
+            credentials=credentials,
+        ),
+    )
+
+
+@browser_app.command("cors-clear")
+def browser_cors_clear_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_cors_clear())
+
+
+@browser_app.command("proxy-set")
+def browser_proxy_set_cmd(
+    ctx: typer.Context,
+    server: str = typer.Argument(...),
+    bypass: str | None = typer.Option(None, "--bypass"),
+    username: str | None = typer.Option(None, "--username"),
+    password_env: str | None = typer.Option(
+        None, "--password-env", help="Environment variable containing the proxy password."
+    ),
+) -> None:
+    password: str | None = None
+    if password_env is not None:
+        password = os.environ.get(password_env)
+        if password is None:
+            err = UsageError(f"proxy password environment variable {password_env!r} is not set")
+            emit_error(err)
+            raise typer.Exit(int(err.exit_code))
+    _browser_run(
+        ctx,
+        lambda: _opts(ctx).engine().browser_proxy_set(
+            server,
+            bypass=bypass,
+            username=username,
+            password=password,
+        ),
+    )
+
+
+@browser_app.command("proxy-clear")
+def browser_proxy_clear_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_proxy_clear())
+
+
+@browser_app.command("har-start")
+def browser_har_start_cmd(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_har_start(path))
+
+
+@browser_app.command("har-stop")
+def browser_har_stop_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_har_stop())
+
+
+@browser_app.command("har-replay")
+def browser_har_replay_cmd(
+    ctx: typer.Context,
+    path: str = typer.Argument(...),
+    url: str | None = typer.Option(None, "--url"),
+    not_found: str = typer.Option("abort", "--not-found"),
+) -> None:
+    _browser_run(
+        ctx,
+        lambda: _opts(ctx).engine().browser_har_replay(
+            path, url=url, not_found=not_found
+        ),
+    )
+
+
+@browser_app.command("har-clear")
+def browser_har_clear_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_har_clear())
+
+
+@browser_app.command("mock-add")
+def browser_mock_add_cmd(
+    ctx: typer.Context,
+    url: str = typer.Argument(..., help="Playwright URL glob."),
+    status: int = typer.Option(200, "--status", min=100, max=599),
+    body: str = typer.Option("", "--body"),
+    header: list[str] | None = typer.Option(None, "--header"),
+    abort: bool = typer.Option(False, "--abort"),
+) -> None:
+    try:
+        headers = _browser_pairs(header or [], label="mock header")
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+    _browser_run(
+        ctx,
+        lambda: _opts(ctx).engine().browser_mock_add(
+            url,
+            status=status,
+            body=body,
+            headers=headers,
+            abort=abort,
+        ),
+    )
+
+
+@browser_app.command("mock-clear")
+def browser_mock_clear_cmd(
+    ctx: typer.Context, rule_id: str | None = typer.Option(None, "--id")
+) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_mock_clear(rule_id))
+
+
+@browser_app.command("pages")
+def browser_pages_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_pages())
+
+
+@browser_app.command("page-select")
+def browser_page_select_cmd(ctx: typer.Context, page_id: str = typer.Argument(...)) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_page_select(page_id))
+
+
+@browser_app.command("page-close")
+def browser_page_close_cmd(ctx: typer.Context, page_id: str = typer.Argument(...)) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_page_close(page_id))
+
+
+@browser_app.command("trace-start")
+def browser_trace_start_cmd(ctx: typer.Context) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_trace_start())
+
+
+@browser_app.command("trace-stop")
+def browser_trace_stop_cmd(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
+    _browser_run(ctx, lambda: _opts(ctx).engine().browser_trace_stop(path))
+
+
 clipboard_app = typer.Typer(help="Clipboard — Maestro setClipboard / copyTextFrom / pasteText.")
 app.add_typer(clipboard_app, name="clipboard")
 

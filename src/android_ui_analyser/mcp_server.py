@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -3241,6 +3242,156 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="browser_status",
+            description="Show the active browser page, pages/frames, supported controls, and network state.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="browser_logs",
+            description="Read or clear browser console, page error, request, response, and WebSocket events.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["read", "clear"], "default": "read"},
+                    "limit": {"type": "integer", "minimum": 1, "default": 100},
+                    "kinds": {"type": "array", "items": {"type": "string"}},
+                    "since_ms": {"type": "integer", "minimum": 0},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="browser_storage",
+            description="Inspect, export, import, clear, or reset browser storage and HTTP cache.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["show", "export", "import", "clear", "cache_clear", "reset"],
+                        "default": "show",
+                    },
+                    "path": {"type": "string"},
+                    "kinds": {"type": "array", "items": {"type": "string"}},
+                    "include_values": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include potentially sensitive cookie/storage values.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="browser_network",
+            description="Inspect network controls or set online/offline and latency/bandwidth throttling.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["status", "offline", "online", "throttle"],
+                        "default": "status",
+                    },
+                    "latency_ms": {"type": "integer", "minimum": 0, "default": 0},
+                    "download_kbps": {"type": "integer", "minimum": 0, "default": 0},
+                    "upload_kbps": {"type": "integer", "minimum": 0, "default": 0},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="browser_cors",
+            description="Add a host-scoped CORS response rule or clear all AUA CORS rules.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add", "clear"]},
+                    "origin": {"type": "string"},
+                    "hosts": {"type": "array", "items": {"type": "string"}},
+                    "methods": {"type": "array", "items": {"type": "string"}},
+                    "headers": {"type": "array", "items": {"type": "string"}},
+                    "credentials": {"type": "boolean", "default": False},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="browser_proxy",
+            description="Set or clear the browser-context proxy; credentials stay in server environment variables.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["set", "clear"]},
+                    "server": {"type": "string"},
+                    "bypass": {"type": "string"},
+                    "username": {"type": "string"},
+                    "password_env": {"type": "string"},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="browser_har",
+            description="Start/stop HAR recording or enable/clear deterministic HAR replay.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["start", "stop", "replay", "clear"]},
+                    "path": {"type": "string"},
+                    "url": {"type": "string"},
+                    "not_found": {"type": "string", "enum": ["abort", "fallback"], "default": "abort"},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="browser_mock",
+            description="Add a browser request response/abort mock or clear one/all mocks.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add", "clear"]},
+                    "url": {"type": "string"},
+                    "status": {"type": "integer", "minimum": 100, "maximum": 599, "default": 200},
+                    "body": {"type": "string", "default": ""},
+                    "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "abort": {"type": "boolean", "default": False},
+                    "rule_id": {"type": "string"},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="browser_pages",
+            description="List pages/frames, select a popup/tab, or close one page.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "select", "close"], "default": "list"},
+                    "page_id": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="browser_trace",
+            description="Start a Playwright trace or stop it into a new trace archive path.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["start", "stop"]},
+                    "path": {"type": "string"},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="configure",
             description="Set session defaults for subsequent action tools "
             "(e.g. with_image on every observation, or which app log levels they fold in).",
@@ -4468,6 +4619,123 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             restart=args.get("restart", True),
             confirmed=args.get("confirmed", False),
         )
+    if name == "browser_status":
+        return engine.browser_status()
+    if name == "browser_logs":
+        if args.get("action", "read") == "clear":
+            return engine.browser_logs_clear()
+        return engine.browser_logs(
+            limit=int(args.get("limit", 100)),
+            kinds=list(args.get("kinds") or []),
+            since_ms=(int(args["since_ms"]) if args.get("since_ms") is not None else None),
+        )
+    if name == "browser_storage":
+        action = str(args.get("action", "show"))
+        path = str(args.get("path") or "")
+        if action in {"export", "import"} and not path:
+            raise UsageError(f"browser storage {action} needs path")
+        if action == "show":
+            return engine.browser_storage(include_values=bool(args.get("include_values", False)))
+        if action == "export":
+            return engine.browser_storage_export(path)
+        if action == "import":
+            return engine.browser_storage_import(path)
+        if action == "clear":
+            return engine.browser_storage_clear(list(args.get("kinds") or []))
+        if action == "cache_clear":
+            return engine.browser_cache_clear()
+        return engine.browser_reset()
+    if name == "browser_network":
+        action = str(args.get("action", "status"))
+        if action == "status":
+            return engine.browser_network_status()
+        if action in {"offline", "online"}:
+            return engine.browser_offline(action == "offline")
+        return engine.browser_throttle(
+            latency_ms=int(args.get("latency_ms", 0)),
+            download_kbps=int(args.get("download_kbps", 0)),
+            upload_kbps=int(args.get("upload_kbps", 0)),
+        )
+    if name == "browser_cors":
+        if args["action"] == "clear":
+            return engine.browser_cors_clear()
+        origin = str(args.get("origin") or "")
+        hosts = list(args.get("hosts") or [])
+        if not origin or not hosts:
+            raise UsageError("browser CORS add needs origin and at least one host")
+        return engine.browser_cors_add(
+            origin=origin,
+            hosts=hosts,
+            methods=list(args.get("methods") or []),
+            headers=list(args.get("headers") or []),
+            credentials=bool(args.get("credentials", False)),
+        )
+    if name == "browser_proxy":
+        if args["action"] == "clear":
+            return engine.browser_proxy_clear()
+        server = str(args.get("server") or "")
+        if not server:
+            raise UsageError("browser proxy set needs server")
+        password = None
+        password_env = args.get("password_env")
+        if password_env is not None:
+            password = os.environ.get(str(password_env))
+            if password is None:
+                raise UsageError(
+                    f"proxy password environment variable {password_env!r} is not set"
+                )
+        return engine.browser_proxy_set(
+            server,
+            bypass=args.get("bypass"),
+            username=args.get("username"),
+            password=password,
+        )
+    if name == "browser_har":
+        action = str(args["action"])
+        path = str(args.get("path") or "")
+        if action in {"start", "replay"} and not path:
+            raise UsageError(f"browser HAR {action} needs path")
+        if action == "start":
+            return engine.browser_har_start(path)
+        if action == "stop":
+            return engine.browser_har_stop()
+        if action == "replay":
+            return engine.browser_har_replay(
+                path,
+                url=args.get("url"),
+                not_found=str(args.get("not_found", "abort")),
+            )
+        return engine.browser_har_clear()
+    if name == "browser_mock":
+        if args["action"] == "clear":
+            return engine.browser_mock_clear(args.get("rule_id"))
+        url = str(args.get("url") or "")
+        if not url:
+            raise UsageError("browser mock add needs url")
+        return engine.browser_mock_add(
+            url,
+            status=int(args.get("status", 200)),
+            body=str(args.get("body", "")),
+            headers=dict(args.get("headers") or {}),
+            abort=bool(args.get("abort", False)),
+        )
+    if name == "browser_pages":
+        action = str(args.get("action", "list"))
+        if action == "list":
+            return engine.browser_pages()
+        page_id = str(args.get("page_id") or "")
+        if not page_id:
+            raise UsageError(f"browser page {action} needs page_id")
+        if action == "select":
+            return engine.browser_page_select(page_id)
+        return engine.browser_page_close(page_id)
+    if name == "browser_trace":
+        if args["action"] == "start":
+            return engine.browser_trace_start()
+        path = str(args.get("path") or "")
+        if not path:
+            raise UsageError("browser trace stop needs path")
+        return engine.browser_trace_stop(path)
     if name == "resolve":
         # Engine.resolve may land soon; call through getattr so MCP stays ahead of the method.
         result = getattr(engine, "resolve")(args["target"])  # noqa: B009

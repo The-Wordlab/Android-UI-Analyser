@@ -153,6 +153,30 @@ CAPABILITIES: tuple[Capability, ...] = (
         cleanup="aua network restore",
     ),
     Capability(
+        "browser_lab",
+        "Inspect and control browser diagnostics, storage/cache, network/CORS/proxy, HAR, "
+        "request mocks, pages/frames, and traces through one isolated web context.",
+        (
+            "web",
+            "browser",
+            "console",
+            "cors",
+            "cookie",
+            "localstorage",
+            "indexeddb",
+            "cache",
+            "har",
+            "popup",
+            "iframe",
+            "proxy",
+        ),
+        6,
+        "aua browser status",
+        "browser_status",
+        risk="context-local controls; storage values and HARs may contain private test data",
+        cleanup="aua session finish or aua browser reset",
+    ),
+    Capability(
         "animations",
         "Keep Android animations enabled for visual timing/easing checks and restore prior scales.",
         (
@@ -367,7 +391,7 @@ def render_mcp_instructions() -> str:
         "For new or just-implemented user-visible behavior with no prepared scenario, call "
         "prepare_start before leasing a device, answer with prepare_answer, then use prepare_run "
         "for AUA's contract verdict and evidence. Use prepare_list to reuse an existing scenario. "
-        "Start Android work with session_start(goal). It observes once and ranks a verified "
+        "Start Android, iOS, or web work with session_start(goal). It observes once and ranks a verified "
         "goto, matching saved flow, proven deeplink, or manual analyzed action in that order. "
         "Use the returned recommended_call. For multi-phase goals, every result carries "
         "goal_progress; acknowledge a completed checkpoint with phase_done on the next tool "
@@ -376,7 +400,10 @@ def render_mcp_instructions() -> str:
         "comma-separated positive and negative terms; an action-bound until must include at "
         "least one positive arrival term. Use back_until_and_analyze for nested "
         "returns; an unlabeled first Back requires its fresh back_id. Use network_offline, never airplane mode, "
-        "to prove offline behavior and always call network_restore or session_finish. Use "
+        "to prove Android offline behavior and always call network_restore or session_finish. "
+        "On `--platform web`, use browser_network/browser_cors/browser_proxy/browser_har/"
+        "browser_mock for context-local browser controls; browser_storage values are sensitive, "
+        "and session_finish restores the starting web context. Use "
         "job_start for a long read-only wait, or idle-duration for a guarded interval with no "
         "device reads; reconnect with job_status, bound a poll with "
         "job_wait, or stop it with job_cancel. Do not issue another device tool while it runs. Use "

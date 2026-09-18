@@ -123,6 +123,22 @@ def test_version_prints_and_exits_zero() -> None:
     assert __version__ in result.stdout
 
 
+def test_browser_cli_uses_the_shared_engine_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def network_status(_engine: engine_mod.Engine) -> dict[str, object]:
+        calls.append("network")
+        return {"ok": True, "action": "browser-network-status", "offline": False}
+
+    monkeypatch.setattr(engine_mod.Engine, "browser_network_status", network_status)
+
+    result = runner.invoke(app, ["browser", "network"])
+
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["offline"] is False
+    assert calls == ["network"]
+
+
 # --------------------------------------------------------------------------- analyze schema
 
 

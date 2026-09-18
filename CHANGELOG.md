@@ -16,6 +16,10 @@ notes, so you can check for a newer version — and read what changed — withou
 - A built-in Playwright-backed `web` platform reuses AUA's semantic `analyze`, stable selectors,
   actions, screenshots, waits, flows, maps and sessions for HTTP(S) pages. DOM test ids and HTML
   ids become `resource_id`; only viewport-intersecting nodes satisfy presence checks.
+- `aua browser` and matching MCP tools add browser diagnostics, cookies/web storage and cache
+  controls, offline/throttling, scoped CORS, context proxy, HAR record/replay, request mocks,
+  session reset, popup/tab/frame inspection, and Playwright traces. URL path/query is now the
+  shared map surface, and goal cleanup restores the browser session baseline.
 
 ## [0.29.0] - 2026-09-18
 

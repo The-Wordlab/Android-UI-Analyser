@@ -40,6 +40,12 @@ platforms:
     # channel: chrome          # use an installed Chrome build
     # storage_state: .aua/auth.json  # seed cookies/local storage; keep this file private
     # ignore_https_errors: false
+    # bypass_csp: false
+    # service_workers: allow       # allow | block
+    # proxy_server: http://127.0.0.1:8080
+    # proxy_bypass: localhost,127.0.0.1
+    # proxy_username: fixture
+    # proxy_password_env: AUA_WEB_PROXY_PASSWORD
 ```
 
 `platforms.web.url` is an alternative to `device.serial`. AUA accepts only absolute HTTP(S)
@@ -72,7 +78,8 @@ features are not required, so the core contract also works with Firefox and WebK
   produces the same stable `rid:…` identities used on Android and iOS.
 - Visible text, form values/placeholders, associated labels, `aria-label`, roles, enabled/focused,
   checked/selected, password, and scrollable state map into the canonical element schema.
-- Open shadow roots are traversed. Cross-origin and nested iframe documents are not included yet.
+- Open shadow roots and iframe documents are traversed. Frame elements are reported with their
+  page-viewport bounds, and `browser pages` reports the frame URL/name alongside each tab.
 - Screenshots use the browser viewport at device scale factor 1, so DOM bounds and screenshot
   pixels share one coordinate space.
 - `screen.package` is the page hostname and `screen.activity` is its path/query, preserving the
@@ -91,20 +98,73 @@ configured URL; use one `flow run` call for a multi-step journey.
 
 `storage_state` seeds a context from a Playwright JSON file. AUA reads it but does not write browser
 state back to disk, so ordinary web actions create no persistent device mutation and require no
-teardown ledger entry.
+device teardown ledger entry. A goal session snapshots cookies, local/IndexedDB state,
+sessionStorage, the current URL, and AUA browser controls; `session finish` recreates the context
+from that baseline, which also clears HTTP cache. Browser state remains process-local, so use the
+default warm daemon for a session spanning several CLI calls.
+
+## Browser lab controls
+
+`aua browser --help` exposes the browser-specific layer while ordinary UI commands retain the
+same Android/iOS response model:
+
+```bash
+aua browser status
+aua browser logs --kind console --kind page_error
+aua browser storage                         # names/metadata only
+aua browser storage --include-values        # explicit sensitive-value opt-in
+aua browser storage-export .aua/login.json
+aua browser storage-clear --kind local --kind indexeddb
+aua browser cache-clear
+
+aua browser offline                         # `online` restores connectivity
+aua browser throttle --latency-ms 200 --download-kbps 750 --upload-kbps 250
+aua browser cors-add --origin https://app.example.test --host api.example.test
+aua browser proxy-set http://127.0.0.1:8080 --password-env AUA_WEB_PROXY_PASSWORD
+
+aua browser har-start .aua/checkout.har     # stop writes the HAR
+aua browser har-replay .aua/checkout.har --not-found abort
+aua browser mock-add '**/api/orders' --status 201 --body '{"id":"fixture"}'
+aua browser pages                           # page-1, page-2, frames…
+aua browser page-select page-2
+aua browser trace-start                     # stop into a Playwright trace.zip
+```
+
+The equivalent MCP surface is grouped into `browser_status`, `browser_logs`, `browser_storage`,
+`browser_network`, `browser_cors`, `browser_proxy`, `browser_har`, `browser_mock`, `browser_pages`,
+and `browser_trace`. Both interfaces call the same Engine operations.
+
+- Logs include console records, page exceptions, requests, responses, failed requests, and
+  WebSocket opens. They also feed AUA's existing `device.logs`/per-action diagnostic path.
+- Storage inspection covers cookies, local/session storage, IndexedDB, CacheStorage, and service
+  worker registrations. Values are withheld unless explicitly requested. Exports refuse to
+  overwrite a file.
+- CORS handling is scoped to target host globs and an allowed origin. It rewrites only matching
+  responses/preflights; AUA never launches Chrome with global web-security disabled.
+- Proxy changes recreate only this isolated browser context and preserve its storage/session
+  state. Passwords are accepted through an environment-variable name, never printed in status.
+- Bandwidth limits use Chromium DevTools. Firefox/WebKit support offline and latency controls but
+  return an explicit unsupported-capability error for bandwidth limits.
+- HAR replay and request mocks are deterministic context routes. Network status reports rule
+  metadata but omits mock bodies and proxy secrets. HAR/storage exports may contain credentials
+  or private response data; keep them outside git and publish only after sanitizing.
+- `browser reset` returns storage and every control to configured startup state. `session finish`
+  restores the state captured at session start instead.
 
 ## Capabilities and current boundary
 
 | Works | Explicitly unsupported |
 |---|---|
-| `ui.tree`, `ui.input`, `ui.screenshot` | app install/uninstall/lifecycle and private app files |
-| `app.links` for HTTP(S) navigation | device shell, logs, recording, clipboard and location |
-| `analyze`, `has`, waits, scroll-to, actions, flows, maps, screenshots | AUA network/offline/proxy controls and database/feature-flag services |
-| Chromium, Firefox, WebKit; headless or headed | attaching to an already-running browser, popup/tab switching, iframe DOMs |
+| `ui.tree`, `ui.input`, `ui.screenshot`, `device.logs` | app install/uninstall/lifecycle and private app files |
+| `app.links` for HTTP(S), URL-aware maps/flows, iframe DOMs, popups/tabs | device shell, recording, clipboard and location |
+| cookies, local/session storage, IndexedDB, CacheStorage, service workers | native database/datastore and feature-flag services |
+| offline, throttle, scoped CORS, context proxy, HAR and request mocks | attaching to an already-running browser or extension automation |
+| browser traces and shared AUA screenshots/OCR/detection/grounding | physical-device controls and native radio profiles |
+| Chromium, Firefox, WebKit; headless or headed | Chromium-only bandwidth shaping when using Firefox/WebKit |
 
 Unsupported operations return `platform_capability_unsupported`; web never imports or falls back to
-Android tooling. Browser console/network/storage inspection can be added later as named optional
-platform capabilities without changing the core action path.
+Android tooling. Browser-only operations are declared named runtime capabilities and fail clearly
+when another adapter does not provide them.
 
 ## Troubleshooting
 
@@ -114,4 +174,5 @@ platform capabilities without changing the core action path.
 | `Executable doesn't exist` or browser launch fails | Run `playwright install chromium`, or configure `browser: chromium` and `channel: chrome` for installed Google Chrome. |
 | Every command starts from the initial URL | Keep the default daemon enabled, start a goal session, or put the journey in one `flow run`. |
 | A control has no stable `rid:` | Add `data-testid` or an HTML `id`; text/ARIA labels still receive semantic stable keys. |
-| Content inside an iframe is missing | Iframe traversal is not in the first web adapter; test the iframe URL directly when possible. |
+| A service worker bypasses a mock/HAR rule | Configure `service_workers: block` for deterministic request interception. |
+| Bandwidth throttling is rejected | Use Chromium, or keep only `--latency-ms` on Firefox/WebKit. |

@@ -19,6 +19,7 @@ import android_ui_analyser.engine as engine_mod
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.mcp_server import (
     _MCP_STARTED_TARGETS,
+    _dispatch,
     _fold_action_until,
     _tool_definitions,
     _track_mcp_target,
@@ -165,7 +166,72 @@ def test_mcp_lists_core_tools() -> None:
         "flow_list",
         "flow_save",
         "flow_delete",
+        "browser_status",
+        "browser_logs",
+        "browser_storage",
+        "browser_network",
+        "browser_cors",
+        "browser_proxy",
+        "browser_har",
+        "browser_mock",
+        "browser_pages",
+        "browser_trace",
     } <= set(names)
+
+
+def test_mcp_browser_tools_are_closed_and_dispatch_to_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = {item.name: item for item in _tool_definitions()}
+    names = {
+        "browser_status",
+        "browser_logs",
+        "browser_storage",
+        "browser_network",
+        "browser_cors",
+        "browser_proxy",
+        "browser_har",
+        "browser_mock",
+        "browser_pages",
+        "browser_trace",
+    }
+    assert all(tools[name].inputSchema["additionalProperties"] is False for name in names)
+
+    engine = _engine()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def proxy_set(server: str, **kwargs: object) -> dict[str, object]:
+        calls.append(("proxy", {"server": server, **kwargs}))
+        return {"ok": True, "password_configured": bool(kwargs.get("password"))}
+
+    def storage_clear(kinds: list[str]) -> dict[str, object]:
+        calls.append(("storage", {"kinds": kinds}))
+        return {"ok": True}
+
+    monkeypatch.setattr(engine, "browser_proxy_set", proxy_set)
+    monkeypatch.setattr(engine, "browser_storage_clear", storage_clear)
+    monkeypatch.setenv("AUA_FIXTURE_PROXY_PASSWORD", "private-fixture")
+
+    proxy = _dispatch(
+        engine,
+        "browser_proxy",
+        {
+            "action": "set",
+            "server": "http://proxy.fixture.test:8080",
+            "username": "fixture",
+            "password_env": "AUA_FIXTURE_PROXY_PASSWORD",
+        },
+    )
+    storage = _dispatch(
+        engine,
+        "browser_storage",
+        {"action": "clear", "kinds": ["local", "session"]},
+    )
+
+    assert proxy == {"ok": True, "password_configured": True}
+    assert storage == {"ok": True}
+    assert calls[0][1]["password"] == "private-fixture"
+    assert "private-fixture" not in str(proxy)
 
 
 def test_mcp_emulator_start_does_not_require_serial_pinning() -> None:

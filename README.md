@@ -1217,9 +1217,12 @@ aua --platform web --serial https://example.test/app tap-and-analyze --rid conti
 daemon keeps one isolated browser context alive across commands; `storage_state` can seed login
 state without writing changes back. AUA can fuse its existing OCR, detection, and grounding
 providers over Playwright's native viewport screenshot for canvas or incomplete DOM semantics.
-Current limitations include iframe DOMs, popup/tab switching, attaching to an existing browser,
-and device-style app/database/network controls. Configuration, the exact capability boundary, and
-troubleshooting: [docs/web.md](docs/web.md).
+`aua browser` adds console/network diagnostics, cookies and web storage, cache/session reset,
+offline/throttling, scoped CORS, context proxy, HAR record/replay, request mocks, popup/tab/frame
+inspection, and Playwright traces. URL path/query identities feed the same maps and flows, and goal
+cleanup restores the starting browser context. Current limitations include attaching to an
+existing browser and device-style app/database controls. Configuration, the exact capability
+boundary, and troubleshooting: [docs/web.md](docs/web.md).
 
 ## Adding a platform adapter
 
