@@ -72,6 +72,25 @@ def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTION
     return options
 
 
+def tool_names(tools: Sequence[Any]) -> set[str]:
+    """Accept the offered tools however the caller holds them.
+
+    The controller carries OpenAI-shaped entries, where the name sits under ``function``.
+    A first cut read the top level, found nothing, and silently declined every step of a live
+    run -- which is exactly the failure shadow mode exists to catch.
+    """
+    names: set[str] = set()
+    for tool in tools or ():
+        if isinstance(tool, str) and tool:
+            names.add(tool)
+        elif isinstance(tool, Mapping):
+            function = tool.get("function")
+            name = function.get("name") if isinstance(function, Mapping) else tool.get("name")
+            if isinstance(name, str) and name:
+                names.add(name)
+    return names
+
+
 def build_questions(options: Mapping[str, str]) -> dict[str, Any]:
     from typesafe_sdk import Choice, Noul
 
@@ -112,7 +131,8 @@ class TypeSafeNavigator:
         self.shadow = shadow
         self.timeout_s = timeout_s
         # A tap it was never offered is not a proposal this navigator may make.
-        self.can_tap = not tools or TAP_TOOL in tools
+        offered = tool_names(tools)
+        self.can_tap = not offered or TAP_TOOL in offered
         self.history: list[str] = []
         self.proposals: list[dict[str, Any]] = []
         self.declined: dict[str, int] = {}
@@ -197,8 +217,11 @@ class TypeSafeNavigator:
             "accepted": accepted, "declined": dict(self.declined),
             "mean_request_ms": (round(sum(self.request_ms) / len(self.request_ms), 1)
                                 if self.request_ms else None),
+            # A shadow run is only worth taking if you can read back what it would have done,
+            # step by step, against what the controller actually chose.
+            "proposals_detail": self.proposals[:64],
         }
 
 
 __all__ = ["TypeSafeNavigator", "ACTION_KINDS", "MODEL", "MIN_CONFIDENCE", "TAP_TOOL",
-           "build_questions", "candidates"]
+           "build_questions", "candidates", "tool_names"]

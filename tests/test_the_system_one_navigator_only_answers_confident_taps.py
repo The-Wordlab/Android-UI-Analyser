@@ -147,3 +147,25 @@ def test_a_switch_reads_its_state_in_the_option_label() -> None:
 def test_a_nonsense_gate_is_refused_at_construction() -> None:
     with pytest.raises(ValueError):
         TypeSafeNavigator("g", client=FakeClient(), min_confidence=0.0)
+
+
+def test_the_controllers_own_tool_shape_is_understood() -> None:
+    # The controller offers OpenAI-shaped entries. Reading the top level finds no name, which
+    # silently declined every step of a live shadow run before this was pinned.
+    from experiments.aua_controller.typesafe_navigator import tool_names
+
+    offered = [{"type": "function", "function": {"name": TAP_TOOL, "parameters": {}}},
+               {"type": "function", "function": {"name": "session_finish", "parameters": {}}}]
+    assert tool_names(offered) == {TAP_TOOL, "session_finish"}
+
+    client = FakeClient()
+    navigator = TypeSafeNavigator("g", client=client, tools=offered)
+    assert asyncio.run(navigator(SCREEN)) is not None
+    assert "tap_not_offered" not in navigator.report()["declined"]
+
+
+def test_plain_names_still_work_and_an_unknown_shape_offers_nothing() -> None:
+    from experiments.aua_controller.typesafe_navigator import tool_names
+
+    assert tool_names([TAP_TOOL]) == {TAP_TOOL}
+    assert tool_names([{"type": "function"}, 7, None]) == set()

@@ -1734,7 +1734,7 @@ async def run_realapp(
         navigator = None
         if nav_engine == "typesafe":
             navigator = TypeSafeNavigator(
-                goal, tools=[tool.get("name") for tool in tools if isinstance(tool, dict)],
+                goal, tools=tools,
                 min_confidence=nav_min_confidence, shadow=nav_shadow,
             )
         async def navigated_call(name, arguments):
