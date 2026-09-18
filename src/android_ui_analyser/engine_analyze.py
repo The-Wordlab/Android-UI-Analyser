@@ -64,6 +64,7 @@ class _PendingOcr(NamedTuple):
 class _HierarchyObservation(NamedTuple):
     elements: list[Element]
     package: str | None
+    surface: str | None
     # Optional in fact: `_capture_hierarchy` returns None when the dump could not be hashed, and
     # the unchanged-frame check at the read site already guards on the value being falsy.
     xml_hash: str | None
@@ -115,13 +116,13 @@ def _context(self: Engine) -> tuple[Device, int, int]:
 
 def _capture_hierarchy(
     self: Engine, device: Device, w: int, h: int
-) -> tuple[list[Element], str | None, str]:
+) -> tuple[list[Element], str | None, str | None, str]:
     perf = self.config.perf
     if perf.prefetch and read_budget.current() is None:
         slot = self._prefetch.take()
         if slot is not None:
             xml_hash = hashlib.sha1(slot.xml.encode()).hexdigest()
-            return slot.elements, slot.package, xml_hash
+            return slot.elements, slot.package, slot.surface, xml_hash
 
     compressed = bool(self.config.device.compressed_hierarchy)
     raw_tree = self.platform.dump_tree(device, compact=compressed)
@@ -132,7 +133,7 @@ def _capture_hierarchy(
         geometry=device.display_geometry(),
         ignored_app_ids=self.config.memory.ignore_packages,
     )
-    return normalized.elements, normalized.app_id, tree_hash
+    return normalized.elements, normalized.app_id, normalized.surface_id, tree_hash
 
 
 def _kick_hierarchy_prefetch(self: Engine) -> None:
@@ -162,14 +163,14 @@ def _kick_hierarchy_prefetch(self: Engine) -> None:
         ):
             return platform.dump_tree(device, compact=compressed)
 
-    def parse(raw_tree: str) -> tuple[list[Element], str | None]:
+    def parse(raw_tree: str) -> tuple[list[Element], str | None, str | None]:
         normalized = platform.normalize_tree(
             raw_tree,
             (w, h),
             geometry=device.display_geometry(),
             ignored_app_ids=self.config.memory.ignore_packages,
         )
-        return normalized.elements, normalized.app_id
+        return normalized.elements, normalized.app_id, normalized.surface_id
 
     self._prefetch.kick(dump, parse)
 
@@ -279,6 +280,7 @@ def _fuse_hierarchy_ocr(
     self: Engine,
     elements: list[Element],
     package: str | None,
+    surface: str | None,
     xml_hash: str | None,
     pending: _PendingOcr | None,
 ) -> _HierarchyObservation:
@@ -305,6 +307,7 @@ def _fuse_hierarchy_ocr(
     return _HierarchyObservation(
         elements,
         package,
+        surface,
         xml_hash,
         texts,
         ocr_elements,
@@ -329,27 +332,27 @@ def _capture_hierarchy_with_ocr(
     analyze without risking unknown screens. Forced ``False`` is hierarchy-only.
     """
     if with_ocr is False:
-        elements, package, xml_hash = self._capture_hierarchy(device, w, h)
-        return _HierarchyObservation(elements, package, xml_hash, [], [], None, None)
+        elements, package, surface, xml_hash = self._capture_hierarchy(device, w, h)
+        return _HierarchyObservation(elements, package, surface, xml_hash, [], [], None, None)
 
     if with_ocr is True:
         # Caller forced OCR — overlap screenshot OCR with the hierarchy dump.
         pending = self._start_hierarchy_ocr(with_ocr=True)
         try:
-            elements, package, xml_hash = self._capture_hierarchy(device, w, h)
+            elements, package, surface, xml_hash = self._capture_hierarchy(device, w, h)
         except BaseException:
             if pending is not None:
                 pending.future.cancel()
                 pending.executor.shutdown(wait=False, cancel_futures=True)
             raise
-        return self._fuse_hierarchy_ocr(elements, package, xml_hash, pending)
+        return self._fuse_hierarchy_ocr(elements, package, surface, xml_hash, pending)
 
     # Auto: hierarchy first so we can consult the map before paying for OCR.
-    elements, package, xml_hash = self._capture_hierarchy(device, w, h)
+    elements, package, surface, xml_hash = self._capture_hierarchy(device, w, h)
     if self._map_skips_ocr(device, package, elements, h):
-        return _HierarchyObservation(elements, package, xml_hash, [], [], None, None)
+        return _HierarchyObservation(elements, package, surface, xml_hash, [], [], None, None)
     pending = self._start_hierarchy_ocr(with_ocr=True)
-    return self._fuse_hierarchy_ocr(elements, package, xml_hash, pending)
+    return self._fuse_hierarchy_ocr(elements, package, surface, xml_hash, pending)
 
 
 def _map_skips_ocr(
@@ -733,6 +736,7 @@ def _analyze_screen(
         hierarchy_elements = hierarchy_observation.elements
         elements = hierarchy_elements + hierarchy_observation.ocr_elements
         package = hierarchy_observation.package
+        activity = hierarchy_observation.surface
         xml_hash = hierarchy_observation.xml_hash
         img = hierarchy_observation.image
         elements, img, visual_identity_needed = self._attach_visual_identity(
@@ -1113,6 +1117,7 @@ def _analyze_query(
         hierarchy_elements = hierarchy_observation.elements
         pool = hierarchy_elements + hierarchy_observation.ocr_elements
         package = hierarchy_observation.package
+        activity = hierarchy_observation.surface
         img = hierarchy_observation.image
         if hierarchy_observation.ocr_provider:
             providers_used.append(hierarchy_observation.ocr_provider)

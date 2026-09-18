@@ -580,6 +580,10 @@ def _session_start_impl(
         platform=self.platform.name,
     )
     self._session_id = state.session_id
+    if self.platform.supports("session.state"):
+        self.platform.runtime_capability(
+            "session.state", self.device
+        ).session_state_begin(state.session_id)
     if artifacts_dir:
         from .session import update_session_state
         from .session_artifacts import SessionArtifactStore
@@ -648,6 +652,11 @@ def _session_start_impl(
         owner=state.owner,
         serial=state.serial,
         cleanup=[
+            *(
+                ["browser_session_restore"]
+                if self.platform.supports("session.state")
+                else []
+            ),
             *(["animation_restore"] if animation_backup_path is not None else []),
             "network_restore",
             "network_profile_restore",
@@ -2160,6 +2169,14 @@ def session_finish(
         except AuaError as exc:
             errors.append({"action": name, "message": exc.message})
             return None
+
+    if self.platform.supports("session.state"):
+        restore(
+            "browser_session_restore",
+            lambda: self.platform.runtime_capability(
+                "session.state", self.device
+            ).session_state_finish(state.session_id),
+        )
 
     if state.animation_backup_path:
         animation_path = Path(state.animation_backup_path)

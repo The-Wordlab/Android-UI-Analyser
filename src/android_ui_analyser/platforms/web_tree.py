@@ -110,6 +110,16 @@ def app_id(url: str | None) -> str | None:
     return parsed.hostname or parsed.scheme or None
 
 
+def surface_id(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlsplit(url)
+    surface = parsed.path or "/"
+    if parsed.query:
+        surface += f"?{parsed.query}"
+    return surface
+
+
 def normalize(
     raw_tree: str,
     screen_size: tuple[int, int],
@@ -165,10 +175,11 @@ def normalize(
         parent_slot = source_to_slot.get(parent_source) if parent_source is not None else None
         elements.append(element.model_copy(update={"id": new_id, "parent": parent_slot}))
     elements = attach_stable_keys(elements)
-    current = app_id(_text(payload.get("url")))
+    url = _text(payload.get("url"))
+    current = app_id(url)
     if current and current.casefold() in ignored:
         current = None
-    return NormalizedTree(elements=elements, app_id=current)
+    return NormalizedTree(elements=elements, app_id=current, surface_id=surface_id(url))
 
 
 def find_bounds(
@@ -216,4 +227,4 @@ def find_bounds(
     return None
 
 
-__all__ = ["TREE_FORMAT", "app_id", "find_bounds", "normalize", "parse_snapshot"]
+__all__ = ["TREE_FORMAT", "app_id", "find_bounds", "normalize", "parse_snapshot", "surface_id"]

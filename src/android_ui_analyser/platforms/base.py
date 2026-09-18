@@ -52,6 +52,7 @@ class NormalizedTree:
 
     elements: list[Element]
     app_id: str | None = None
+    surface_id: str | None = None
 
 
 @dataclass(frozen=True)

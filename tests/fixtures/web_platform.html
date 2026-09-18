@@ -17,7 +17,9 @@
       <label for="email">Email address</label>
       <input id="email" type="email" placeholder="name@example.test">
       <button data-testid="continue" type="button">Continue</button>
+      <button data-testid="open-popup" type="button">Open receipt</button>
       <p id="result" aria-live="polite">Waiting for details</p>
+      <iframe data-testid="payment-frame" title="Payment details" src="web_frame.html"></iframe>
       <div class="space" aria-hidden="true"></div>
       <button data-testid="finish" type="button">Finish checkout</button>
     </main>
@@ -25,6 +27,9 @@
       document.querySelector('[data-testid="continue"]').addEventListener('click', () => {
         const email = document.querySelector('#email').value;
         document.querySelector('#result').textContent = `Ready for ${email}`;
+      });
+      document.querySelector('[data-testid="open-popup"]').addEventListener('click', () => {
+        window.open('web_popup.html', '_blank');
       });
     </script>
   </body>

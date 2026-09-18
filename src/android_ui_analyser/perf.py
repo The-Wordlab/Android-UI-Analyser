@@ -17,7 +17,11 @@ from .schema import Element
 logger = logging.getLogger(__name__)
 
 DumpFn = Callable[[], str]
-ParseFn = Callable[[str], tuple[list[Element], str | None]]
+ParseFn = Callable[
+    [str],
+    tuple[list[Element], str | None]
+    | tuple[list[Element], str | None, str | None],
+]
 
 
 @dataclass
@@ -27,6 +31,7 @@ class PrefetchSlot:
     xml: str
     elements: list[Element]
     package: str | None
+    surface: str | None
     at: float
     gen: int
 
@@ -94,7 +99,12 @@ class HierarchyPrefetch:
             def _run() -> None:
                 try:
                     xml = dump()
-                    elements, package = parse(xml)
+                    parsed = parse(xml)
+                    if len(parsed) == 2:
+                        elements, package = parsed
+                        surface = None
+                    else:
+                        elements, package, surface = parsed
                 except Exception as exc:  # noqa: BLE001 — prefetch is best-effort
                     logger.debug("hierarchy prefetch failed: %s", exc)
                     return
@@ -105,6 +115,7 @@ class HierarchyPrefetch:
                         xml=xml,
                         elements=elements,
                         package=package,
+                        surface=surface,
                         at=time.monotonic(),
                         gen=gen,
                     )

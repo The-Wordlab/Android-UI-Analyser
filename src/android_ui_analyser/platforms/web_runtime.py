@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -145,6 +146,153 @@ class WebRuntime(TargetRuntime):
 
     def wait_idle(self, timeout_ms: int = 5000) -> None:
         self._connection.wait_idle(timeout_ms)
+
+    def browser_storage(self, *, include_values: bool = False) -> dict[str, object]:
+        return self._connection.storage(include_values=include_values)
+
+    def browser_storage_export(self, path: str) -> dict[str, object]:
+        return self._connection.storage_export(path)
+
+    def browser_storage_import(self, path: str) -> dict[str, object]:
+        return self._connection.storage_import(path)
+
+    def browser_storage_clear(self, kinds: Sequence[str]) -> dict[str, object]:
+        return self._connection.storage_clear(kinds)
+
+    def browser_cache_clear(self) -> dict[str, object]:
+        return self._connection.cache_clear()
+
+    def browser_reset(self) -> dict[str, object]:
+        return self._connection.reset()
+
+    def browser_network_status(self) -> dict[str, object]:
+        return self._connection.network_status()
+
+    def browser_set_offline(self, offline: bool) -> dict[str, object]:
+        return self._connection.set_offline(offline)
+
+    def browser_set_throttle(
+        self,
+        *,
+        latency_ms: int = 0,
+        download_kbps: int = 0,
+        upload_kbps: int = 0,
+    ) -> dict[str, object]:
+        return self._connection.set_throttle(
+            latency_ms=latency_ms,
+            download_kbps=download_kbps,
+            upload_kbps=upload_kbps,
+        )
+
+    def browser_set_cors(
+        self,
+        *,
+        origin: str,
+        hosts: Sequence[str],
+        methods: Sequence[str],
+        headers: Sequence[str],
+        credentials: bool = False,
+    ) -> dict[str, object]:
+        return self._connection.set_cors(
+            origin=origin,
+            hosts=hosts,
+            methods=methods,
+            headers=headers,
+            credentials=credentials,
+        )
+
+    def browser_clear_cors(self) -> dict[str, object]:
+        return self._connection.clear_cors()
+
+    def browser_set_proxy(
+        self,
+        server: str,
+        *,
+        bypass: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> dict[str, object]:
+        return self._connection.set_proxy(
+            server,
+            bypass=bypass,
+            username=username,
+            password=password,
+        )
+
+    def browser_clear_proxy(self) -> dict[str, object]:
+        return self._connection.clear_proxy()
+
+    def browser_har_start(self, path: str) -> dict[str, object]:
+        return self._connection.har_start(path)
+
+    def browser_har_stop(self) -> dict[str, object]:
+        return self._connection.har_stop()
+
+    def browser_har_replay(
+        self, path: str, *, url: str | None = None, not_found: str = "abort"
+    ) -> dict[str, object]:
+        return self._connection.har_replay(path, url=url, not_found=not_found)
+
+    def browser_har_clear(self) -> dict[str, object]:
+        return self._connection.har_clear()
+
+    def browser_mock_add(
+        self,
+        url: str,
+        *,
+        status: int = 200,
+        body: str = "",
+        headers: Mapping[str, str] | None = None,
+        abort: bool = False,
+    ) -> dict[str, object]:
+        return self._connection.mock_add(
+            url,
+            status=status,
+            body=body,
+            headers=headers,
+            abort=abort,
+        )
+
+    def browser_mock_clear(self, rule_id: str | None = None) -> dict[str, object]:
+        return self._connection.mock_clear(rule_id)
+
+    def browser_diagnostics(
+        self,
+        *,
+        limit: int = 100,
+        kinds: Sequence[str] = (),
+        since_ms: int | None = None,
+    ) -> dict[str, object]:
+        return self._connection.diagnostics(limit=limit, kinds=kinds, since_ms=since_ms)
+
+    def browser_diagnostics_clear(self) -> dict[str, object]:
+        return self._connection.diagnostics_clear()
+
+    def browser_diagnostics_mark(
+        self, name: str, *, clear: bool = False
+    ) -> dict[str, object]:
+        return self._connection.mark_diagnostics(name, clear=clear)
+
+    def browser_pages(self) -> dict[str, object]:
+        return self._connection.pages()
+
+    def browser_page_select(self, page_id: str) -> dict[str, object]:
+        return self._connection.page_select(page_id)
+
+    def browser_page_close(self, page_id: str) -> dict[str, object]:
+        return self._connection.page_close(page_id)
+
+    def browser_trace_start(self) -> dict[str, object]:
+        return self._connection.trace_start()
+
+    def browser_trace_stop(self, path: str) -> dict[str, object]:
+        return self._connection.trace_stop(path)
+
+    def session_state_begin(self, session_id: str) -> dict[str, object]:
+        return self._connection.session_begin(session_id)
+
+    def session_state_finish(self, session_id: str) -> dict[str, object]:
+        return self._connection.session_finish(session_id)
 
     def instance_token(self) -> str | None:
         return self._instance_token

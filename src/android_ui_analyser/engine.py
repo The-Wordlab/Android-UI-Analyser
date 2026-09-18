@@ -24,6 +24,7 @@ from . import (
     engine_actions,
     engine_analyze,
     engine_apps,
+    engine_browser,
     engine_capture,
     engine_environment,
     engine_flows,
@@ -2359,6 +2360,37 @@ class Engine:
     explore_mine = engine_memory.explore_mine
     explore_plan = engine_memory.explore_plan
     orient = engine_memory.orient
+
+    # engine_browser: Browser storage, diagnostics, network controls, request replay/mocking,
+    # pages, and traces. Every method resolves a runtime capability; Playwright stays in the
+    # web adapter and CLI/MCP share this exact path.
+    browser_status = engine_browser.browser_status
+    browser_logs = engine_browser.browser_logs
+    browser_logs_clear = engine_browser.browser_logs_clear
+    browser_storage = engine_browser.browser_storage
+    browser_storage_export = engine_browser.browser_storage_export
+    browser_storage_import = engine_browser.browser_storage_import
+    browser_storage_clear = engine_browser.browser_storage_clear
+    browser_cache_clear = engine_browser.browser_cache_clear
+    browser_reset = engine_browser.browser_reset
+    browser_network_status = engine_browser.browser_network_status
+    browser_offline = engine_browser.browser_offline
+    browser_throttle = engine_browser.browser_throttle
+    browser_cors_add = engine_browser.browser_cors_add
+    browser_cors_clear = engine_browser.browser_cors_clear
+    browser_proxy_set = engine_browser.browser_proxy_set
+    browser_proxy_clear = engine_browser.browser_proxy_clear
+    browser_har_start = engine_browser.browser_har_start
+    browser_har_stop = engine_browser.browser_har_stop
+    browser_har_replay = engine_browser.browser_har_replay
+    browser_har_clear = engine_browser.browser_har_clear
+    browser_mock_add = engine_browser.browser_mock_add
+    browser_mock_clear = engine_browser.browser_mock_clear
+    browser_pages = engine_browser.browser_pages
+    browser_page_select = engine_browser.browser_page_select
+    browser_page_close = engine_browser.browser_page_close
+    browser_trace_start = engine_browser.browser_trace_start
+    browser_trace_stop = engine_browser.browser_trace_stop
 
     # engine_actions: Acting on elements by id: target and selector resolution, tap/long-press/double-tap, text input, clear and erase, mic audio injection, swipe/scroll/key gestures, keyboard, clipboard paste/copy, a11y actions, and the RouteStep record each action emits.
     _action_site = engine_actions._action_site

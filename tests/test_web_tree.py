@@ -106,3 +106,12 @@ def test_web_find_bounds_rejects_unknown_selector_fields() -> None:
 
 def test_web_app_identity_does_not_publish_a_full_url() -> None:
     assert web_tree.app_id("https://example.test/private?token=secret") == "example.test"
+
+
+def test_web_surface_identity_keeps_path_and_query_but_not_origin() -> None:
+    tree = web_tree.normalize(
+        _snapshot(url="https://example.test/orders/42?view=compact#private"),
+        (360, 640),
+    )
+
+    assert tree.surface_id == "/orders/42?view=compact"

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from typing import Any
 
@@ -150,6 +150,134 @@ class TargetRuntime(ABC):
         """Send a platform-neutral key name such as ``back``, ``home``, or ``enter``."""
 
         raise DeviceError("key input is unsupported by this target runtime")
+
+    # -- optional browser-lab operations ---------------------------------
+
+    def browser_storage(self, *, include_values: bool = False) -> dict[str, Any]:
+        raise DeviceError("browser storage is unsupported by this target runtime")
+
+    def browser_storage_export(self, path: str) -> dict[str, Any]:
+        raise DeviceError("browser storage export is unsupported by this target runtime")
+
+    def browser_storage_import(self, path: str) -> dict[str, Any]:
+        raise DeviceError("browser storage import is unsupported by this target runtime")
+
+    def browser_storage_clear(self, kinds: Sequence[str]) -> dict[str, Any]:
+        raise DeviceError("browser storage clearing is unsupported by this target runtime")
+
+    def browser_cache_clear(self) -> dict[str, Any]:
+        raise DeviceError("browser cache clearing is unsupported by this target runtime")
+
+    def browser_reset(self) -> dict[str, Any]:
+        raise DeviceError("browser reset is unsupported by this target runtime")
+
+    def browser_network_status(self) -> dict[str, Any]:
+        raise DeviceError("browser network controls are unsupported by this target runtime")
+
+    def browser_set_offline(self, offline: bool) -> dict[str, Any]:
+        raise DeviceError("browser offline control is unsupported by this target runtime")
+
+    def browser_set_throttle(
+        self,
+        *,
+        latency_ms: int = 0,
+        download_kbps: int = 0,
+        upload_kbps: int = 0,
+    ) -> dict[str, Any]:
+        raise DeviceError("browser throttling is unsupported by this target runtime")
+
+    def browser_set_cors(
+        self,
+        *,
+        origin: str,
+        hosts: Sequence[str],
+        methods: Sequence[str],
+        headers: Sequence[str],
+        credentials: bool = False,
+    ) -> dict[str, Any]:
+        raise DeviceError("browser CORS control is unsupported by this target runtime")
+
+    def browser_clear_cors(self) -> dict[str, Any]:
+        raise DeviceError("browser CORS control is unsupported by this target runtime")
+
+    def browser_set_proxy(
+        self,
+        server: str,
+        *,
+        bypass: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> dict[str, Any]:
+        raise DeviceError("browser proxy control is unsupported by this target runtime")
+
+    def browser_clear_proxy(self) -> dict[str, Any]:
+        raise DeviceError("browser proxy control is unsupported by this target runtime")
+
+    def browser_har_start(self, path: str) -> dict[str, Any]:
+        raise DeviceError("browser HAR recording is unsupported by this target runtime")
+
+    def browser_har_stop(self) -> dict[str, Any]:
+        raise DeviceError("browser HAR recording is unsupported by this target runtime")
+
+    def browser_har_replay(
+        self, path: str, *, url: str | None = None, not_found: str = "abort"
+    ) -> dict[str, Any]:
+        raise DeviceError("browser HAR replay is unsupported by this target runtime")
+
+    def browser_har_clear(self) -> dict[str, Any]:
+        raise DeviceError("browser HAR replay is unsupported by this target runtime")
+
+    def browser_mock_add(
+        self,
+        url: str,
+        *,
+        status: int = 200,
+        body: str = "",
+        headers: Mapping[str, str] | None = None,
+        abort: bool = False,
+    ) -> dict[str, Any]:
+        raise DeviceError("browser request mocking is unsupported by this target runtime")
+
+    def browser_mock_clear(self, rule_id: str | None = None) -> dict[str, Any]:
+        raise DeviceError("browser request mocking is unsupported by this target runtime")
+
+    def browser_diagnostics(
+        self,
+        *,
+        limit: int = 100,
+        kinds: Sequence[str] = (),
+        since_ms: int | None = None,
+    ) -> dict[str, Any]:
+        raise DeviceError("browser diagnostics are unsupported by this target runtime")
+
+    def browser_diagnostics_clear(self) -> dict[str, Any]:
+        raise DeviceError("browser diagnostics are unsupported by this target runtime")
+
+    def browser_diagnostics_mark(
+        self, name: str, *, clear: bool = False
+    ) -> dict[str, Any]:
+        raise DeviceError("browser diagnostics are unsupported by this target runtime")
+
+    def browser_pages(self) -> dict[str, Any]:
+        raise DeviceError("browser page control is unsupported by this target runtime")
+
+    def browser_page_select(self, page_id: str) -> dict[str, Any]:
+        raise DeviceError("browser page control is unsupported by this target runtime")
+
+    def browser_page_close(self, page_id: str) -> dict[str, Any]:
+        raise DeviceError("browser page control is unsupported by this target runtime")
+
+    def browser_trace_start(self) -> dict[str, Any]:
+        raise DeviceError("browser tracing is unsupported by this target runtime")
+
+    def browser_trace_stop(self, path: str) -> dict[str, Any]:
+        raise DeviceError("browser tracing is unsupported by this target runtime")
+
+    def session_state_begin(self, session_id: str) -> dict[str, Any]:
+        raise DeviceError("session state isolation is unsupported by this target runtime")
+
+    def session_state_finish(self, session_id: str) -> dict[str, Any]:
+        raise DeviceError("session state isolation is unsupported by this target runtime")
 
     def back_gesture(self) -> None:
         """Perform the platform's semantic edge-back gesture without caller coordinates."""

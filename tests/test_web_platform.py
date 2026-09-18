@@ -100,6 +100,133 @@ class FakeConnection:
     def wait_idle(self, timeout_ms: int) -> None:
         self.calls.append(("idle", timeout_ms))
 
+    def storage(self, *, include_values: bool = False) -> dict:
+        self.calls.append(("storage", include_values))
+        return {"ok": True, "include_values": include_values}
+
+    def storage_export(self, path: str) -> dict:
+        self.calls.append(("storage_export", path))
+        return {"ok": True, "path": path}
+
+    def storage_import(self, path: str) -> dict:
+        self.calls.append(("storage_import", path))
+        return {"ok": True, "path": path}
+
+    def storage_clear(self, kinds) -> dict:
+        self.calls.append(("storage_clear", tuple(kinds)))
+        return {"ok": True, "cleared": list(kinds)}
+
+    def cache_clear(self) -> dict:
+        self.calls.append(("cache_clear",))
+        return {"ok": True}
+
+    def reset(self) -> dict:
+        self.calls.append(("reset",))
+        return {"ok": True}
+
+    def network_status(self) -> dict:
+        self.calls.append(("network_status",))
+        return {"ok": True, "offline": False}
+
+    def set_offline(self, offline: bool) -> dict:
+        self.calls.append(("offline", offline))
+        return {"ok": True, "offline": offline}
+
+    def set_throttle(self, *, latency_ms: int, download_kbps: int, upload_kbps: int) -> dict:
+        self.calls.append(("throttle", latency_ms, download_kbps, upload_kbps))
+        return {"ok": True}
+
+    def set_cors(self, *, origin, hosts, methods, headers, credentials) -> dict:
+        self.calls.append(("cors", origin, tuple(hosts), tuple(methods), tuple(headers), credentials))
+        return {"ok": True}
+
+    def clear_cors(self) -> dict:
+        self.calls.append(("cors_clear",))
+        return {"ok": True}
+
+    def set_proxy(self, server, *, bypass, username, password) -> dict:
+        self.calls.append(("proxy", server, bypass, username, password))
+        return {"ok": True, "password_configured": password is not None}
+
+    def clear_proxy(self) -> dict:
+        self.calls.append(("proxy_clear",))
+        return {"ok": True}
+
+    def har_start(self, path: str) -> dict:
+        self.calls.append(("har_start", path))
+        return {"ok": True}
+
+    def har_stop(self) -> dict:
+        self.calls.append(("har_stop",))
+        return {"ok": True}
+
+    def har_replay(self, path: str, *, url: str | None, not_found: str) -> dict:
+        self.calls.append(("har_replay", path, url, not_found))
+        return {"ok": True}
+
+    def har_clear(self) -> dict:
+        self.calls.append(("har_clear",))
+        return {"ok": True}
+
+    def mock_add(self, url: str, *, status: int, body: str, headers, abort: bool) -> dict:
+        self.calls.append(("mock_add", url, status, body, headers, abort))
+        return {"ok": True}
+
+    def mock_clear(self, rule_id: str | None = None) -> dict:
+        self.calls.append(("mock_clear", rule_id))
+        return {"ok": True}
+
+    def diagnostics(self, *, limit: int, kinds, since_ms: int | None) -> dict:
+        self.calls.append(("diagnostics", limit, tuple(kinds), since_ms))
+        return {
+            "ok": True,
+            "events": [
+                {
+                    "timestamp_ms": 123,
+                    "kind": "console",
+                    "level": "warning",
+                    "message": "fixture warning",
+                    "url": URL,
+                }
+            ],
+        }
+
+    def diagnostics_clear(self) -> dict:
+        self.calls.append(("diagnostics_clear",))
+        return {"ok": True}
+
+    def mark_diagnostics(self, name: str, *, clear: bool = False) -> dict:
+        self.calls.append(("diagnostics_mark", name, clear))
+        return {"ok": True, "timestamp_ms": 123}
+
+    def pages(self) -> dict:
+        self.calls.append(("pages",))
+        return {"ok": True, "pages": [{"id": "page-1", "active": True}]}
+
+    def page_select(self, page_id: str) -> dict:
+        self.calls.append(("page_select", page_id))
+        return {"ok": True}
+
+    def page_close(self, page_id: str) -> dict:
+        self.calls.append(("page_close", page_id))
+        return {"ok": True}
+
+    def trace_start(self) -> dict:
+        self.calls.append(("trace_start",))
+        return {"ok": True}
+
+    def trace_stop(self, path: str) -> dict:
+        self.calls.append(("trace_stop", path))
+        return {"ok": True}
+
+    def session_begin(self, session_id: str) -> dict:
+        self.calls.append(("session_begin", session_id))
+        return {"ok": True}
+
+    def session_finish(self, session_id: str) -> dict:
+        self.calls.append(("session_finish", session_id))
+        return {"ok": True}
+
     def close(self) -> None:
         self.closed = True
 
@@ -172,6 +299,7 @@ def test_web_engine_reuses_the_shared_analysis_and_action_path(tmp_path: Path) -
 
     result = engine.analyze(source="hierarchy", with_ocr=False)
     assert result.screen.package == "example.test"
+    assert result.screen.activity == "/app"
     assert [element.text for element in result.elements] == ["Web fixture", None, "Continue"]
     assert result.elements[2].stable_key == "rid:submit"
 
@@ -207,6 +335,52 @@ def test_web_refuses_android_only_services_without_loading_android(tmp_path: Pat
     platform = _adapter(tmp_path, FakeConnection())
     with pytest.raises(UnsupportedPlatformCapabilityError, match="network"):
         platform.capability("network")
+
+
+def test_web_browser_lab_controls_share_the_engine_runtime_path(tmp_path: Path) -> None:
+    connection = FakeConnection()
+    engine = Engine(_config(tmp_path), platform=_adapter(tmp_path, connection))
+
+    assert engine.browser_storage(include_values=True)["include_values"] is True
+    assert engine.browser_offline(True)["offline"] is True
+    engine.browser_throttle(latency_ms=40, download_kbps=512, upload_kbps=128)
+    engine.browser_cors_add(origin="https://fixture.test", hosts=["api.fixture.test"])
+    engine.browser_mock_add("**/api/**", body="fixture")
+    assert engine.browser_pages()["pages"][0]["id"] == "page-1"
+    engine.browser_trace_start()
+
+    assert ("storage", True) in connection.calls
+    assert ("offline", True) in connection.calls
+    assert ("throttle", 40, 512, 128) in connection.calls
+    assert ("trace_start",) in connection.calls
+
+
+def test_web_diagnostics_are_normalized_for_existing_app_log_features(tmp_path: Path) -> None:
+    connection = FakeConnection()
+    platform = _adapter(tmp_path, connection)
+    runtime = platform.connect(URL)
+
+    mark = platform.mark_diagnostics(runtime, "before", clear=True)
+    window = platform.diagnostic_window(runtime, since="before", app_id="example.test")
+
+    assert mark["clock"] == "host"
+    assert window.lines == ["console | fixture warning"]
+    assert window.events[0].level.value == "warning"
+    assert ("diagnostics_mark", "before", True) in connection.calls
+
+
+def test_goal_session_registers_and_restores_browser_state(tmp_path: Path) -> None:
+    connection = FakeConnection()
+    engine = Engine(_config(tmp_path), platform=_adapter(tmp_path, connection))
+    observation = engine.analyze(source="hierarchy", with_ocr=False)
+
+    started = engine.session_start("verify the fictional checkout", observation=observation)
+    finished = engine.session_finish(started["session_id"], allow_incomplete=True)
+
+    assert "browser_session_restore" in started["cleanup"]
+    assert ("session_begin", started["session_id"]) in connection.calls
+    assert ("session_finish", started["session_id"]) in connection.calls
+    assert finished["terminated"] is True
 
 
 def test_web_requires_a_url_and_reports_install_help(tmp_path: Path, monkeypatch) -> None:
@@ -255,9 +429,12 @@ def test_playwright_connection_keeps_sync_transport_off_the_async_mcp_thread() -
         executor,
         Playwright(),
         Closable("browser"),
-        Closable("context"),
-        Page(),
+        object(),
+        WebLaunchOptions(),
+        URL,
     )
+    connection._context = Closable("context")
+    connection._page = Page()
 
     async def invoke_like_mcp() -> None:
         assert connection.url == URL

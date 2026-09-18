@@ -491,9 +491,10 @@ def memory_update(self: Engine, screen_name: str | None = None) -> dict[str, Any
     if mem is None:
         raise UsageError("memory is disabled", hint="Set `memory.enabled: true` in config.")
     device, w, h = self._context()
-    elements, package, _xml_hash = self._capture_hierarchy(device, w, h)
+    elements, package, surface, _xml_hash = self._capture_hierarchy(device, w, h)
     app = AppContext.coerce(device.current_app())
     package = app.app_id or package
+    surface = app.surface_id or surface
     if not package:
         raise UsageError("could not determine the foreground package to record")
     # ``memory update --screen`` is the explicit correction path for a bad generated
@@ -508,7 +509,7 @@ def memory_update(self: Engine, screen_name: str | None = None) -> dict[str, Any
     outcome = mem.record_screen(
         package=package,
         elements=elements,
-        activity=app.surface_id,
+        activity=surface,
         app_version=self._version_for(device, package),
         tier="hierarchy",
         name_hint=screen_name,
