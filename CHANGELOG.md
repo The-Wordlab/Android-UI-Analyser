@@ -21,6 +21,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Outcome judges now bind delayed-result criteria to the action that completes the contract,
+  such as returning after background work, without accepting unrelated later actions as proof.
 - iOS presence checks and `scroll-to` now exclude off-screen accessibility nodes retained by
   SwiftUI, matching the viewport used by `analyze`.
 - iOS restart now launches an already-stopped app instead of aborting on simctl's multiline
