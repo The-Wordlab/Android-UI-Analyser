@@ -20,6 +20,17 @@ notes, so you can check for a newer version — and read what changed — withou
 - Opt-in `aua mcp --tool-profile web` (or `AUA_MCP_TOOL_PROFILE=web`) exposes a focused web
   session/UI/map/flow/browser catalogue and matching agent instructions. The default `full`
   catalogue and shared engine dispatch are unchanged.
+- The experimental controller harness can judge a finished run against its authored contract
+  with a TypeSafe System One model (`jev-latest`), as an alternative to the existing
+  chat-model judge. Each contract bullet is scored on a four-level evidence ladder and two
+  yes/no questions ask whether something outside the feature stopped the run and whether the
+  run ever arrived; the five-way verdict is then composed in ordinary code from those numbers,
+  against thresholds a caller can read and change. One run costs one request. Install with the
+  new `typesafe` extra and set `TYPESAFE_API_KEY`.
+
+  This judge returns no written justification: a System One model generates no text, so its
+  per-criterion evidence names the level a criterion landed on rather than quoting a screen.
+  Runs that need a written rationale still want the chat-model judge.
 
 ### Fixed
 
