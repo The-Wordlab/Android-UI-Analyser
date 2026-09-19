@@ -206,7 +206,7 @@ requires-dist = [
     { name = "paddleocr", marker = "extra == 'paddle'", specifier = ">=2.7" },
     { name = "paddlepaddle", marker = "extra == 'paddle'", specifier = ">=2.6" },
     { name = "pillow", specifier = ">=10.0" },
-    { name = "playwright", marker = "extra == 'web'", specifier = ">=1.50" },
+    { name = "playwright", marker = "extra == 'web'", specifier = ">=1.63" },
     { name = "pydantic", specifier = ">=2.6" },
     { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin' and extra == 'apple'", specifier = ">=10.0" },
     { name = "pyobjc-framework-vision", marker = "sys_platform == 'darwin' and extra == 'apple'", specifier = ">=10.0" },

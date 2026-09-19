@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from .. import read_budget
 from ..errors import UsageError
 from ..providers.base import Bounds, ScreenImage
 from ..schema import AppContext, MatchMode
@@ -46,6 +48,9 @@ class WebRuntime(TargetRuntime):
         self._connection = connection
         self._home_url = target_url
         self._instance_token = f"web:{uuid4().hex}"
+
+    def read_deadline(self, budget: read_budget.ReadBudget) -> AbstractContextManager[None]:
+        return read_budget.activate(budget)
 
     def window_size(self) -> tuple[int, int]:
         return self._connection.viewport_size()

@@ -77,6 +77,7 @@ class WebPlatform(PlatformAdapter):
             "device.logs",
             "session.state",
             "ui.input",
+            "ui.read_deadline",
             "ui.screenshot",
             "ui.tree",
         }

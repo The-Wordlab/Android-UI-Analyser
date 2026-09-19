@@ -309,6 +309,89 @@ def test_web_engine_reuses_the_shared_analysis_and_action_path(tmp_path: Path) -
     assert ("click", 100, 185) in connection.calls
 
 
+@pytest.mark.parametrize("action", ["tap", "input"])
+@pytest.mark.parametrize("surface", ["cli", "mcp"])
+def test_web_action_until_executes_once_and_returns_arrival(tmp_path, monkeypatch, action, surface):
+    from mcp.shared.memory import create_connected_server_and_client_session
+    from typer.testing import CliRunner
+
+    from android_ui_analyser import cli
+    from android_ui_analyser.mcp_server import build_server
+
+    class Connection(FakeConnection):
+        arrived = False
+
+        def snapshot(self):
+            return (
+                super().snapshot().replace("Web fixture", "Arrived" if self.arrived else "Waiting")
+            )
+
+        def click(self, x, y):
+            super().click(x, y)
+            if y > 150:
+                self.arrived = True
+
+        def type_text(self, text):
+            super().type_text(text)
+            self.arrived = True
+
+    connection = Connection()
+    engine = Engine(_config(tmp_path), platform=_adapter(tmp_path, connection))
+    engine.config.daemon.enabled = False
+    try:
+        if surface == "cli":
+            monkeypatch.setattr(cli.GlobalOpts, "engine", lambda self: engine)
+            monkeypatch.setattr(cli.GlobalOpts, "load", lambda self: engine.config)
+            argv = [
+                "--until",
+                "text:Arrived",
+                "--until-timeout",
+                "500",
+                f"{action}-and-analyze",
+                "--rid",
+                "submit" if action == "tap" else "email",
+            ]
+            if action == "input":
+                argv.append("fixture")
+            result = CliRunner().invoke(cli.app, argv)
+            assert result.exit_code == 0, result.output
+            payload = json.loads(result.stdout)
+        else:
+
+            async def invoke():
+                async with create_connected_server_and_client_session(
+                    build_server(engine)
+                ) as client:
+                    args = {
+                        "rid": "submit" if action == "tap" else "email",
+                        "until": "text:Arrived",
+                        "until_timeout": 500,
+                    }
+                    if action == "input":
+                        args["text"] = "fixture"
+                        observation = engine.analyze()
+                        args["id"] = next(
+                            element.published_id
+                            for element in observation.elements
+                            if element.resource_id == "email"
+                        )
+                        del args["rid"]
+                    result = await client.call_tool(f"{action}_and_analyze", args)
+                    assert not result.isError, result
+                    return json.loads(
+                        next(block.text for block in result.content if block.type == "text")
+                    )
+
+            payload = asyncio.run(invoke())
+        assert payload["ok"], payload
+        assert payload["await_outcome"] == "satisfied", payload
+        assert payload["observation_present"], payload
+        assert sum(call[0] == "click" for call in connection.calls) == 1
+        assert sum(call[0] == "type" for call in connection.calls) == (action == "input")
+    finally:
+        engine.close()
+
+
 def test_web_runtime_routes_input_scroll_keys_and_links(tmp_path: Path) -> None:
     connection = FakeConnection()
     runtime = _adapter(tmp_path, connection).connect(URL)

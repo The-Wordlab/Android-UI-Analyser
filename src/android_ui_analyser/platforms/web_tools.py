@@ -9,13 +9,17 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextvars import copy_context
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 from urllib.parse import urlsplit, urlunsplit
 
-from ..errors import ConfigError, DeviceError
+from .. import read_budget
+from ..errors import AuaError, ConfigError, DeviceError, JobCancelledError
+from .web_bounded_reads import read as _read
 
 
 @dataclass(frozen=True)
@@ -373,12 +377,29 @@ class PlaywrightConnection:
             raise DeviceError("the web target is closed", code="web_target_closed")
 
         def run() -> _T:
+            budget = read_budget.current()
+            if budget is not None:
+                budget.check()
             self._ensure_active_page()
-            return operation()
+            result = operation()
+            if budget is not None:
+                budget.check()
+            return result
 
         try:
-            return self._executor.submit(run).result()
-        except (ConfigError, DeviceError):
+            # ContextVars do not cross ThreadPoolExecutor boundaries automatically.
+            budget = read_budget.current()
+            timeout = budget.remaining() if budget is not None else None
+            future = self._executor.submit(copy_context().run, run)
+            try:
+                return future.result(timeout=timeout)
+            except FutureTimeoutError:
+                if future.cancel():
+                    raise read_budget.ReadDeadlineExceeded("queued UI-read deadline reached") from None
+                # An executing read drains its protocol cancellation on the owner thread.
+                # Join it rather than abandoning in-flight work after a caller timeout.
+                return future.result()
+        except (AuaError, read_budget.ReadDeadlineExceeded):
             raise
         except Exception as exc:
             raise DeviceError(
@@ -396,6 +417,8 @@ class PlaywrightConnection:
         if pages:
             self._page = pages[-1]
         else:
+            if read_budget.current() is not None:
+                raise DeviceError("no live browser page for a passive read", code="web_page_closed")
             self._page = self._context.new_page()
             self._page.goto(self._home_url, wait_until="domcontentloaded")
 
@@ -687,7 +710,7 @@ class PlaywrightConnection:
         def read() -> tuple[int, int]:
             value = self._page.viewport_size
             if not isinstance(value, dict):
-                value = self._page.evaluate("() => ({width: innerWidth, height: innerHeight})")
+                value = _read(self._page, "evaluate", "() => ({width: innerWidth, height: innerHeight})")
             return int(value["width"]), int(value["height"])
 
         return self._call(read)
@@ -699,20 +722,20 @@ class PlaywrightConnection:
             # Sync Playwright dispatches route/response callbacks while an API call is active.
             # Give a just-completed intercepted response one event-loop turn before reading DOM
             # text, otherwise the hierarchy can capture the pre-promise "loading" value.
-            top.wait_for_timeout(0)
+            _read(top, "wait_for_timeout", 0)
             self._ensure_active_page()
             top = self._page
             for frame in list(top.frames):
                 try:
-                    payload = dict(frame.evaluate(_DOM_SNAPSHOT_SCRIPT))
+                    payload = dict(_read(frame, "evaluate", _DOM_SNAPSHOT_SCRIPT))
                     offset_x = 0.0
                     offset_y = 0.0
                     if frame is not top.main_frame:
-                        handle = frame.frame_element()
+                        handle = _read(frame, "frame_element")
                         try:
-                            box = handle.bounding_box()
+                            box = _read(handle, "bounding_box")
                         finally:
-                            handle.dispose()
+                            _read(handle, "dispose")
                         if not box:
                             continue
                         offset_x = float(box["x"])
@@ -732,6 +755,8 @@ class PlaywrightConnection:
                         item["parent"] = base + int(parent) if isinstance(parent, int) else None
                         item["frame_url"] = self._safe_url(str(frame.url))
                         merged.append(item)
+                except (read_budget.ReadDeadlineExceeded, JobCancelledError):
+                    raise
                 except Exception as exc:
                     self._add_event(
                         "frame_error",
@@ -742,7 +767,7 @@ class PlaywrightConnection:
             payload = {
                 "format": "aua-web-dom/1",
                 "url": str(top.url),
-                "title": top.title(),
+                "title": _read(top, "title"),
                 "viewport": {
                     "width": self._options.viewport_width,
                     "height": self._options.viewport_height,
@@ -755,7 +780,7 @@ class PlaywrightConnection:
 
     def screenshot_png(self) -> bytes:
         def capture() -> bytes:
-            data = self._page.screenshot(type="png", animations="disabled")
+            data = _read(self._page, "screenshot", type="png", animations="disabled")
             if not isinstance(data, bytes):
                 raise DeviceError("browser returned no PNG screenshot", code="screencap_failed")
             return data
@@ -807,7 +832,7 @@ class PlaywrightConnection:
     def wait_idle(self, timeout_ms: int) -> None:
         def wait() -> None:
             try:
-                self._page.wait_for_load_state("domcontentloaded", timeout=max(1, timeout_ms))
+                _read(self._page, "wait_for_load_state", "domcontentloaded", timeout=max(1, timeout_ms))
             except Exception as exc:
                 if "Timeout" not in type(exc).__name__:
                     raise
@@ -1504,6 +1529,12 @@ class PlaywrightLauncher:
             playwright = sync_playwright().start()
             browser = None
             try:
+                if not callable(getattr(playwright._impl_obj._connection, "_abort", None)):
+                    raise DeviceError(
+                        "web UI deadlines require Playwright >=1.63 with protocol cancellation",
+                        code="web_driver_outdated",
+                        hint="Upgrade android-ui-analyser[web], then install its browser binaries.",
+                    )
                 browser_type = getattr(playwright, options.browser, None)
                 if browser_type is None:
                     raise ConfigError(

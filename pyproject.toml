@@ -46,7 +46,7 @@ easyocr = ["easyocr>=1.7"]
 # --- Emulator audio input ---
 audio = ["grpcio>=1.64"]
 # --- Browser automation ---
-web = ["playwright>=1.50"]
+web = ["playwright>=1.63"]
 # --- Detection ---
 yolo = ["ultralytics>=8.2", "torch>=2.2"]
 omniparser = ["ultralytics>=8.2", "torch>=2.2", "huggingface-hub>=0.23"]

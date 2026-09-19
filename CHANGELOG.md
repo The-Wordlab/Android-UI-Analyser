@@ -19,6 +19,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Web actions with `until` and bounded waits now use the browser's passive read deadline
+  capability, preserving one action and its arrival check instead of failing after mutation.
+  Web support requires Playwright 1.63 or later to cancel and drain timed-out reads.
 - Session start accepts explicit `evidence: "none"` / `--evidence none` without an artifact
   directory, matching the no-evidence intent across Engine, CLI and MCP.
 - Browser CLI controls now use the same warm browser context as semantic UI actions, so

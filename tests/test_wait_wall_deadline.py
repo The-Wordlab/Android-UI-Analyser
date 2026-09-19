@@ -163,6 +163,48 @@ def test_timely_final_observation_keeps_ids_on_the_shared_analyze_path():
     assert runtime.reads.count("tree") == 1
 
 
+def test_folded_action_until_uses_neutral_runtime_and_never_repeats_action(monkeypatch):
+    from android_ui_analyser.mcp_server import _dump, _fold_action_until
+    from android_ui_analyser.platforms.android import AndroidPlatform
+
+    monkeypatch.setattr(
+        AndroidPlatform, "connect", lambda *args: pytest.fail("must use the selected adapter")
+    )
+
+    class ActionRuntime(Runtime):
+        clicks = 0
+
+        def _read(self, name, duration):
+            if read_budget.current() is not None:
+                super()._read(name, duration)
+
+        def click(self, x, y):
+            self.clicks += 1
+
+        def find_text(self, text, **kwargs):
+            assert self.clicks == 1
+            return super().find_text(text, **kwargs)
+
+    runtime = ActionRuntime()
+    config = make_config(
+        memory={"enabled": False}, lease={"enabled": False}, output={"with_image": False}
+    )
+    eng = Engine(config, device=runtime, platform=Adapter(config))
+    try:
+        observation = eng.analyze(source="hierarchy", with_image=False)
+        action = eng.tap(observation.elements[0].published_id, observe=False)
+        payload = _fold_action_until(
+            eng, "tap_and_analyze", {"until": "text:Ready", "until_timeout": 500}, _dump(action)
+        )
+        assert payload["ok"] and payload["await_outcome"] == "satisfied"
+        assert payload["observation_present"]
+        assert runtime.clicks == 1
+        assert "probe" in runtime.reads
+        assert runtime.active_reads == 0
+    finally:
+        eng.close()
+
+
 def test_cold_runtime_refuses_without_connecting():
     with pytest.raises(UsageError) as error:
         engine().wait(for_="Ready", timeout_ms=100)
