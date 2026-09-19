@@ -70,7 +70,7 @@ def test_session_without_artifacts_accepts_no_evidence_or_the_default(
     assert state.evidence == options.get("evidence", "failures")
 
 
-@pytest.mark.parametrize("surface", ["engine", "cli", "mcp"])
+@pytest.mark.parametrize("surface", ["engine", "cli"])
 @pytest.mark.parametrize(
     "options, message",
     [

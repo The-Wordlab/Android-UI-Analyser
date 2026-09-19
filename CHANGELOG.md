@@ -19,6 +19,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- MCP `session_start` now describes and schema-validates artifact prerequisites: `evidence=all`
+  and `junit=true` require a non-empty `artifacts_dir`; default/`failures` and `none` do not.
+- MCP action schemas distinguish returned element `id` values such as `el:...` from the app's
+  resource/test `rid`, preventing agents from confusing these selector fields.
 - Web actions with `until` and bounded waits now use the browser's passive read deadline
   capability, preserving one action and its arrival check instead of failing after mutation.
   Web support requires Playwright 1.63 or later to cancel and drain timed-out reads.

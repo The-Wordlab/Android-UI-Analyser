@@ -206,10 +206,24 @@ _OBSERVE_PROP: dict[str, Any] = {
     "default": True,
     "description": "Also return the post-action screen analysis.",
 }
+_ELEMENT_ID_PROP: dict[str, Any] = {
+    "type": ["integer", "string"],
+    "description": (
+        "Copy an element's id from the latest observation, including stable strings like "
+        "'el:...'. Also accepts a current-frame numeric ordinal. Do not put this id in rid."
+    ),
+}
+_RESOURCE_ID_PROP: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "Match the app's resource/test id (resource_id/rid), e.g. 'submit'. "
+        "This is not the observation's element id ('el:...')."
+    ),
+}
 _RELATION_SELECTOR_PROP: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "rid": {"type": "string"},
+        "rid": _RESOURCE_ID_PROP,
         "text": {"type": "string"},
         "desc": {"type": "string"},
         "index": {"type": "integer", "minimum": 0},
@@ -251,7 +265,7 @@ _DATABASE_PARAMS_PROP: dict[str, Any] = {
     "description": "SQLite bind parameters as a JSON array or object.",
 }
 _SELECTOR_PROPS: dict[str, Any] = {
-    "rid": {"type": "string", "description": "Match by resource-id."},
+    "rid": _RESOURCE_ID_PROP,
     "text": {"type": "string", "description": "Match by visible text."},
     "desc": {"type": "string", "description": "Match by content-desc."},
     "stable_key": {
@@ -531,14 +545,25 @@ def _tool_definitions() -> list[types.Tool]:
                     },
                     "artifacts_dir": {
                         "type": "string",
-                        "description": "Absolute directory for the cross-command evidence bundle.",
+                        "description": (
+                            "Absolute directory for the cross-command evidence bundle. "
+                            "Required and non-empty when evidence='all' or junit=true."
+                        ),
                     },
                     "evidence": {
                         "type": "string",
                         "enum": ["none", "failures", "all"],
                         "default": "failures",
+                        "description": (
+                            "Omit or use 'failures' for the default; 'none' disables automatic "
+                            "evidence. Neither needs artifacts_dir. 'all' requires artifacts_dir."
+                        ),
                     },
-                    "junit": {"type": "boolean", "default": False},
+                    "junit": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Write JUnit results; true requires artifacts_dir.",
+                    },
                     "wait_for_lease_s": {
                         "type": "number",
                         "minimum": 0,
@@ -639,6 +664,16 @@ def _tool_definitions() -> list[types.Tool]:
                     },
                 },
                 "required": ["goal"],
+                "if": {
+                    "anyOf": [
+                        {"properties": {"evidence": {"const": "all"}}, "required": ["evidence"]},
+                        {"properties": {"junit": {"const": True}}, "required": ["junit"]},
+                    ]
+                },
+                "then": {
+                    "required": ["artifacts_dir"],
+                    "properties": {"artifacts_dir": {"minLength": 1}},
+                },
                 "additionalProperties": False,
             },
         ),
@@ -1188,7 +1223,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": ["integer", "string"]},
+                    "id": _ELEMENT_ID_PROP,
                     **_SELECTOR_PROPS,
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
@@ -1211,7 +1246,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": ["integer", "string"]},
+                    "id": _ELEMENT_ID_PROP,
                     "text": {"type": "string"},
                     "submit": {"type": "boolean", "default": False},
                     "send": {
@@ -1365,7 +1400,7 @@ def _tool_definitions() -> list[types.Tool]:
             description="Return full attributes for one element id from the last analyze.",
             inputSchema={
                 "type": "object",
-                "properties": {"id": {"type": ["integer", "string"]}},
+                "properties": {"id": _ELEMENT_ID_PROP},
                 "required": ["id"],
                 "additionalProperties": False,
             },
@@ -1376,7 +1411,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": ["integer", "string"]},
+                    "id": _ELEMENT_ID_PROP,
                     **{key: value for key, value in _SELECTOR_PROPS.items()
                        if key in {"rid", "text", "desc", "index"}},
                     "ms": {"type": "integer", "default": 600},
@@ -1411,7 +1446,7 @@ def _tool_definitions() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Host path to a PCM WAV."},
-                    "id": {"type": ["integer", "string"], "minimum": 0, "minLength": 1},
+                    "id": {**_ELEMENT_ID_PROP, "minimum": 0, "minLength": 1},
                     **_SELECTOR_PROPS,
                     "control_mode": {
                         "type": "string",
@@ -1441,7 +1476,7 @@ def _tool_definitions() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "speech": {"type": "string", "minLength": 1},
-                    "id": {"type": ["integer", "string"], "minimum": 0, "minLength": 1},
+                    "id": {**_ELEMENT_ID_PROP, "minimum": 0, "minLength": 1},
                     **_SELECTOR_PROPS,
                     "control_mode": {
                         "type": "string",
@@ -1840,7 +1875,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": ["integer", "string"]},
+                    "id": _ELEMENT_ID_PROP,
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                 },
@@ -1854,7 +1889,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": ["integer", "string"]},
+                    "id": _ELEMENT_ID_PROP,
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                 },
@@ -1990,7 +2025,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": ["integer", "string"]},
+                    "id": _ELEMENT_ID_PROP,
                     **_SELECTOR_PROPS,
                 },
                 "additionalProperties": False,
@@ -2003,7 +2038,7 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": ["integer", "string"]},
+                    "id": _ELEMENT_ID_PROP,
                     "chars": {
                         "type": "integer",
                         "description": "Delete this many characters; omit to clear all.",
@@ -2352,8 +2387,8 @@ def _tool_definitions() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": ["integer", "string"]},
-                    "rid": {"type": "string"},
+                    "id": _ELEMENT_ID_PROP,
+                    "rid": _RESOURCE_ID_PROP,
                     "text": {"type": "string"},
                     "direction": {"type": "string", "enum": ["forward", "backward"]},
                     "observe": {"type": "boolean", "default": True},
