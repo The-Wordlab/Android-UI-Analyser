@@ -211,7 +211,7 @@ def test_the_restart_leaves_another_devices_daemon_alone(
 
     assert cli._replace_skewed_daemon(daemon_mod, cfg, STALE) is True
     assert [socket for name, socket in steps if name == "stop"] == [
-        str(Path(cfg.cache.dir) / "daemon.sock.emulator-5554")
+        daemon_mod.socket_path(cfg, serial="emulator-5554")
     ]
     assert sibling.exists(), "another device's daemon socket was removed"
 

@@ -1936,10 +1936,16 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     # Lease discovery does not connect to uiautomator2; it is the cheap ownership decision
     # every transport must share.
     host_only = method in _HOST_ONLY_ROUTE_METHODS
+    runtime_session = method in {"session_start", "session_finish"} and engine.platform.supports(
+        "session.state"
+    )
+    persistent_context = method.startswith("browser_") or runtime_session
     # Session bootstrap owns pool discovery, optional provisioning, and the first lease claim.
     # Run that boundary in this caller process so the lease is bound to the agent rather than a
-    # detached daemon, then let ordinary calls use the selected per-device warm daemon.
-    bootstrap_session = method == "session_start"
+    # detached daemon. Adapters with session.state instead need start/finish in the same
+    # process as UI actions, since that runtime owns the captured session baseline.
+    # Resolve their caller lease below before selecting the persistent target daemon.
+    bootstrap_session = method == "session_start" and not runtime_session
     if host_only:
         # Host-only flow metadata commands still belong to the calling agent's active goal
         # session. Resolve identity and the explicit serial without claiming/connecting to the
@@ -1995,7 +2001,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                 # destroys the only authoritative in-memory mark/window the caller requested.
                 skew = False
             restart_hint = _restart_hint(daemon_mod, cfg)
-            if skew and method in _DAEMON_ONLY_METHODS:
+            if skew and (method in _DAEMON_ONLY_METHODS or persistent_context):
                 # Reached only when the replacement could not be done — in practice because
                 # another agent's background job is still running inside that daemon. There is
                 # no durable form of this state to fall back on (see _DAEMON_ONLY_METHODS), so
@@ -2115,6 +2121,12 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
                     ),
                 ) from exc
             logger.debug("daemon route unavailable, running in-process: %s", exc)
+    if persistent_context:
+        raise UsageError(
+            "this CLI command requires the warm daemon that owns the target context",
+            hint="Enable daemon.enabled and perf.auto_daemon, or start `aua daemon start`.",
+            code="session_daemon_required" if runtime_session else "browser_daemon_required",
+        )
     # In-process path — journal here (daemon path is journaled inside the daemon).
     from . import journal as journal_mod
 
@@ -6440,12 +6452,13 @@ browser_app = typer.Typer(
 app.add_typer(browser_app, name="browser")
 
 
-def _browser_run(ctx: typer.Context, call: Callable[[], dict[str, Any]]) -> None:
-    try:
-        _emulator_emit(call(), ctx)
-    except AuaError as err:
-        emit_error(err)
-        raise typer.Exit(int(err.exit_code)) from err
+def _browser_run(ctx: typer.Context, method: str, **kwargs: Any) -> None:
+    # Browser state belongs to the same warm Engine that owns semantic UI actions.
+    # A new in-process Engine would report success while changing a disposable context.
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        _emulator_emit(_route(engine, method, **kwargs), ctx)
+
+    _run(ctx, go)
 
 
 def _browser_pairs(values: list[str], *, label: str) -> dict[str, str]:
@@ -6462,7 +6475,7 @@ def _browser_pairs(values: list[str], *, label: str) -> dict[str, str]:
 def browser_status_cmd(ctx: typer.Context) -> None:
     """Show the selected page plus active browser controls."""
 
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_status())
+    _browser_run(ctx, "browser_status")
 
 
 @browser_app.command("logs")
@@ -6476,15 +6489,13 @@ def browser_logs_cmd(
 
     _browser_run(
         ctx,
-        lambda: _opts(ctx).engine().browser_logs(
-            limit=limit, kinds=kind or [], since_ms=since_ms
-        ),
+        "browser_logs", limit=limit, kinds=kind or [], since_ms=since_ms,
     )
 
 
 @browser_app.command("clear-logs")
 def browser_clear_logs_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_logs_clear())
+    _browser_run(ctx, "browser_logs_clear")
 
 
 @browser_app.command("storage")
@@ -6498,18 +6509,18 @@ def browser_storage_cmd(
 
     _browser_run(
         ctx,
-        lambda: _opts(ctx).engine().browser_storage(include_values=include_values),
+        "browser_storage", include_values=include_values,
     )
 
 
 @browser_app.command("storage-export")
 def browser_storage_export_cmd(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_storage_export(path))
+    _browser_run(ctx, "browser_storage_export", path=str(Path(path).expanduser().resolve()))
 
 
 @browser_app.command("storage-import")
 def browser_storage_import_cmd(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_storage_import(path))
+    _browser_run(ctx, "browser_storage_import", path=str(Path(path).expanduser().resolve()))
 
 
 @browser_app.command("storage-clear")
@@ -6521,34 +6532,34 @@ def browser_storage_clear_cmd(
         help="cookies, local, session, indexeddb, cache, service-workers; omit for all.",
     ),
 ) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_storage_clear(kind or []))
+    _browser_run(ctx, "browser_storage_clear", kinds=kind or [])
 
 
 @browser_app.command("cache-clear")
 def browser_cache_clear_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_cache_clear())
+    _browser_run(ctx, "browser_cache_clear")
 
 
 @browser_app.command("reset")
 def browser_reset_cmd(ctx: typer.Context) -> None:
     """Reset storage and every browser control to configured startup state."""
 
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_reset())
+    _browser_run(ctx, "browser_reset")
 
 
 @browser_app.command("network")
 def browser_network_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_network_status())
+    _browser_run(ctx, "browser_network_status")
 
 
 @browser_app.command("offline")
 def browser_offline_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_offline(True))
+    _browser_run(ctx, "browser_offline", offline=True)
 
 
 @browser_app.command("online")
 def browser_online_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_offline(False))
+    _browser_run(ctx, "browser_offline", offline=False)
 
 
 @browser_app.command("throttle")
@@ -6562,11 +6573,10 @@ def browser_throttle_cmd(
 
     _browser_run(
         ctx,
-        lambda: _opts(ctx).engine().browser_throttle(
-            latency_ms=latency_ms,
-            download_kbps=download_kbps,
-            upload_kbps=upload_kbps,
-        ),
+        "browser_throttle",
+        latency_ms=latency_ms,
+        download_kbps=download_kbps,
+        upload_kbps=upload_kbps,
     )
 
 
@@ -6583,19 +6593,18 @@ def browser_cors_add_cmd(
 
     _browser_run(
         ctx,
-        lambda: _opts(ctx).engine().browser_cors_add(
-            origin=origin,
-            hosts=host,
-            methods=method or [],
-            headers=header or [],
-            credentials=credentials,
-        ),
+        "browser_cors_add",
+        origin=origin,
+        hosts=host,
+        methods=method or [],
+        headers=header or [],
+        credentials=credentials,
     )
 
 
 @browser_app.command("cors-clear")
 def browser_cors_clear_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_cors_clear())
+    _browser_run(ctx, "browser_cors_clear")
 
 
 @browser_app.command("proxy-set")
@@ -6617,28 +6626,27 @@ def browser_proxy_set_cmd(
             raise typer.Exit(int(err.exit_code))
     _browser_run(
         ctx,
-        lambda: _opts(ctx).engine().browser_proxy_set(
-            server,
-            bypass=bypass,
-            username=username,
-            password=password,
-        ),
+        "browser_proxy_set",
+        server=server,
+        bypass=bypass,
+        username=username,
+        password=password,
     )
 
 
 @browser_app.command("proxy-clear")
 def browser_proxy_clear_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_proxy_clear())
+    _browser_run(ctx, "browser_proxy_clear")
 
 
 @browser_app.command("har-start")
 def browser_har_start_cmd(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_har_start(path))
+    _browser_run(ctx, "browser_har_start", path=str(Path(path).expanduser().resolve()))
 
 
 @browser_app.command("har-stop")
 def browser_har_stop_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_har_stop())
+    _browser_run(ctx, "browser_har_stop")
 
 
 @browser_app.command("har-replay")
@@ -6650,15 +6658,14 @@ def browser_har_replay_cmd(
 ) -> None:
     _browser_run(
         ctx,
-        lambda: _opts(ctx).engine().browser_har_replay(
-            path, url=url, not_found=not_found
-        ),
+        "browser_har_replay",
+        path=str(Path(path).expanduser().resolve()), url=url, not_found=not_found,
     )
 
 
 @browser_app.command("har-clear")
 def browser_har_clear_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_har_clear())
+    _browser_run(ctx, "browser_har_clear")
 
 
 @browser_app.command("mock-add")
@@ -6677,13 +6684,12 @@ def browser_mock_add_cmd(
         raise typer.Exit(int(err.exit_code)) from err
     _browser_run(
         ctx,
-        lambda: _opts(ctx).engine().browser_mock_add(
-            url,
-            status=status,
-            body=body,
-            headers=headers,
-            abort=abort,
-        ),
+        "browser_mock_add",
+        url=url,
+        status=status,
+        body=body,
+        headers=headers,
+        abort=abort,
     )
 
 
@@ -6691,32 +6697,32 @@ def browser_mock_add_cmd(
 def browser_mock_clear_cmd(
     ctx: typer.Context, rule_id: str | None = typer.Option(None, "--id")
 ) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_mock_clear(rule_id))
+    _browser_run(ctx, "browser_mock_clear", rule_id=rule_id)
 
 
 @browser_app.command("pages")
 def browser_pages_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_pages())
+    _browser_run(ctx, "browser_pages")
 
 
 @browser_app.command("page-select")
 def browser_page_select_cmd(ctx: typer.Context, page_id: str = typer.Argument(...)) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_page_select(page_id))
+    _browser_run(ctx, "browser_page_select", page_id=page_id)
 
 
 @browser_app.command("page-close")
 def browser_page_close_cmd(ctx: typer.Context, page_id: str = typer.Argument(...)) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_page_close(page_id))
+    _browser_run(ctx, "browser_page_close", page_id=page_id)
 
 
 @browser_app.command("trace-start")
 def browser_trace_start_cmd(ctx: typer.Context) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_trace_start())
+    _browser_run(ctx, "browser_trace_start")
 
 
 @browser_app.command("trace-stop")
 def browser_trace_stop_cmd(ctx: typer.Context, path: str = typer.Argument(...)) -> None:
-    _browser_run(ctx, lambda: _opts(ctx).engine().browser_trace_stop(path))
+    _browser_run(ctx, "browser_trace_stop", path=str(Path(path).expanduser().resolve()))
 
 
 clipboard_app = typer.Typer(help="Clipboard — Maestro setClipboard / copyTextFrom / pasteText.")

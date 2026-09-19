@@ -25,7 +25,9 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "android_ui_analy
 
 def _names_the_cli_sends() -> set[str]:
     cli = (SRC / "cli.py").read_text()
-    return set(re.findall(r'_route\(\s*engine,\s*"([a-z_]+)"', cli, re.S))
+    return set(re.findall(r'_route\(\s*engine,\s*"([a-z_]+)"', cli, re.S)) | set(
+        re.findall(r'_browser_run\(\s*ctx,\s*"([a-z_]+)"', cli, re.S)
+    )
 
 
 def _names_the_daemon_answers() -> set[str]:
@@ -51,4 +53,5 @@ def test_the_scan_can_actually_see_something() -> None:
     sent = _names_the_cli_sends()
     assert len(sent) > 20, f"only found {len(sent)} dispatched names — the regex has drifted"
     assert "tap_point" in sent, "the name this test was written for is no longer being dispatched"
+    assert "browser_storage" in sent, "browser routing helper commands must also be checked"
     assert "analyze" in _names_the_daemon_answers(), "daemon scan found no analyze branch"

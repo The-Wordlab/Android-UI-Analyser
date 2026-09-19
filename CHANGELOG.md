@@ -11,6 +11,18 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Browser CLI controls now use the same warm browser context as semantic UI actions, so
+  storage, mocks, offline mode, logs, pages and traces persist across commands. Unavailable
+  daemons fail explicitly instead of changing a disposable context.
+- Goal-session start and finish keep the browser baseline in that same warm context so
+  finishing a CLI session restores the storage and browser controls it started with.
+- Long web target URLs use short deterministic daemon socket names within macOS limits,
+  retaining per-target isolation and daemon discovery.
+- Closing the active popup restores its live opener or another remaining page; closing the
+  last page recovers a page on the next operation.
+
 ## [0.30.0] - 2026-09-19
 
 ### Added

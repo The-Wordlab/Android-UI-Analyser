@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Sequence
 from typing import Any
 
-from android_ui_analyser import engine_browser
+import pytest
+from typer.testing import CliRunner
+
+from android_ui_analyser import cli, daemon, engine_browser
 from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.platforms.base import NormalizedTree, PlatformAdapter
@@ -138,3 +142,118 @@ def test_browser_engine_module_has_no_native_transport_dependency() -> None:
     assert "playwright" not in source.casefold()
     assert "android" not in source.casefold()
     assert "adb" not in source.casefold()
+
+
+_BROWSER_COMMAND_CASES = [
+    (["logs"], "browser_logs", {"limit": 100, "kinds": [], "since_ms": None}),
+    (["clear-logs"], "browser_logs_clear", {}),
+    (["storage", "--include-values"], "browser_storage", {"include_values": True}),
+    (["storage-clear", "--kind", "local"], "browser_storage_clear", {"kinds": ["local"]}),
+    (["cache-clear"], "browser_cache_clear", {}),
+    (["reset"], "browser_reset", {}),
+    (["network"], "browser_network_status", {}),
+    (["offline"], "browser_offline", {"offline": True}),
+    (["online"], "browser_offline", {"offline": False}),
+    (
+        ["throttle", "--latency-ms", "20"],
+        "browser_throttle",
+        {"latency_ms": 20, "download_kbps": 0, "upload_kbps": 0},
+    ),
+    (
+        ["cors-add", "--origin", "https://fixture.test", "--host", "api.fixture.test"],
+        "browser_cors_add",
+        {
+            "origin": "https://fixture.test",
+            "hosts": ["api.fixture.test"],
+            "methods": [],
+            "headers": [],
+            "credentials": False,
+        },
+    ),
+    (["cors-clear"], "browser_cors_clear", {}),
+    (
+        ["proxy-set", "http://proxy.fixture.test:8080"],
+        "browser_proxy_set",
+        {
+            "server": "http://proxy.fixture.test:8080",
+            "bypass": None,
+            "username": None,
+            "password": None,
+        },
+    ),
+    (["proxy-clear"], "browser_proxy_clear", {}),
+    (["har-stop"], "browser_har_stop", {}),
+    (["har-clear"], "browser_har_clear", {}),
+    (
+        ["mock-add", "**/api/**", "--body", "fixture"],
+        "browser_mock_add",
+        {"url": "**/api/**", "status": 200, "body": "fixture", "headers": {}, "abort": False},
+    ),
+    (["mock-clear", "--id", "mock-1"], "browser_mock_clear", {"rule_id": "mock-1"}),
+    (["pages"], "browser_pages", {}),
+    (["page-select", "page-2"], "browser_page_select", {"page_id": "page-2"}),
+    (["page-close", "page-2"], "browser_page_close", {"page_id": "page-2"}),
+    (["trace-start"], "browser_trace_start", {}),
+]
+
+
+@pytest.mark.parametrize("argv, method, kwargs", _BROWSER_COMMAND_CASES)
+def test_browser_cli_routes_to_shared_daemon_engine(monkeypatch, argv, method, kwargs):
+    runtime = _Runtime()
+    engine = Engine(Config(), device=runtime, platform=_Platform(Config()))
+    routed = []
+
+    def route(actual_engine, actual_method, **actual_kwargs):
+        assert actual_engine is engine
+        routed.append((actual_method, actual_kwargs))
+        response = daemon.dispatch(engine, {"cmd": actual_method, "args": actual_kwargs})
+        assert response["ok"], response
+        return response["result"]
+
+    monkeypatch.setattr(cli, "_run", lambda ctx, go: go(engine, None))
+    monkeypatch.setattr(cli, "_route", route)
+    monkeypatch.setattr(daemon, "_adopt_client_owner", lambda *a, **kw: None)
+    result = CliRunner().invoke(cli.app, ["--format", "compact", "browser", *argv])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["ok"]
+    assert routed == [(method, kwargs)]
+    assert len(runtime.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "command", ["storage-export", "storage-import", "har-start", "har-replay", "trace-stop"]
+)
+def test_browser_artifact_paths_resolve_in_cli_working_directory(monkeypatch, tmp_path, command):
+    monkeypatch.chdir(tmp_path)
+    routed = []
+    monkeypatch.setattr(cli, "_run", lambda ctx, go: go(object(), None))
+    monkeypatch.setattr(
+        cli, "_route", lambda engine, method, **kw: routed.append((method, kw)) or {"ok": True}
+    )
+    result = CliRunner().invoke(cli.app, ["--format", "compact", "browser", command, "artifact"])
+    assert result.exit_code == 0, result.output
+    assert routed[0][1]["path"] == str(tmp_path / "artifact")
+
+
+def test_browser_controls_never_succeed_in_a_disposable_context(monkeypatch):
+    from android_ui_analyser.errors import UsageError
+
+    config = Config()
+    config.daemon.enabled = False
+    runtime = _Runtime()
+    engine = Engine(config, device=runtime, platform=_Platform(config))
+    monkeypatch.setattr(engine, "_lease_device", lambda: runtime.target_id)
+    with pytest.raises(UsageError) as error:
+        cli._route(engine, "browser_offline", offline=True)
+    assert error.value.code == "browser_daemon_required"
+    assert runtime.calls == []
+
+
+def test_browser_daemon_keeps_android_unsupported_result(monkeypatch):
+    from conftest import FakeDevice, make_engine
+
+    engine = make_engine(device=FakeDevice())
+    monkeypatch.setattr(daemon, "_adopt_client_owner", lambda *a, **kw: None)
+    response = daemon.dispatch(engine, {"cmd": "browser_storage", "args": {}})
+    assert not response["ok"]
+    assert response["error"]["code"] == "platform_capability_unsupported"

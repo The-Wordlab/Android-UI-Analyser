@@ -371,8 +371,13 @@ class PlaywrightConnection:
     def _call(self, operation: Callable[[], _T]) -> _T:
         if self._closed:
             raise DeviceError("the web target is closed", code="web_target_closed")
+
+        def run() -> _T:
+            self._ensure_active_page()
+            return operation()
+
         try:
-            return self._executor.submit(operation).result()
+            return self._executor.submit(run).result()
         except (ConfigError, DeviceError):
             raise
         except Exception as exc:
@@ -380,6 +385,27 @@ class PlaywrightConnection:
                 f"browser operation failed: {exc}",
                 code="web_operation_failed",
             ) from None
+
+    def _ensure_active_page(self) -> None:
+        """Recover after a page closes itself, on the Playwright owner thread."""
+        if self._context is None:
+            return
+        if self._page is not None and not self._page.is_closed():
+            return
+        pages = [page for page in self._context.pages if not page.is_closed()]
+        if pages:
+            self._page = pages[-1]
+        else:
+            self._page = self._context.new_page()
+            self._page.goto(self._home_url, wait_until="domcontentloaded")
+
+    def _on_page_closed(self, page: Any, opener: Any) -> None:
+        if self._page is not page:
+            return
+        # Do not create pages or navigate inside a close callback: the whole context
+        # may be shutting down. The next operation handles an empty context lazily.
+        pages = [item for item in self._context.pages if item is not page and not item.is_closed()]
+        self._page = opener if opener in pages else (pages[-1] if pages else None)
 
     def _initial_storage_state(self) -> str | None:
         if not self._options.storage_state:
@@ -522,6 +548,8 @@ class PlaywrightConnection:
     def _on_page(self, page: Any) -> None:
         self._page_id(page)
         self._page = page
+        opener = page.opener()
+        page.on("close", lambda: self._on_page_closed(page, opener))
         page.on(
             "console",
             lambda message: self._add_event(
@@ -672,6 +700,8 @@ class PlaywrightConnection:
             # Give a just-completed intercepted response one event-loop turn before reading DOM
             # text, otherwise the hierarchy can capture the pre-promise "loading" value.
             top.wait_for_timeout(0)
+            self._ensure_active_page()
+            top = self._page
             for frame in list(top.frames):
                 try:
                     payload = dict(frame.evaluate(_DOM_SNAPSHOT_SCRIPT))
@@ -1341,12 +1371,7 @@ class PlaywrightConnection:
             page = self._lookup_page(page_id)
             closed_id = self._page_id(page)
             page.close()
-            pages = [candidate for candidate in self._context.pages if not candidate.is_closed()]
-            if pages:
-                self._page = pages[-1]
-            else:
-                self._page = self._context.new_page()
-                self._page.goto(self._home_url, wait_until="domcontentloaded")
+            self._ensure_active_page()
             self._page.bring_to_front()
             return {
                 "ok": True,

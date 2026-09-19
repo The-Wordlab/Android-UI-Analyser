@@ -384,6 +384,69 @@ def test_goal_session_registers_and_restores_browser_state(tmp_path: Path) -> No
     assert finished["terminated"] is True
 
 
+def test_cli_goal_session_baseline_stays_in_the_daemon_that_mutates_it(tmp_path, monkeypatch):
+    from android_ui_analyser import cli, daemon
+
+    class StatefulConnection(FakeConnection):
+        offline = False
+
+        def __init__(self):
+            super().__init__()
+            self.baselines = {}
+
+        def set_offline(self, offline):
+            self.offline = offline
+            return super().set_offline(offline)
+
+        def session_begin(self, session_id):
+            self.baselines[session_id] = self.offline
+            return super().session_begin(session_id)
+
+        def session_finish(self, session_id):
+            self.offline = self.baselines.pop(session_id)
+            return super().session_finish(session_id)
+
+    connection = StatefulConnection()
+    cfg = _config(tmp_path)
+    warm_engine = Engine(cfg, platform=_adapter(tmp_path, connection))
+    routed = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def call(self, method, **kwargs):
+            routed.append(method)
+            response = daemon.dispatch(warm_engine, {"cmd": method, "args": kwargs})
+            response["response_decorated"] = True
+            return response
+
+    monkeypatch.setattr(daemon, "is_running", lambda config: True)
+    monkeypatch.setattr(daemon, "running_version", lambda config: daemon._aua_version())
+    monkeypatch.setattr(daemon, "running_policy_fingerprint", daemon.policy_config_fingerprint)
+    monkeypatch.setattr(daemon, "running_runtime_fingerprint", daemon.runtime_config_fingerprint)
+    monkeypatch.setattr(daemon, "DaemonClient", Client)
+    monkeypatch.setattr(daemon, "_adopt_client_owner", lambda *a, **kw: None)
+
+    def command(method, **kwargs):
+        # Each CLI invocation creates a new Engine; none may connect a disposable page.
+        caller = Engine(cfg, platform=_adapter(tmp_path, FakeConnection()))
+        monkeypatch.setattr(caller, "_connect_target", lambda *a: pytest.fail("cold context"))
+        return cli._route(caller, method, **kwargs)
+
+    try:
+        started = command("session_start", goal="verify the fictional checkout")
+        command("browser_offline", offline=True)
+        assert connection.offline
+        finished = command("session_finish", session_id=started["session_id"], allow_incomplete=True)
+        assert finished["ok"], finished
+        assert not connection.offline
+        assert routed == ["session_start", "browser_offline", "session_finish"]
+        assert not connection.baselines
+    finally:
+        warm_engine.close()
+
+
 def test_web_requires_a_url_and_reports_install_help(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
     config.device.serial = None
@@ -409,6 +472,9 @@ def test_playwright_connection_keeps_sync_transport_off_the_async_mcp_thread() -
 
     class Page:
         keyboard = Keyboard()
+
+        def is_closed(self) -> bool:
+            return False
 
         @property
         def url(self) -> str:
@@ -461,6 +527,9 @@ def test_web_snapshot_pumps_intercepted_responses_before_reading_dom() -> None:
     class Page:
         frames: tuple = ()
         url = URL
+
+        def is_closed(self) -> bool:
+            return False
 
         def wait_for_timeout(self, timeout_ms: int) -> None:
             assert timeout_ms == 0

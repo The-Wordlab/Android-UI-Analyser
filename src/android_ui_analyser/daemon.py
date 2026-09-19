@@ -350,12 +350,20 @@ def effective_platform(config: Config, platform: str | None = None) -> str:
     )
 
 
+def _short_socket_base(base: str) -> str:
+    # macOS permits only 103 pathname bytes. TMPDIR there is often already very long,
+    # so use the short system temporary root when the configured directory cannot fit.
+    digest = hashlib.sha256(os.fsencode(os.path.abspath(base))).hexdigest()[:24]
+    return f"/tmp/aua-{os.getuid()}/{digest}.daemon.sock"
+
+
 def socket_path(config: Config, serial: str | None = None, *, platform: str | None = None) -> str:
-    """Return the expanded unix-socket path from *config*.
+    """Return a target-isolated Unix socket path within the macOS pathname limit.
 
     When a device serial is known (explicit arg, ``config.device.serial``, or
-    ``AUA_SERIAL``), append ``.<sanitized-serial>`` so multiple warm daemons can
-    coexist — one per emulator. ``AUA_DAEMON_SOCKET`` still wins outright.
+    ``AUA_SERIAL``), append its platform storage key so warm daemons can coexist.
+    Preserve fitting paths; hash long keys and relocate overlong base directories.
+    ``AUA_DAEMON_SOCKET`` remains an exact caller-selected override.
     """
     env = os.environ.get("AUA_DAEMON_SOCKET")
     if env:
@@ -363,10 +371,27 @@ def socket_path(config: Config, serial: str | None = None, *, platform: str | No
     base = os.path.expanduser(config.daemon.socket)
     ser = effective_serial(config, serial)
     platform_name = effective_platform(config, platform)
-    if not ser:
-        return base if platform_name == LEGACY_PLATFORM else f"{base}.{platform_name}"
-    ref = TargetRef(platform_name, ser)
-    return f"{base}.{ref.storage_key}"
+    suffix = (
+        TargetRef(platform_name, ser).storage_key
+        if ser else ("" if platform_name == LEGACY_PLATFORM else platform_name)
+    )
+    candidate = f"{base}.{suffix}" if suffix else base
+    if len(os.fsencode(candidate)) <= 103:
+        return candidate
+    # Retain the base prefix where possible so daemon discovery still finds siblings.
+    # Hash the complete identity, including platform, rather than truncating a URL.
+    identity = json.dumps([platform_name, ser.strip() if ser else None], ensure_ascii=False)
+    # An empty @platform@ component cannot be a TargetRef storage key, so even an
+    # actual target named after this digest cannot collide with the hash namespace.
+    hashed_suffix = "@@" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+    candidate = f"{base}.{hashed_suffix}"
+    if len(os.fsencode(candidate)) <= 103:
+        return candidate
+    short_base = _short_socket_base(base)
+    candidate = f"{short_base}.{suffix}" if suffix else short_base
+    if len(os.fsencode(candidate)) <= 103:
+        return candidate
+    return f"{short_base}.{hashed_suffix}"
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -1062,6 +1087,18 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
         elif cmd == "capture_stop":
             return _result_ok(engine.capture_stop())
 
+        elif cmd in (
+            "browser_status", "browser_logs", "browser_logs_clear",
+            "browser_storage", "browser_storage_export", "browser_storage_import",
+            "browser_storage_clear", "browser_cache_clear", "browser_reset",
+            "browser_network_status", "browser_offline", "browser_throttle",
+            "browser_cors_add", "browser_cors_clear", "browser_proxy_set", "browser_proxy_clear",
+            "browser_har_start", "browser_har_stop", "browser_har_replay", "browser_har_clear",
+            "browser_mock_add", "browser_mock_clear", "browser_pages", "browser_page_select",
+            "browser_page_close", "browser_trace_start", "browser_trace_stop",
+        ):
+            return _result_ok(getattr(engine, cmd)(**args))
+
         else:
             return _result_err(
                 "unknown_command",
@@ -1154,7 +1191,7 @@ def serve(
         os.unlink(sock_path)
 
     # Ensure parent directory.
-    Path(sock_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(sock_path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -1836,7 +1873,17 @@ def reap(config: Config) -> dict[str, Any]:
     """
     cache_dir = Path(config.cache.dir).expanduser()
     reaped: list[dict[str, Any]] = []
-    for pid_file in sorted(cache_dir.glob("daemon.sock*.pid")):
+    pid_files = set(cache_dir.glob("daemon.sock*.pid"))
+    socket_config = getattr(config, "daemon", None)
+    if socket_config is not None:
+        override = os.environ.get("AUA_DAEMON_SOCKET")
+        base = Path(os.path.expanduser(override or socket_config.socket))
+        bases = [base] if override else [base, Path(_short_socket_base(str(base)))]
+        for prefix in bases:
+            pid_files.update(prefix.parent.glob(prefix.name + ".*.pid"))
+            if Path(str(prefix) + ".pid").exists():
+                pid_files.add(Path(str(prefix) + ".pid"))
+    for pid_file in sorted(pid_files):
         sock = str(pid_file)[: -len(".pid")]
         pid, exe = read_pidfile(pid_file)
         if pid is None:
@@ -2004,16 +2051,18 @@ def live_sockets(config: Config) -> list[str]:
     """
     override = os.environ.get("AUA_DAEMON_SOCKET")
     base = Path(os.path.expanduser(override or config.daemon.socket))
-    found = []
-    with contextlib.suppress(OSError):
-        for path in sorted(base.parent.glob(base.name + "*")):
-            if path.name.endswith((".pid", ".restart-backoff")):
-                continue
-            if path != base and not path.name.startswith(base.name + "."):
-                continue
-            if _socket_process_alive(str(path)) or _socket_alive(str(path)):
-                found.append(str(path))
-    return found
+    bases = [base] if override else [base, Path(_short_socket_base(str(base)))]
+    found: set[str] = set()
+    for prefix in bases:
+        with contextlib.suppress(OSError):
+            for path in sorted(prefix.parent.glob(prefix.name + "*")):
+                if path.name.endswith((".pid", ".restart-backoff")):
+                    continue
+                if path != prefix and not path.name.startswith(prefix.name + "."):
+                    continue
+                if _socket_process_alive(str(path)) or _socket_alive(str(path)):
+                    found.add(str(path))
+    return sorted(found)
 
 
 def stop_all(config: Config) -> dict[str, Any]:
@@ -2142,7 +2191,7 @@ def serial_for_socket(sock: str) -> str | None:
     _, marker, tail = name.partition(".sock.")
     # socket_path sanitises unsupported serial characters to `_`; that transform is not
     # reversible. Never print a sanitized value as a real device selector.
-    return (tail or None) if marker and "_" not in tail else None
+    return (tail or None) if marker and "_" not in tail and not tail.startswith("@@") else None
 
 
 def describe_socket(sock: str) -> dict[str, Any]:

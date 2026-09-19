@@ -519,6 +519,7 @@ def test_dashboard_device_health_ping_never_adopts_the_action_owner(
     socket_path = tmp_path / "daemon.sock"
     socket_path.touch()
     state.config.daemon.socket = str(socket_path)
+    monkeypatch.setattr(daemon_mod, "socket_path", lambda *a, **kw: str(socket_path))
     owners: list[str | None] = []
 
     class FakeClient:

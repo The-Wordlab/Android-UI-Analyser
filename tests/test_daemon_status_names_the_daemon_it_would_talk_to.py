@@ -31,16 +31,24 @@ runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_socket_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_ambient_socket_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """`effective_serial`/`socket_path` read the environment, and the dev host has both set."""
     monkeypatch.delenv("AUA_SERIAL", raising=False)
     monkeypatch.delenv("AUA_DAEMON_SOCKET", raising=False)
+    yield
+    short = Path(daemon_mod._short_socket_base(str(tmp_path / "cache" / "daemon.sock")))
+    for path in short.parent.glob(short.name + "*"):
+        path.unlink(missing_ok=True)
 
 
 def _pretend_a_daemon_serves(cache: Path, serial: str) -> str:
     """A socket file plus a pidfile naming a live process — what `live_sockets` looks for."""
     cache.mkdir(parents=True, exist_ok=True)
-    sock = cache / f"daemon.sock.{serial}"
+    cfg = Config()
+    cfg.daemon.socket = str(cache / "daemon.sock")
+    cfg.device.serial = serial
+    sock = Path(daemon_mod.socket_path(cfg))
+    sock.parent.mkdir(parents=True, exist_ok=True)
     sock.write_bytes(b"")
     Path(str(sock) + ".pid").write_text(json.dumps({"pid": os.getpid(), "exe": sys.executable}))
     return str(sock)

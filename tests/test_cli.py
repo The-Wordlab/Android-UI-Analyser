@@ -124,6 +124,8 @@ def test_version_prints_and_exits_zero() -> None:
 
 
 def test_browser_cli_uses_the_shared_engine_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    from android_ui_analyser import cli
+
     calls: list[str] = []
 
     def network_status(_engine: engine_mod.Engine) -> dict[str, object]:
@@ -131,6 +133,13 @@ def test_browser_cli_uses_the_shared_engine_path(monkeypatch: pytest.MonkeyPatch
         return {"ok": True, "action": "browser-network-status", "offline": False}
 
     monkeypatch.setattr(engine_mod.Engine, "browser_network_status", network_status)
+    # Browser controls require the persistent route; this CLI shape test substitutes
+    # its transport, rather than allowing an ephemeral browser when daemons are disabled.
+    def route(engine, method, **kwargs):
+        assert method == "browser_network_status"
+        return getattr(engine, method)(**kwargs)
+
+    monkeypatch.setattr(cli, "_route", route)
 
     result = runner.invoke(app, ["browser", "network"])
 

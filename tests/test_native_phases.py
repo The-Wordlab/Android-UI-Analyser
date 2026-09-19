@@ -77,7 +77,8 @@ def test_pack_analyze_dict_magic() -> None:
 
 def test_per_serial_socket_path(tmp_path: Path) -> None:
     cfg = Config(daemon=DaemonCfg(socket=str(tmp_path / "daemon.sock")))
-    assert socket_path(cfg) == str(tmp_path / "daemon.sock")
+    assert socket_path(cfg).endswith("daemon.sock")
+    assert len(socket_path(cfg).encode()) <= 103
     assert socket_path(cfg, serial="emulator-5554").endswith("daemon.sock.emulator-5554")
     assert socket_path(cfg, serial="bad/serial:1").endswith("daemon.sock.bad_serial_1")
 

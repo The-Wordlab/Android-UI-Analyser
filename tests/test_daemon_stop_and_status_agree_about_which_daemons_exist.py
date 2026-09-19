@@ -45,16 +45,25 @@ runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_socket_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_ambient_socket_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """`effective_serial`/`socket_path` read the environment, and the dev host has both set."""
     monkeypatch.delenv("AUA_SERIAL", raising=False)
     monkeypatch.delenv("AUA_DAEMON_SOCKET", raising=False)
+    yield
+    # Long pytest directories relocate sockets; remove only this test's fake records.
+    short = Path(daemon_mod._short_socket_base(str(tmp_path / "cache" / "daemon.sock")))
+    for path in short.parent.glob(short.name + "*"):
+        path.unlink(missing_ok=True)
 
 
 def _pretend_a_daemon_serves(cache: Path, serial: str | None) -> str:
     """A socket file plus a pidfile naming a live process -- what `live_sockets` looks for."""
     cache.mkdir(parents=True, exist_ok=True)
-    sock = cache / ("daemon.sock" if serial is None else f"daemon.sock.{serial}")
+    cfg = Config()
+    cfg.daemon.socket = str(cache / "daemon.sock")
+    cfg.device.serial = serial
+    sock = Path(daemon_mod.socket_path(cfg))
+    sock.parent.mkdir(parents=True, exist_ok=True)
     sock.write_bytes(b"")
     Path(str(sock) + ".pid").write_text(json.dumps({"pid": os.getpid(), "exe": sys.executable}))
     return str(sock)
@@ -125,7 +134,7 @@ def test_status_says_which_socket_its_verdict_is_about(
 
     out = json.loads(runner.invoke(app, ["--format", "compact", "daemon", "status"]).stdout)
 
-    assert out["socket"] == str(cache / "daemon.sock"), out
+    assert out["socket"] == daemon_mod.socket_path(_cfg(tmp_path)), out
 
 
 def test_status_enumerates_every_daemon_and_the_serial_each_one_serves(
@@ -141,9 +150,9 @@ def test_status_enumerates_every_daemon_and_the_serial_each_one_serves(
 
     listed = {entry["serial"]: entry["socket"] for entry in out["daemons"]}
     assert listed == {
-        "emulator-5560": str(cache / "daemon.sock.emulator-5560"),
-        "emulator-5562": str(cache / "daemon.sock.emulator-5562"),
-        None: str(cache / "daemon.sock"),
+        "emulator-5560": daemon_mod.socket_path(_cfg(tmp_path, "emulator-5560")),
+        "emulator-5562": daemon_mod.socket_path(_cfg(tmp_path, "emulator-5562")),
+        None: daemon_mod.socket_path(_cfg(tmp_path)),
     }, out
     for entry in out["daemons"]:
         assert "stop_command" in entry, entry
