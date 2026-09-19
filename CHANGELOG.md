@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `aua mcp --tool-profile web` (or `AUA_MCP_TOOL_PROFILE=web`) exposes a focused web
+  session/UI/map/flow/browser catalogue and matching agent instructions. The default `full`
+  catalogue and shared engine dispatch are unchanged.
+
 ### Fixed
 
 - Session start accepts explicit `evidence: "none"` / `--evidence none` without an artifact

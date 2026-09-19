@@ -1521,6 +1521,11 @@ user data; query only the rows needed and handle backups accordingly.
 
 `aua mcp` runs an MCP server over stdio, exposing the same tools as the CLI. It is a thin adapter over the engine — no separate perception logic.
 
+For web tasks, `aua --platform web mcp --tool-profile web` advertises a smaller catalogue of
+session, UI, map/flow and browser tools. `AUA_MCP_TOOL_PROFILE=web` is the equivalent environment
+setting. The compatible default is `full`; profiles are explicit and do not select the platform.
+See [web MCP setup](docs/web.md#browser-lab-controls) for configuration and restart behavior.
+
 Tools include (non-exhaustive): `analyze_screen`, `tap_and_analyze`,
 `double_tap_and_analyze`, `long_press_and_analyze`, `input_and_analyze`,
 `mic_inject_and_analyze`, `mic_speak_and_analyze`,

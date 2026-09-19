@@ -60,6 +60,7 @@ from .errors import (
     emit_error,
 )
 from .identity import is_published_key
+from .mcp_profiles import ToolProfile
 from .memory import (
     DEFAULT_CONTEXT_ID,
     AppMap,
@@ -11207,11 +11208,19 @@ app.command(cls=AnnotateCommand, name="agent", hidden=True)(guide_cmd)
 
 
 @app.command()
-def mcp(ctx: typer.Context) -> None:
+def mcp(
+    ctx: typer.Context,
+    tool_profile: ToolProfile = typer.Option(
+        ToolProfile.full,
+        "--tool-profile",
+        envvar="AUA_MCP_TOOL_PROFILE",
+        help="Tool catalogue: full (compatible default), or focused web UI/session/browser tools.",
+    ),
+) -> None:
     """Run the MCP server over stdio (exposes the engine as MCP tools, §11)."""
     from . import mcp_server
 
-    mcp_server.run_stdio(_opts(ctx).load())
+    mcp_server.run_stdio(_opts(ctx).load(), tool_profile=tool_profile)
 
 
 # ------------------------------------------------------------------- entry point

@@ -134,6 +134,26 @@ The equivalent MCP surface is grouped into `browser_status`, `browser_logs`, `br
 `browser_network`, `browser_cors`, `browser_proxy`, `browser_har`, `browser_mock`, `browser_pages`,
 and `browser_trace`. Both interfaces call the same Engine operations.
 
+For agents working on web apps, start a focused MCP server:
+
+```bash
+aua --platform web --config /absolute/path/aua-web.yaml mcp --tool-profile web
+```
+
+The `web` tool profile advertises session lifecycle, semantic UI actions and assertions,
+screenshots, map/flow navigation and browser controls. It omits native device administration,
+Android accessibility actions, app databases, helpers and other unrelated tool schemas. The
+smaller catalogue reduces the context an agent processes each turn. Actions still return their
+post-action observation; use it instead of calling `analyze_screen` again.
+
+In an MCP client, append `"--tool-profile", "web"` to the server's `args`, or set
+`AUA_MCP_TOOL_PROFILE=web` in its environment. The CLI option wins over the environment. The
+default remains `full`, including when `--platform web` is selected, so existing clients keep
+their complete catalogue. Restart the server/client session after changing profiles; a cached
+call to a tool omitted from the active profile returns `tool_profile_unavailable` without
+dispatching. The profile does not select the platform or grant capabilities: use `--platform web`
+or a web config, and unsupported adapter operations retain their explicit capability errors.
+
 - Logs include console records, page exceptions, requests, responses, failed requests, and
   WebSocket opens. They also feed AUA's existing `device.logs`/per-action diagnostic path.
 - Storage inspection covers cookies, local/session storage, IndexedDB, CacheStorage, and service

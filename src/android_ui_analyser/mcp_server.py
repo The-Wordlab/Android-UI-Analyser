@@ -35,6 +35,7 @@ from .engine import (
     _safe_adopted_change,
 )
 from .errors import AuaError, UsageError
+from .mcp_profiles import WEB_INSTRUCTIONS, WEB_TOOL_NAMES, ToolProfile
 from .platforms import PlatformAdapter, TargetRef
 from .projection import Projection, trim_observation_payload
 from .schema import OutputFormat, publish_ids
@@ -5023,23 +5024,48 @@ def cleanup_mcp_emulators(
     }
 
 
-def build_server(engine: Engine) -> Server:
+def build_server(engine: Engine, *, tool_profile: ToolProfile | str = ToolProfile.full) -> Server:
     """Build a low-level MCP :class:`Server` bound to ``engine`` (for stdio + tests)."""
+    profile = ToolProfile(tool_profile)
+    definitions = _tool_definitions()
+    if profile is ToolProfile.web:
+        definitions = [tool for tool in definitions if tool.name in WEB_TOOL_NAMES]
+    listed_names = frozenset(tool.name for tool in definitions)
     engine.capture_service_start()
     server: Server = Server(
         SERVER_NAME,
         version=__version__,
-        instructions=render_mcp_instructions(),
+        instructions=WEB_INSTRUCTIONS if profile is ToolProfile.web else render_mcp_instructions(),
     )
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        return _tool_definitions()
+        return definitions
 
     @server.call_tool()
     async def call_tool(
         name: str, arguments: dict[str, Any]
     ) -> list[types.ContentBlock] | types.CallToolResult:
+        if profile is not ToolProfile.full and name not in listed_names:
+            # A stale client may still send a tool cached from the full catalogue. Refuse
+            # before dispatch, since the SDK cannot schema-validate an unlisted tool.
+            return types.CallToolResult(
+                content=[
+                    types.TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "error": {
+                                    "code": "tool_profile_unavailable",
+                                    "message": f"Tool {name!r} is not in the {profile.value!r} profile; "
+                                    "restart with --tool-profile full to use the full catalogue.",
+                                }
+                            }
+                        ),
+                    )
+                ],
+                isError=True,
+            )
         if name == "credential_request":
             import anyio
 
@@ -5269,7 +5295,9 @@ def build_default_engine(config: Config | None = None) -> Engine:
     return Engine(config if config is not None else load_config())
 
 
-def run_stdio(config: Config | None = None) -> None:
+def run_stdio(
+    config: Config | None = None, *, tool_profile: ToolProfile | str = ToolProfile.full
+) -> None:
     """Run the MCP server over stdio — the entry point used by ``aua mcp``."""
     import atexit
     import contextlib
@@ -5277,8 +5305,9 @@ def run_stdio(config: Config | None = None) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
+    profile = ToolProfile(tool_profile)  # Validate before constructing any runtime services.
     engine = build_default_engine(config)
-    server = build_server(engine)
+    server = build_server(engine, tool_profile=profile)
     # If the MCP client disconnects without emulator_stop, tear down what we started.
     atexit.register(
         cleanup_mcp_emulators,

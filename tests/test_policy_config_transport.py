@@ -87,7 +87,9 @@ models:
         encoding="utf-8",
     )
     captured: dict[str, Config] = {}
-    monkeypatch.setattr(mcp_mod, "run_stdio", lambda config: captured.setdefault("config", config))
+    monkeypatch.setattr(
+        mcp_mod, "run_stdio", lambda config, **kwargs: captured.setdefault("config", config)
+    )
 
     result = CliRunner().invoke(app, ["--config", str(config_path), "mcp"])
 
