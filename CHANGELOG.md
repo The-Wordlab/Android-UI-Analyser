@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-19
+
 ### Added
 
 - A built-in Playwright-backed `web` platform reuses AUA's semantic `analyze`, stable selectors,
@@ -1146,5 +1148,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.28.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.28.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.29.0...HEAD
 [0.29.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.29.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.30.0
