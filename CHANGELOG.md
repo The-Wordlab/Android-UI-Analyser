@@ -13,6 +13,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Session start accepts explicit `evidence: "none"` / `--evidence none` without an artifact
+  directory, matching the no-evidence intent across Engine, CLI and MCP.
 - Browser CLI controls now use the same warm browser context as semantic UI actions, so
   storage, mocks, offline mode, logs, pages and traces persist across commands. Unavailable
   daemons fail explicitly instead of changing a disposable context.

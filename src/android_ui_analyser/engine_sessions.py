@@ -290,7 +290,7 @@ def _session_start_impl(
         raise UsageError(str(exc)) from exc
     if junit and not artifacts_dir:
         raise UsageError("--junit needs --artifacts-dir")
-    if not artifacts_dir and evidence != "failures":
+    if not artifacts_dir and evidence not in {"none", "failures"}:
         raise UsageError("--evidence needs --artifacts-dir")
     if wait_for_lease_s < 0:
         raise UsageError("--wait-for-lease must not be negative")
