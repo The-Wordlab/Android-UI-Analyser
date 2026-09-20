@@ -1167,7 +1167,8 @@ async def run_realapp(
     judge_engine: str = "chat",
     nav_engine: str = "chat",
     nav_shadow: bool = False,
-    nav_min_confidence: float = 0.80,
+    nav_min_confidence: float = 0.85,
+    nav_action_space: str = "taps",
     judge_frames: int = 8,
     judge_images: int = 4,
     name_screens: bool = False,
@@ -1736,6 +1737,7 @@ async def run_realapp(
             navigator = TypeSafeNavigator(
                 goal, tools=tools,
                 min_confidence=nav_min_confidence, shadow=nav_shadow,
+                action_space=nav_action_space,
             )
         async def navigated_call(name, arguments):
             # Whoever chose the step, the navigator judges the next one against what the run
@@ -2260,8 +2262,14 @@ def main() -> int:
     parser.add_argument("--nav-shadow", action="store_true",
                         help="With --nav-engine typesafe, record what the navigator would have "
                              "done without letting it act. Proves the gate on real screens.")
-    parser.add_argument("--nav-min-confidence", type=float, default=0.80,
-                        help="Confidence a System One tap must clear to be taken (default 0.80).")
+    parser.add_argument("--nav-min-confidence", type=float, default=0.85,
+                        help="Confidence a System One tap must clear to be taken. Measured over 120 saved steps: 0.80 takes 18%% of steps at 77%% correct, 0.85 takes 12%% at 93%%, 0.90 takes 8%% at 100%%.")
+    parser.add_argument("--nav-action-space", choices=("taps", "full"), default="taps",
+                        help="taps: the navigator proposes presses only, and every scroll, back "
+                             "and stop goes to the controller model. full: it also scrolls, goes "
+                             "back and finishes with an outcome, the way the public Jev browser "
+                             "harnesses drive a page. Typing stays with the controller model "
+                             "either way -- a System One model returns a choice, never a string.")
     parser.add_argument("--judge-engine", choices=("chat", "typesafe"), default="chat",
                         help="chat: the OpenRouter judge ladder, which writes its own reasons. "
                              "typesafe: one TypeSafe System One request scoring each authored "
@@ -2472,6 +2480,7 @@ def main() -> int:
                     judge=not args.no_judge, judge_votes=args.judge_votes,
                     judge_engine=args.judge_engine, nav_engine=args.nav_engine,
                     nav_shadow=args.nav_shadow, nav_min_confidence=args.nav_min_confidence,
+                    nav_action_space=args.nav_action_space,
                     judge_frames=args.judge_frames, judge_images=args.judge_images, name_screens=args.map,
                     max_steps=args.max_steps, time_limit_s=args.time_limit, max_tokens=args.max_tokens,
                     preserve_end_state=args.preserve_end_state,

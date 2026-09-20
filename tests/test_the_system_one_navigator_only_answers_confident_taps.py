@@ -228,3 +228,102 @@ def test_a_screen_that_did_not_move_is_said_so_in_the_journey() -> None:
     navigator.observed(TAP_TOOL)
     asyncio.run(navigator(SCREEN))
     assert client.states[1]["journey_so_far"][0]["what_happened"] == "SCREEN DID NOT CHANGE"
+
+
+class WideClient(FakeClient):
+    """Answers the operand questions the widened space adds."""
+
+    def __init__(self, *args, direction="down", outcome="achieved", operand_conf=0.95, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.direction, self.outcome, self.operand_conf = direction, outcome, operand_conf
+
+    async def system_one(self, *, state, questions, model, timeout=None):
+        response = await super().system_one(state=state, questions=questions, model=model,
+                                            timeout=timeout)
+        response.answers["direction"] = SimpleNamespace(choice=self.direction,
+                                                        confidence=self.operand_conf)
+        response.answers["outcome"] = SimpleNamespace(choice=self.outcome,
+                                                      confidence=self.operand_conf)
+        self.questions = questions
+        return response
+
+
+WIDE_TOOLS = [TAP_TOOL, "scroll_and_analyze", "back_gesture_and_analyze", "session_finish"]
+
+
+def wide(client, **kwargs):
+    navigator = TypeSafeNavigator("Open notification settings", client=client, tools=WIDE_TOOLS,
+                                  action_space="full", **kwargs)
+    return asyncio.run(navigator(SCREEN)), navigator
+
+
+def test_the_widened_space_scrolls_with_the_direction_it_chose() -> None:
+    action, _ = wide(WideClient(kind="scroll", direction="up"))
+    assert action["tool"] == "scroll_and_analyze"
+    assert action["arguments"] == {"direction": "up"}
+
+
+def test_the_widened_space_goes_back_with_no_operand() -> None:
+    action, _ = wide(WideClient(kind="back"))
+    assert action == {"tool": "back_gesture_and_analyze", "arguments": {},
+                      "reason": action["reason"]}
+
+
+def test_the_widened_space_finishes_with_an_outcome_and_never_a_note() -> None:
+    # The note is free text and would reach the judge as evidence, so a non-generative model
+    # must not supply one. The enum it can answer is the whole claim.
+    action, _ = wide(WideClient(kind="done", outcome="blocked"))
+    assert action["tool"] == "session_finish"
+    assert action["arguments"] == {"outcome": "blocked"}, "no fabricated note"
+
+
+def test_typing_is_refused_even_in_the_widened_space() -> None:
+    # Jev returns a choice, never a string. The public harnesses call a small generative model
+    # here; this one hands the step back to the chat model, which is the same move.
+    action, navigator = wide(WideClient(kind="type"))
+    assert action is None
+    assert navigator.report()["declined"] == {"kind:type": 1}
+
+
+def test_a_widened_action_whose_tool_was_not_offered_is_refused() -> None:
+    navigator = TypeSafeNavigator("g", client=WideClient(kind="scroll"), tools=[TAP_TOOL],
+                                  action_space="full")
+    assert asyncio.run(navigator(SCREEN)) is None
+    assert navigator.report()["declined"] == {"scroll_not_offered": 1}
+
+
+def test_the_operand_gates_the_step_not_the_target_of_an_action_without_one() -> None:
+    # A scroll is gated on its direction; an uncertain direction is an uncertain scroll even
+    # when the tap target it did not choose came back certain.
+    action, navigator = wide(WideClient(kind="scroll", operand_conf=0.40))
+    assert action is None
+    assert navigator.report()["declined"] == {"below_confidence": 1}
+
+
+def test_the_same_scroll_is_not_repeated_on_a_screen_it_did_not_move() -> None:
+    client = WideClient(kind="scroll")
+    navigator = TypeSafeNavigator("g", client=client, tools=WIDE_TOOLS, action_space="full")
+    assert asyncio.run(navigator(SCREEN)) is not None
+    assert asyncio.run(navigator(SCREEN)) is None
+    assert navigator.report()["declined"] == {"repeat_on_unchanged_screen": 1}
+
+
+def test_the_operand_questions_are_asked_in_the_same_single_request() -> None:
+    # One request prices the state once and answers in parallel, so the operands for actions
+    # that lose are free. Asking them in a second call would give the saving away.
+    client = WideClient()
+    wide(client)
+    assert client.calls == 1
+    assert {"action", "target", "settled", "direction", "outcome"} == set(client.questions)
+
+
+def test_the_narrow_default_asks_no_operand_questions() -> None:
+    client = WideClient()
+    TypeSafeNavigator("g", client=client, tools=WIDE_TOOLS)
+    asyncio.run(TypeSafeNavigator("g", client=client, tools=WIDE_TOOLS)(SCREEN))
+    assert set(client.questions) == {"action", "target", "settled"}
+
+
+def test_an_unknown_action_space_is_refused_at_construction() -> None:
+    with pytest.raises(ValueError):
+        TypeSafeNavigator("g", client=FakeClient(), action_space="everything")

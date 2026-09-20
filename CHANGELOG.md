@@ -71,6 +71,17 @@ notes, so you can check for a newer version — and read what changed — withou
   shared map surface, and goal cleanup restores the browser session baseline.
 
 ## [0.29.0] - 2026-09-18
+- `run_realapp.py --nav-action-space full` widens what the System One navigator may answer from
+  presses alone to presses, scrolls, back and finishing with an outcome — the shape the public
+  Jev browser harnesses use. One request returns the action and every operand it might need
+  (which control, which direction, which outcome), so the operands belonging to actions that
+  lose cost nothing: a System One request prices its state once and answers in parallel.
+  Typing still goes to the controller model in both spaces, because a System One model returns
+  a choice and never a string. The default stays `taps`.
+
+  Finishing carries the outcome only and never a note: the note is free text, and a fabricated
+  one would reach the judge as evidence of something no screen showed.
+
 
 ### Added
 

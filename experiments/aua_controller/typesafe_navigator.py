@@ -51,6 +51,27 @@ MIN_CONFIDENCE = 0.85  # measured: 0.80 gives 77% correct, 0.85 gives 93%
 MAX_JOURNEY_CHARS = 60_000  # state and question share a 32k-token budget
 MAX_OPTIONS = 60  # a Choice takes up to 255 options; a screen offering more is not a decision
 TAP_TOOL = "tap_and_analyze"
+SCROLL_TOOL = "scroll_and_analyze"
+BACK_TOOL = "back_gesture_and_analyze"
+FINISH_TOOL = "session_finish"
+
+# Widened action space, after reading how public Jev browser agents are built
+# (browser-use/jev-ultrafast): one call returns the operation and every operand it might need, and
+# the harness acts on whichever operand the chosen operation names. The extra questions ride the
+# same state for free, because a System One request prices the state once and the answers in
+# parallel. `type` is still refused here for the same reason their harness hands it to a small
+# LLM: a non-generative model cannot write the string.
+SCROLL_DIRECTIONS: dict[str, str] = {
+    "down": "Move further down this screen to reveal what is below",
+    "up": "Move back up this screen to reveal what is above",
+}
+FINISH_OUTCOMES: dict[str, str] = {
+    "achieved": "The goal was carried out during this run",
+    "already_satisfied": "The goal was already true when the run started; nothing was needed",
+    "blocked": "Something outside the goal stops it being carried out",
+    "not_achievable": "This app cannot do what the goal asks",
+}
+ACTION_SPACES = ("taps", "full")
 
 # Offered so the model can say "none of these", which is what a low-confidence tap looks like
 # before it is thrown away. Only `tap` is ever acted on.
@@ -106,10 +127,16 @@ def tool_names(tools: Sequence[Any]) -> set[str]:
     return names
 
 
-def build_questions(options: Mapping[str, str]) -> dict[str, Any]:
+def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -> dict[str, Any]:
+    """The action, plus one operand question per action that takes one.
+
+    Every operand is asked speculatively, on the same state, in the same request -- the operands
+    belonging to actions that lose cost nothing and are simply discarded. That is the whole
+    economy of a System One call and it is how the public browser harnesses use it.
+    """
     from typesafe_sdk import Choice, Noul
 
-    return {
+    questions = {
         "action": Choice(instructions="What is the single best next action to reach the goal?",
                          criteria=dict(ACTION_KINDS)),
         "target": Choice(instructions="Which control should that action operate on?",
@@ -117,6 +144,14 @@ def build_questions(options: Mapping[str, str]) -> dict[str, Any]:
         "settled": Noul(instructions="Is the goal already fully satisfied on this screen, "
                                      "with nothing further to do?"),
     }
+    if action_space == "full":
+        questions["direction"] = Choice(
+            instructions="If this screen must be scrolled, which way?",
+            criteria=dict(SCROLL_DIRECTIONS))
+        questions["outcome"] = Choice(
+            instructions="If the run were to stop here, what became of the goal?",
+            criteria=dict(FINISH_OUTCOMES))
+    return questions
 
 
 class TypeSafeNavigator:
@@ -130,11 +165,14 @@ class TypeSafeNavigator:
         tools: Sequence[str] = (),
         model: str = MODEL,
         min_confidence: float = MIN_CONFIDENCE,
+        action_space: str = "taps",
         shadow: bool = False,
         timeout_s: float = 10.0,
     ) -> None:
         if not 0 < min_confidence <= 1:
             raise ValueError("min_confidence must sit in (0, 1]")
+        if action_space not in ACTION_SPACES:
+            raise ValueError(f"action_space must be one of {ACTION_SPACES}")
         if client is None:
             from typesafe_sdk import AsyncTypeSafeClient
 
@@ -143,10 +181,12 @@ class TypeSafeNavigator:
         self.goal = goal
         self.model = model
         self.min_confidence = min_confidence
+        self.action_space = action_space
         self.shadow = shadow
         self.timeout_s = timeout_s
         # A tap it was never offered is not a proposal this navigator may make.
         offered = tool_names(tools)
+        self.offered = offered
         self.can_tap = not offered or TAP_TOOL in offered
         self.history: list[str] = []
         # (screen fingerprint, target) pairs already proposed. A System One model answers each
@@ -214,7 +254,7 @@ class TypeSafeNavigator:
         started = time.perf_counter()
         try:
             response = await self.client.system_one(
-                state=state, questions=build_questions(options),
+                state=state, questions=build_questions(options, action_space=self.action_space),
                 model=self.model, timeout=self.timeout_s,
             )
         except Exception as exc:
@@ -233,20 +273,25 @@ class TypeSafeNavigator:
             "settled": round(response.answers["settled"].noul, 4),
             "options": len(options),
         }
-        if action.choice != "tap":
-            # Everything that ends, rewinds, scrolls or types a run stays with the chat model.
-            self._decline(f"kind:{action.choice}")
+        plan = self._plan(action, target, response.answers, options)
+        if plan is None:
             record["accepted"] = False
             self.proposals.append(record)
             return None
-        gate = min(action.confidence, target.confidence)
-        if gate < self.min_confidence or target.choice not in options:
-            self._decline("below_confidence" if gate < self.min_confidence else "unknown_target")
+        tool, arguments, operand, operand_confidence, label = plan
+        record["tool"] = tool
+
+        gate = min(action.confidence, operand_confidence)
+        record["gate"] = round(gate, 4)
+        if gate < self.min_confidence:
+            self._decline("below_confidence")
             record["accepted"] = False
             self.proposals.append(record)
             return None
 
-        pair = (str(fingerprint), target.choice)
+        # Repeating an action on a screen that action already failed to move is the one loop a
+        # model reading each screen from scratch walks straight into, whatever the action is.
+        pair = (str(fingerprint), f"{action.choice}:{operand}")
         if fingerprint is not None and pair in self._seen:
             self._decline("repeat_on_unchanged_screen")
             record["accepted"] = False
@@ -258,20 +303,71 @@ class TypeSafeNavigator:
             self._seen.add(pair)
         self._pending = {"n": len(self._journey) + 1,
                          "screen_you_saw": list(options.values())[:40],
-                         "_label": options[target.choice]}
+                         "_label": label}
         if self.shadow:
             self._decline("shadow")
             return None
-        return {
-            "tool": TAP_TOOL,
-            "arguments": {"id": target.choice},
-            "reason": (f"System One tap at confidence {gate:.2f}: {options[target.choice]}"),
-        }
+        return {"tool": tool, "arguments": arguments,
+                "reason": f"System One {action.choice} at confidence {gate:.2f}: {label}"}
+
+    def _plan(self, action, target, answers, options):
+        """Bind the chosen action to an offered tool, or decline and say why.
+
+        Returns ``(tool, arguments, operand, operand_confidence, label)``. The operand is what the
+        repeat guard keys on and what the confidence gate reads, so an action with no operand --
+        going back -- is gated on the action choice alone.
+        """
+        kind = action.choice
+        if kind == "tap":
+            if target.choice not in options:
+                self._decline("unknown_target")
+                return None
+            return (TAP_TOOL, {"id": target.choice}, target.choice,
+                    target.confidence, options[target.choice])
+        # Everything below exists only in the widened space. Keeping the narrow default is what
+        # lets the two be compared on the same code.
+        if self.action_space != "full":
+            self._decline(f"kind:{kind}")
+            return None
+        if kind == "type":
+            # A System One model returns a choice, never a string; the public harnesses call a
+            # small generative model here and so does this one, by handing the step back.
+            self._decline("kind:type")
+            return None
+        if kind == "scroll":
+            if SCROLL_TOOL not in self.offered:
+                self._decline("scroll_not_offered")
+                return None
+            direction = answers.get("direction")
+            if direction is None:
+                self._decline("no_direction")
+                return None
+            return (SCROLL_TOOL, {"direction": direction.choice}, direction.choice,
+                    direction.confidence, f"scroll {direction.choice}")
+        if kind == "back":
+            if BACK_TOOL not in self.offered:
+                self._decline("back_not_offered")
+                return None
+            return (BACK_TOOL, {}, "back", action.confidence, "go back")
+        if kind == "done":
+            if FINISH_TOOL not in self.offered:
+                self._decline("finish_not_offered")
+                return None
+            outcome = answers.get("outcome")
+            if outcome is None:
+                self._decline("no_outcome")
+                return None
+            # No note: it is free text, and a fabricated one would reach the judge as evidence.
+            return (FINISH_TOOL, {"outcome": outcome.choice}, outcome.choice,
+                    outcome.confidence, f"finish as {outcome.choice}")
+        self._decline(f"kind:{kind}")
+        return None
 
     def report(self) -> dict[str, Any]:
         accepted = sum(1 for item in self.proposals if item.get("accepted"))
         return {
             "engine": "typesafe_system_one", "model": self.model, "shadow": self.shadow,
+            "action_space": self.action_space,
             "min_confidence": self.min_confidence, "requests": self.requests,
             "input_tokens": self.input_tokens, "proposals": len(self.proposals),
             "accepted": accepted, "declined": dict(self.declined),
@@ -283,5 +379,6 @@ class TypeSafeNavigator:
         }
 
 
-__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "MODEL", "MIN_CONFIDENCE", "TAP_TOOL",
-           "build_questions", "candidates", "tool_names"]
+__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "MODEL", "MIN_CONFIDENCE",
+           "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "SCROLL_DIRECTIONS",
+           "FINISH_OUTCOMES", "build_questions", "candidates", "tool_names"]
