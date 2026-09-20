@@ -13,6 +13,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- Opt-in `connection: existing-chrome` drives one explicitly approved, already-open Chrome tab
+  through AUA's semantic UI, screenshot, diagnostics, map and flow surfaces. A bundled Manifest
+  V3 extension/native host detaches on disconnect and cannot read browser cookies, history, or
+  unapproved tabs; isolated Playwright remains the default.
 - Opt-in `aua mcp --tool-profile web` (or `AUA_MCP_TOOL_PROFILE=web`) exposes a focused web
   session/UI/map/flow/browser catalogue and matching agent instructions. The default `full`
   catalogue and shared engine dispatch are unchanged.

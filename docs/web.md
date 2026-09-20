@@ -1,9 +1,10 @@
 # Web browsers
 
-`aua` can launch an isolated Playwright browser page and drive it through the same semantic
-surface as Android and iOS: `analyze`, `has`, waits, stable-id actions, screenshots, flows, maps,
-and goal sessions. The browser DOM is normalized to AUA `Element` rows; callers do not need a
-second selector or response format.
+`aua` can launch an isolated Playwright browser page or attach to one user-approved tab in an
+existing Chrome profile, then drive it through the same semantic surface as Android and iOS:
+`analyze`, `has`, waits, stable-id actions, screenshots, flows, maps, and goal sessions. The
+browser DOM is normalized to AUA `Element` rows; callers do not need a second selector or
+response format.
 
 ## Install and start
 
@@ -53,10 +54,68 @@ URLs and refuses credentials embedded in a URL. Do not put secret query paramete
 URL: target identities appear in local lease and journal metadata. Use a private Playwright
 `storage_state` file for authentication.
 
+## Existing logged-in Chrome tab
+
+Use the extension mode when a task needs a login or browser state that already exists in your
+normal Chrome profile. Isolated Playwright remains the default and is still the right mode for
+repeatable QA, storage/network controls, and untrusted automation.
+
+Install the native host and copy the bundled extension into a stable user directory:
+
+```bash
+aua browser extension install
+# Then open chrome://extensions, enable Developer mode, choose Load unpacked,
+# and select the extension_path printed by the command.
+aua browser extension status
+```
+
+Configure a separate profile for attached operation:
+
+```yaml
+device:
+  platform: web
+  serial: existing-chrome
+
+platforms:
+  web:
+    connection: existing-chrome
+    attach_timeout_ms: 30000
+    action_timeout_ms: 5000
+```
+
+Start `aua analyze` or `aua session start` in a terminal, then open the AUA extension on the exact
+HTTP(S) tab you want to share and choose **Attach this tab**. The initial command waits up to
+`attach_timeout_ms`; the warm daemon keeps that one attachment for later commands. The Chrome
+debugger banner is expected. Choose **Detach** in the extension, run `session finish`, stop the
+daemon, or close the AUA process to release it. A killed process also closes the authenticated
+native bridge, which makes the extension detach automatically.
+
+Attached mode intentionally has a narrower authority boundary:
+
+- The extension receives `activeTab`, `debugger`, and `nativeMessaging`; it has no cookie,
+  history, broad host, downloads, clipboard, or all-tabs permission.
+- Only the tab approved from the extension popup can be analyzed, pictured, focused, navigated,
+  clicked, typed into, or scrolled. `browser pages` reports only that tab.
+- AUA cannot silently select another tab, close a personal tab, export/clear storage or cache,
+  reset the profile, change offline/throttle/proxy/CORS rules, mock traffic, record HAR, or start a
+  Playwright trace. Those calls return `platform_capability_unsupported`.
+- Goal sessions do not snapshot or restore the personal profile. `session finish` only detaches
+  the tab. Maps retain AUA's existing redacted structural skeleton; dynamic page content and form
+  values are not made durable.
+- Page actions are real user actions. Review any operation that posts, sends, buys, deletes,
+  follows, or otherwise changes external state just as you would when driving the UI yourself.
+
+The native bridge uses a freshly generated secret in a mode-0600 config file plus a mode-0600
+Unix socket, and the native-host manifest accepts only the bundled extension's stable ID. Current
+extension attachment supports Chrome/Chromium on macOS and Linux. It does not require Playwright
+or a remote-debugging port, so it works with Chrome's normal default profile.
+
 ## Perception stack
 
-Playwright owns browser launch, navigation, input, and the native viewport screenshot. AUA then
-uses the same layered perception stack as its device adapters:
+In isolated mode, Playwright owns browser launch, navigation, input, and the native viewport
+screenshot. In attached mode, Chrome's debugger API provides navigation, trusted input, a DOM
+snapshot, and the native viewport screenshot. AUA then uses the same layered perception stack as
+its device adapters:
 
 1. A DOM/ARIA snapshot supplies roles, accessible names and descriptions, visible text, state,
    stable test ids, parent relationships, and viewport-clipped bounds.
@@ -178,9 +237,9 @@ or a web config, and unsupported adapter operations retain their explicit capabi
 | `ui.tree`, `ui.input`, `ui.screenshot`, `device.logs` | app install/uninstall/lifecycle and private app files |
 | `app.links` for HTTP(S), URL-aware maps/flows, iframe DOMs, popups/tabs | device shell, recording, clipboard and location |
 | cookies, local/session storage, IndexedDB, CacheStorage, service workers | native database/datastore and feature-flag services |
-| offline, throttle, scoped CORS, context proxy, HAR and request mocks | attaching to an already-running browser or extension automation |
+| offline, throttle, scoped CORS, context proxy, HAR and request mocks in isolated mode | profile-wide storage/network controls in attached mode |
 | browser traces and shared AUA screenshots/OCR/detection/grounding | physical-device controls and native radio profiles |
-| Chromium, Firefox, WebKit; headless or headed | Chromium-only bandwidth shaping when using Firefox/WebKit |
+| Chromium, Firefox, WebKit isolated; existing Chrome/Chromium tab on macOS/Linux | Chromium-only bandwidth shaping when using Firefox/WebKit |
 
 Unsupported operations return `platform_capability_unsupported`; web never imports or falls back to
 Android tooling. Browser-only operations are declared named runtime capabilities and fail clearly
@@ -196,3 +255,5 @@ when another adapter does not provide them.
 | A control has no stable `rid:` | Add `data-testid` or an HTML `id`; text/ARIA labels still receive semantic stable keys. |
 | A service worker bypasses a mock/HAR rule | Configure `service_workers: block` for deterministic request interception. |
 | Bandwidth throttling is rejected | Use Chromium, or keep only `--latency-ms` on Firefox/WebKit. |
+| `chrome_extension_not_attached` | Start the AUA command first, then open the extension on the target tab and choose **Attach this tab**. |
+| The extension immediately detaches | Run `aua browser extension install`, restart Chrome after native-host installation, and confirm `aua browser extension status` is green. |

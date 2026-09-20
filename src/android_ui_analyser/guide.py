@@ -1689,8 +1689,12 @@ def render_markdown(*, brief: bool = False) -> str:
         "tab/frame selection and Playwright traces; MCP exposes the same Engine path. The "
         "default daemon preserves one isolated context across commands, and `session finish` "
         "restores its starting storage, URL and controls. `platforms.web.storage_state` can seed "
-        "authentication. App install/lifecycle and private native databases return "
-        "`platform_capability_unsupported`; attaching to an existing browser is not supported. "
+        "authentication. An opt-in `platforms.web.connection: existing-chrome` mode uses the "
+        "bundled extension to drive one explicitly approved tab in an already logged-in Chrome "
+        "profile; install it with `aua browser extension install`. Attached mode cannot read or "
+        "reset profile storage, change proxy/CORS/network controls, close tabs, or inspect tabs "
+        "the user did not approve. App install/lifecycle and private native databases return "
+        "`platform_capability_unsupported`. "
         "Details: `docs/web.md`."
     )
 

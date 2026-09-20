@@ -6452,6 +6452,12 @@ browser_app = typer.Typer(
 )
 app.add_typer(browser_app, name="browser")
 
+browser_extension_app = typer.Typer(
+    help="Install or inspect existing-Chrome tab attachment.",
+    no_args_is_help=True,
+)
+browser_app.add_typer(browser_extension_app, name="extension")
+
 
 def _browser_run(ctx: typer.Context, method: str, **kwargs: Any) -> None:
     # Browser state belongs to the same warm Engine that owns semantic UI actions.
@@ -6470,6 +6476,38 @@ def _browser_pairs(values: list[str], *, label: str) -> dict[str, str]:
             raise UsageError(f"{label} must be NAME=VALUE, got {value!r}")
         pairs[key.strip()] = item
     return pairs
+
+
+@browser_extension_app.command("install")
+def browser_extension_install_cmd(
+    ctx: typer.Context,
+    browser: str = typer.Option("chrome", "--browser"),
+) -> None:
+    """Install the native host and print the unpacked extension directory."""
+
+    from .chrome_extension_setup import install_chrome_extension
+
+    try:
+        _emulator_emit(install_chrome_extension(browser), ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
+
+
+@browser_extension_app.command("status")
+def browser_extension_status_cmd(
+    ctx: typer.Context,
+    browser: str = typer.Option("chrome", "--browser"),
+) -> None:
+    """Show the extension path and native-host registration state."""
+
+    from .chrome_extension_setup import chrome_extension_status
+
+    try:
+        _emulator_emit(chrome_extension_status(browser), ctx)
+    except AuaError as err:
+        emit_error(err)
+        raise typer.Exit(int(err.exit_code)) from err
 
 
 @browser_app.command("status")

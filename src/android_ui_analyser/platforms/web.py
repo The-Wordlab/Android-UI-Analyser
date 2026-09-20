@@ -14,6 +14,12 @@ from ..providers.base import ScreenImage
 from ..schema import TargetInfo, TargetStatus
 from . import web_tree
 from .base import DiscoveredTarget, NormalizedTree, PlatformAdapter
+from .chrome_extension import (
+    ATTACHED_TARGET_ID,
+    ChromeAttachOptions,
+    ChromeExtensionLauncher,
+)
+from .contracts import normalize_capability
 from .diagnostics import (
     DiagnosticEvent,
     DiagnosticLevel,
@@ -29,6 +35,10 @@ from .web_tools import PlaywrightLauncher, WebLauncher, WebLaunchOptions
 
 _BROWSERS = frozenset({"chromium", "firefox", "webkit"})
 _SERVICE_WORKERS = frozenset({"allow", "block"})
+_CONNECTIONS = frozenset({"isolated", "existing-chrome"})
+_ATTACHED_UNSAFE_CAPABILITIES = frozenset(
+    {"browser.network", "browser.storage", "browser.trace"}
+)
 
 
 def _url(value: Any, *, field: str = "url") -> str:
@@ -64,7 +74,7 @@ def _positive_int(value: Any, *, field: str) -> int:
 
 @register_platform("web")
 class WebPlatform(PlatformAdapter):
-    """One isolated browser page, with DOM semantics normalized to AUA elements."""
+    """One isolated or explicitly approved browser page normalized to AUA elements."""
 
     capabilities = frozenset(
         {
@@ -83,16 +93,38 @@ class WebPlatform(PlatformAdapter):
         }
     )
 
-    def __init__(self, config: Config, launcher: WebLauncher | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        launcher: WebLauncher | None = None,
+        extension_launcher: Any | None = None,
+    ) -> None:
         super().__init__(config)
         self._launcher = launcher or PlaywrightLauncher()
+        self._extension_launcher = extension_launcher or ChromeExtensionLauncher()
         self._uses_default_launcher = launcher is None
         self._runtimes: dict[str, WebRuntime] = {}
         self._diagnostic_marks: dict[tuple[str, str], int] = {}
 
+    def _connection_mode(self) -> str:
+        configured = self.options.get("connection")
+        if configured is None:
+            configured = self.config.platform_options(self.name).get("connection", "isolated")
+        return str(configured).strip().casefold()
+
+    def supports(self, capability: str) -> bool:
+        key = normalize_capability(capability)
+        if (
+            self._connection_mode() == "existing-chrome"
+            and key in _ATTACHED_UNSAFE_CAPABILITIES
+        ):
+            return False
+        return super().supports(key)
+
     def validate_options(self, options: Mapping[str, Any]) -> Mapping[str, Any]:
         known = {
             "url",
+            "connection",
             "browser",
             "headless",
             "channel",
@@ -109,6 +141,7 @@ class WebPlatform(PlatformAdapter):
             "proxy_bypass",
             "proxy_username",
             "proxy_password_env",
+            "attach_timeout_ms",
         }
         unknown = sorted(str(key) for key in options if key not in known)
         if unknown:
@@ -117,6 +150,13 @@ class WebPlatform(PlatformAdapter):
                 hint="See docs/web.md for the supported browser options.",
             )
         normalized: dict[str, Any] = {}
+        connection = str(options.get("connection", "isolated")).strip().casefold()
+        if connection not in _CONNECTIONS:
+            raise ConfigError(
+                f"unknown web connection {connection!r}",
+                hint="Choose isolated or existing-chrome.",
+            )
+        normalized["connection"] = connection
         if "url" in options:
             normalized["url"] = _url(options["url"])
         browser = str(options.get("browser", "chromium")).strip().casefold()
@@ -136,6 +176,7 @@ class WebPlatform(PlatformAdapter):
             ("viewport_height", 800),
             ("navigation_timeout_ms", 30_000),
             ("action_timeout_ms", 5_000),
+            ("attach_timeout_ms", 30_000),
         ):
             normalized[field] = _positive_int(options.get(field, default), field=field)
         for field in (
@@ -169,11 +210,42 @@ class WebPlatform(PlatformAdapter):
                 )
         if browser != "chromium" and "channel" in normalized:
             raise ConfigError("web option channel is supported only by chromium")
+        if connection == "existing-chrome":
+            incompatible = sorted(
+                field
+                for field in (
+                    "url",
+                    "browser",
+                    "headless",
+                    "channel",
+                    "executable_path",
+                    "viewport_width",
+                    "viewport_height",
+                    "navigation_timeout_ms",
+                    "storage_state",
+                    "ignore_https_errors",
+                    "bypass_csp",
+                    "service_workers",
+                    "proxy_server",
+                    "proxy_bypass",
+                    "proxy_username",
+                    "proxy_password_env",
+                )
+                if field in options
+            )
+            if incompatible:
+                raise ConfigError(
+                    "existing-chrome does not accept isolated-browser options: "
+                    + ", ".join(incompatible),
+                    hint="Use browser lab controls only with connection: isolated.",
+                )
         return normalized
 
     def _launch_options(self) -> WebLaunchOptions:
         values = dict(self.options)
         values.pop("url", None)
+        values.pop("connection", None)
+        values.pop("attach_timeout_ms", None)
         password_env = values.pop("proxy_password_env", None)
         if password_env is not None:
             password = os.environ.get(str(password_env))
@@ -184,8 +256,18 @@ class WebPlatform(PlatformAdapter):
             values["proxy_password"] = password
         return WebLaunchOptions(**values)
 
+    def _attach_options(self) -> ChromeAttachOptions:
+        return ChromeAttachOptions(
+            attach_timeout_ms=int(self.options.get("attach_timeout_ms", 30_000)),
+            action_timeout_ms=int(self.options.get("action_timeout_ms", 5_000)),
+        )
+
     def prepare_host(self) -> None:
-        if self._uses_default_launcher and importlib.util.find_spec("playwright") is None:
+        if (
+            self._connection_mode() != "existing-chrome"
+            and self._uses_default_launcher
+            and importlib.util.find_spec("playwright") is None
+        ):
             raise DeviceError(
                 "web support needs the optional Playwright dependency",
                 code="web_driver_missing",
@@ -193,6 +275,16 @@ class WebPlatform(PlatformAdapter):
             )
 
     def list_targets(self) -> list[DiscoveredTarget]:
+        if self._connection_mode() == "existing-chrome":
+            return [
+                TargetInfo(
+                    target_id=ATTACHED_TARGET_ID,
+                    platform=self.name,
+                    status=TargetStatus.online,
+                    model="Chrome extension",
+                    os_name="web",
+                )
+            ]
         candidate = self.options.get("url") or self.config.device.serial
         if not candidate:
             return []
@@ -208,6 +300,20 @@ class WebPlatform(PlatformAdapter):
         ]
 
     def connect(self, target_id: str | None = None) -> TargetRuntime:
+        if self._connection_mode() == "existing-chrome":
+            requested = target_id or self.config.device.serial or ATTACHED_TARGET_ID
+            if requested != ATTACHED_TARGET_ID:
+                raise DeviceError(
+                    f"existing-chrome target must be {ATTACHED_TARGET_ID!r}",
+                    code="no_target",
+                )
+            self.prepare_host()
+            connection = self._extension_launcher.launch(
+                ATTACHED_TARGET_ID, self._attach_options()
+            )
+            runtime = WebRuntime(connection, ATTACHED_TARGET_ID, home_url=connection.url)
+            self._runtimes[ATTACHED_TARGET_ID] = runtime
+            return runtime
         target = target_id or self.options.get("url")
         if not target:
             raise DeviceError(
@@ -367,6 +473,39 @@ class WebPlatform(PlatformAdapter):
         return self.diagnostic_window(runtime, lines=limit, app_id=app_id).lines
 
     def doctor_checks(self) -> dict[str, Any]:
+        if self._connection_mode() == "existing-chrome":
+            from ..chrome_extension_setup import chrome_extension_status
+
+            extension = chrome_extension_status()
+            attached_configured = self.config.device.serial in {None, ATTACHED_TARGET_ID}
+            return {
+                "platform": {
+                    "ok": True,
+                    "detail": self.name,
+                    "connection": "existing-chrome",
+                    "capabilities": sorted(
+                        capability for capability in self.capabilities if self.supports(capability)
+                    ),
+                },
+                "chrome_extension": {
+                    "ok": bool(extension["ok"]),
+                    "detail": extension["extension_path"],
+                    **(
+                        {}
+                        if extension["ok"]
+                        else {"hint": "Run `aua browser extension install`, then load it in Chrome."}
+                    ),
+                },
+                "target": {
+                    "ok": attached_configured,
+                    "detail": ATTACHED_TARGET_ID,
+                    **(
+                        {}
+                        if attached_configured
+                        else {"hint": f"Use --serial {ATTACHED_TARGET_ID} or omit --serial."}
+                    ),
+                },
+            }
         installed = importlib.util.find_spec("playwright") is not None
         configured = self.options.get("url") or self.config.device.serial
         return {

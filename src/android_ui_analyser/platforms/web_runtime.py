@@ -43,10 +43,16 @@ KEY_NAMES = frozenset(_KEYS) | {"back", "home", "refresh", "reload"}
 
 
 class WebRuntime(TargetRuntime):
-    def __init__(self, connection: WebConnection, target_url: str) -> None:
+    def __init__(
+        self,
+        connection: WebConnection,
+        target_url: str,
+        *,
+        home_url: str | None = None,
+    ) -> None:
         self.target_id = target_url
         self._connection = connection
-        self._home_url = target_url
+        self._home_url = home_url or target_url
         self._instance_token = f"web:{uuid4().hex}"
 
     def read_deadline(self, budget: read_budget.ReadBudget) -> AbstractContextManager[None]:

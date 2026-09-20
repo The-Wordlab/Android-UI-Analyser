@@ -1220,9 +1220,20 @@ providers over Playwright's native viewport screenshot for canvas or incomplete 
 `aua browser` adds console/network diagnostics, cookies and web storage, cache/session reset,
 offline/throttling, scoped CORS, context proxy, HAR record/replay, request mocks, popup/tab/frame
 inspection, and Playwright traces. URL path/query identities feed the same maps and flows, and goal
-cleanup restores the starting browser context. Current limitations include attaching to an
-existing browser and device-style app/database controls. Configuration, the exact capability
-boundary, and troubleshooting: [docs/web.md](docs/web.md).
+cleanup restores the starting browser context. A second opt-in mode can instead attach to one
+user-approved tab in an existing, logged-in Chrome profile:
+
+```bash
+aua browser extension install
+# Load the printed directory once from chrome://extensions, then configure:
+# platforms.web.connection: existing-chrome
+# device.serial: existing-chrome
+```
+
+It preserves the personal profile and detaches automatically; profile-wide storage, network,
+proxy/CORS, tracing, tab closing, and access to unapproved tabs are disabled. Device-style app
+and database controls remain unsupported. Configuration, the exact capability boundary, and
+troubleshooting: [docs/web.md](docs/web.md).
 
 ## Adding a platform adapter
 

@@ -1,0 +1,44 @@
+:root {
+  color-scheme: light dark;
+  font: 13px/1.4 system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-width: 280px;
+}
+
+main {
+  padding: 16px;
+}
+
+h1 {
+  font-size: 16px;
+  margin: 0 0 8px;
+}
+
+button {
+  background: #2563eb;
+  border: 0;
+  border-radius: 6px;
+  color: white;
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 12px;
+  width: 100%;
+}
+
+button.secondary {
+  background: #555;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.note {
+  color: #777;
+  font-size: 11px;
+  margin: 12px 0 0;
+}
