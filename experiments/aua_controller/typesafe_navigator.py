@@ -145,11 +145,14 @@ def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -
                                      "with nothing further to do?"),
     }
     if action_space == "full":
+        # Asked directly, not as "if it were scrolled..." / "if the run stopped here...".
+        # A hypothetical is a hop of indirection, and jev-1.13's documented jaggedness names
+        # indirection as a cost: "write your instructions as directly as possible".
         questions["direction"] = Choice(
-            instructions="If this screen must be scrolled, which way?",
+            instructions="Which way should this screen be scrolled to bring the goal closer?",
             criteria=dict(SCROLL_DIRECTIONS))
         questions["outcome"] = Choice(
-            instructions="If the run were to stop here, what became of the goal?",
+            instructions="What has become of the goal on this screen?",
             criteria=dict(FINISH_OUTCOMES))
     return questions
 
