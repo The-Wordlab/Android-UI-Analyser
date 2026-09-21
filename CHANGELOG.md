@@ -141,6 +141,13 @@ notes, so you can check for a newer version — and read what changed — withou
   on every screen that carried one, enough to push two ready screens back to the expensive model
   for nothing. Nothing in a URL tells a backend from a vendor, so the caller says which.
 
+- The run judge is shown what the app asked its backend, and told what it is worth. A frame's
+  `meta.network_calls` is the only evidence in a judgement that did not come off the screen, so
+  it arrives with a note: host-observed at the proxy, scoped to the app's own backend, and proof
+  that a request was sent and answered — never proof that anything rendered. A criterion about
+  what a screen shows still needs a frame that shows it. The note is attached only when some
+  frame carries the field.
+
 ### Fixed
 
 - MCP `session_start` now describes and schema-validates artifact prerequisites: `evidence=all`

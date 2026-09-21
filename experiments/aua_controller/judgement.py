@@ -360,6 +360,16 @@ def _judge_positions(compact: dict[str, Any]) -> None:
             element["center_pct"] = [round(100 * x / width, 1), round(100 * y / height, 1)]
 
 
+def _frame_network_calls(frame: Any) -> list[Any]:
+    """What a compacted frame says the app asked its backend; empty when it says nothing."""
+    if not isinstance(frame, Mapping):
+        return []
+    observation = frame.get("observation")
+    meta = observation.get("meta") if isinstance(observation, Mapping) else None
+    calls = meta.get("network_calls") if isinstance(meta, Mapping) else None
+    return list(calls) if isinstance(calls, list) else []
+
+
 def evidence_frame(result: Any, *, max_elements: int = 40, keep_ids: bool = False) -> Any:
     """Compact one raw AUA result for judgement input. Judges do not act, so ids are dropped."""
     compact = compact_frame(result, max_elements=max_elements, max_text=100, keep_ids=keep_ids)
@@ -1118,6 +1128,25 @@ async def judge_outcome(
                      "steps and screenshots; this grouping supplies evidence, not a verdict."}
             for group in transitions
         ]
+    # A frame's `network_calls` is the only evidence here that did not come off the screen, and
+    # unlabelled it reads as a stray string. On the run that prompted this, a contract clause about
+    # a saved language change came back `not_verified` -- "no frame captures the Settings screen
+    # after the change" -- while the window between two observations held
+    # `PUT /api/v4.0/user/profile -> 200`. The note is attached only when some frame carries the
+    # field, because a sentence about evidence a run does not have is paid for on every run.
+    if any(_frame_network_calls(frame) for frame in context["intermediate_frames"]) or \
+            _frame_network_calls(context["final_frame"]):
+        context["network_evidence_note"] = (
+            "meta.network_calls lists what the app asked its own backend between the previous "
+            "observation and this one, with what came back: `PUT /api/v4.0/user/profile -> 200`, "
+            "or `-> no answer yet` for a call still open at capture. It is host-observed at the "
+            "proxy, not read off the screen, and it is scoped to the app's backend only -- vendor "
+            "and analytics traffic is excluded. A status proves the app sent that request and the "
+            "server answered it; it never proves anything was rendered, drawn or visible, so a "
+            "criterion about what a screen SHOWS still needs a frame that shows it. A frame with "
+            "no such key means the app asked its backend for nothing in that window, which is "
+            "evidence that an action had no server effect, not evidence that it failed."
+        )
     if image_evidence:
         context["image_evidence"] = list(image_evidence)[:MAX_IMAGE_CHECKPOINTS]
         context["evidence_selection_note"] = (
