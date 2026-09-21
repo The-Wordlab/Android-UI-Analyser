@@ -504,6 +504,11 @@ def realapp_tools(
                 "Perform Android's left-edge back gesture and return the resulting screen; "
                 "coordinates are intentionally unavailable."
             )
+        # The description has been lifted to `function.description`, which is the field an
+        # OpenAI-shaped tool list actually shows the model. Leaving the original in place sent
+        # it twice on every call: measured on a real run, 1,970 of the tool list's 8,870
+        # characters, and the whole list is resent every step.
+        parameters = {key: value for key, value in parameters.items() if key != "description"}
         tools.append({"type": "function", "function": {"name": name, "description": description,
                                                        "parameters": parameters}})
     requested = set(capabilities)
