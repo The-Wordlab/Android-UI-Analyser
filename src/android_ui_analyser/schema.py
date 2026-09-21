@@ -525,7 +525,7 @@ class Meta(BaseModel):
     # an agent re-presses the button it already pressed. Like `screen_moved` and `stale_risk`
     # the key appearing IS the signal: absent when nothing is in the air and absent whenever no
     # proxy is running, which is most runs, so a quiet response pays nothing for it.
-    network_in_flight: list[str] | None = None
+    network_calls: list[str] | None = None
     # SHA1 of the raw hierarchy XML (or elements fingerprint for vision paths).
     fingerprint: str | None = None
     # How the result was produced (e.g. hierarchy, hierarchy-unchanged, vision).

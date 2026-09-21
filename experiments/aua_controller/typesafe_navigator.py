@@ -251,9 +251,9 @@ def screen_for_model(compact: Mapping[str, Any] | None) -> dict[str, Any]:
     # hierarchy, and told nothing about the network this model re-pressed a button it had already
     # pressed; told the login POST had not answered, it waited instead. The key is absent on a
     # quiet screen because every line of state that is not about the decision costs accuracy.
-    waiting_on = meta.get("network_in_flight")
-    if isinstance(waiting_on, list) and waiting_on:
-        out["waiting_on"] = [str(item) for item in waiting_on]
+    network = meta.get("network_calls")
+    if isinstance(network, list) and network:
+        out["network"] = [str(item) for item in network]
     return out
 
 

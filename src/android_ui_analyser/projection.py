@@ -175,7 +175,7 @@ OBSERVATION_META_PRESETS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             # screen and a finished one are the same hierarchy, so without this a caller presses
             # the button it already pressed. Same bargain as the warnings above — absent unless
             # it fires, and absent entirely unless `network.app_hosts` names a backend.
-            "network_in_flight",
+            "network_calls",
             "lossy_text",
             "lossy_hint",
             "known_screen",

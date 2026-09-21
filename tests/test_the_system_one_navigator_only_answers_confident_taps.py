@@ -733,10 +733,10 @@ def test_the_calls_still_in_the_air_reach_the_model() -> None:
     """
     screen = screen_for_model({"observation": {
         "screen": {"package": "com.example.app"},
-        "meta": {"network_in_flight": ["POST /v1/auth/login"]},
+        "meta": {"network_calls": ["POST /v1/auth/login"]},
         "elements": [{"text": "Sign in", "id": "el:abc"}],
     }})
-    assert screen["waiting_on"] == ["POST /v1/auth/login"]
+    assert screen["network"] == ["POST /v1/auth/login"]
 
 
 def test_a_quiet_screen_carries_no_network_key_at_all() -> None:
@@ -746,7 +746,7 @@ def test_a_quiet_screen_carries_no_network_key_at_all() -> None:
         "meta": {"fingerprint": "abc123"},
         "elements": [{"text": "Sign in", "id": "el:abc"}],
     }})
-    assert "waiting_on" not in screen
+    assert "network" not in screen
 
 
 def test_compaction_does_not_drop_the_calls_still_in_the_air() -> None:
@@ -757,7 +757,7 @@ def test_compaction_does_not_drop_the_calls_still_in_the_air() -> None:
     """
     compact = compact_frame({"observation": {
         "screen": {"package": "com.example.app"},
-        "meta": {"fingerprint": "abc", "network_in_flight": ["POST /v1/auth/login"]},
+        "meta": {"fingerprint": "abc", "network_calls": ["POST /v1/auth/login"]},
         "elements": [{"text": "Sign in", "id": "el:abc", "clickable": True}],
     }}, keep_ids=True)
-    assert compact["observation"]["meta"]["network_in_flight"] == ["POST /v1/auth/login"]
+    assert compact["observation"]["meta"]["network_calls"] == ["POST /v1/auth/login"]

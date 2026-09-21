@@ -120,10 +120,15 @@ notes, so you can check for a newer version — and read what changed — withou
   loop. Navigation is where a run spends its requests — tens per run against the judge's
   two — so this is the half worth making cheap.
 
-- An observation names the calls the app is still waiting on: `meta.network_in_flight` carries
-  them as `["POST /v1/auth/login"]`, recent unanswered ones only. A screen mid-load and an idle
-  screen are the same hierarchy, so an agent that pressed a button, got a screen back that looked
-  unchanged, and had nothing else to go on pressed it again — measured on a real login. Needs
+- An observation names what the app asked its own backend since the last one, and what came
+  back: `meta.network_calls` carries
+  them as `["PUT /api/v4.0/user/profile -> 200", "POST /api/v4.0/send -> no answer yet"]`. A
+  screen mid-load, a screen whose tap failed, and a screen whose tap did nothing at all are the
+  same hierarchy; this says which. Reporting only the *unanswered* calls measured to nothing on a
+  real run — that backend answers in 55 ms and AUA settles the screen before handing an
+  observation back, so 25 calls happened and none were in the air when anyone looked, while those
+  same windows held a `401` and its retry and the `PUT /user/profile -> 200` that was the change
+  under test. Needs
   `aua proxy start` and `network.app_hosts` naming the app's own backend; the key is absent when
   nothing is in the air, when no backend is named, and when no proxy is running, so a quiet
   response pays nothing for it. Only calls started in the last few seconds count, because a chat

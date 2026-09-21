@@ -333,6 +333,9 @@ class Engine:
         self._call_started_epoch_ms: int | None = None
         self._last_action_site: _ActionSite | None = None
         self._last_analyze_elements: list[Element] | None = None
+        #: Where the next observation's network window starts: the moment the last one closed.
+        #: "What did the app ask for since I last looked" is only answerable against this.
+        self._last_network_ts: float | None = None
         self._last_hierarchy_hash: str | None = None
         self._last_analyze_result: AnalyzeResult | None = None
         # Fallback scope for adapters unable to attest a target boot. Never shared with a
@@ -902,6 +905,7 @@ class Engine:
         self._last_action_kind = None
         self._last_action_site = None
         self._last_analyze_elements = None
+        self._last_network_ts = None
         self._last_hierarchy_hash = None
         self._last_analyze_result = None
         self._session_id: str | None = None

@@ -31,7 +31,18 @@ class _Journal:
         if self.broken:
             raise RuntimeError("proxy is not running")
         self.asked.append(since_ts)
-        return [e for e in self.entries if float(e.get("ts") or 0) > since_ts]
+        # The real reader pairs starts with completions; a fake that skipped that would report
+        # every answered call as still waiting and quietly agree with a broken implementation.
+        from android_ui_analyser.proxy_mock import flows_in_flight
+
+        return flows_in_flight([e for e in self.entries if float(e.get("ts") or 0) > since_ts])
+
+    def read_flows_since(self, cache_dir: Any, since_ts: float, serial: Any = None) -> list[dict]:
+        if self.broken:
+            raise RuntimeError("proxy is not running")
+        self.asked.append(since_ts)
+        return [e for e in self.entries
+                if not e.get("open") and float(e.get("ts") or 0) > since_ts]
 
 
 def _engine(tmp_path: Any, journal: _Journal, *, app_hosts: list[str] | None = None):  # noqa: ANN202
@@ -46,38 +57,51 @@ def _engine(tmp_path: Any, journal: _Journal, *, app_hosts: list[str] | None = N
     return engine
 
 
+_SEQ = iter(range(1, 10_000))
+
+
 def _open(path: str, *, method: str = "POST", ago: float = 0.2,
           host: str = "api.example.test") -> dict[str, Any]:
-    return {"flow": 1, "ts": time.time() - ago, "method": method, "path": path,
+    return {"flow": next(_SEQ), "ts": time.time() - ago, "method": method, "path": path,
             "host": host, "open": True}
+
+
+def _answered(path: str, *, status: int = 200, method: str = "POST", ago: float = 0.2,
+              host: str = "api.example.test") -> dict[str, Any]:
+    """A call that started and came back -- what the journal holds most of the time."""
+    flow = next(_SEQ)
+    return [{"flow": flow, "ts": time.time() - ago, "method": method, "path": path,
+             "host": host, "open": True},
+            {"flow": flow, "ts": time.time() - ago + 0.05, "method": method, "path": path,
+             "host": host, "status": status}]
 
 
 def test_a_call_that_has_not_answered_is_named_on_the_observation(tmp_path: Any) -> None:
     engine = _engine(tmp_path, _Journal([_open("/v1/auth/login")]), app_hosts=["example.test"])
-    assert engine_analyze.network_in_flight(engine) == ["POST /v1/auth/login"]
+    assert engine_analyze.network_calls(engine) == ["POST /v1/auth/login -> no answer yet"]
 
 
 def test_a_quiet_screen_says_nothing_at_all(tmp_path: Any) -> None:
     """`Meta` drops falsey values, so a healthy response must pay nothing for this field."""
-    assert engine_analyze.network_in_flight(_engine(tmp_path, _Journal([]))) is None
+    assert engine_analyze.network_calls(_engine(tmp_path, _Journal([]))) is None
 
 
 def test_a_proxy_that_is_not_running_is_not_an_error(tmp_path: Any) -> None:
     """Far more runs have no proxy than have one; none of them may fail because of this."""
-    assert engine_analyze.network_in_flight(_engine(tmp_path, _Journal(broken=True))) is None
+    assert engine_analyze.network_calls(_engine(tmp_path, _Journal(broken=True))) is None
 
 
 def test_a_platform_with_no_proxy_capability_is_not_an_error(tmp_path: Any) -> None:
     engine = make_engine(cache={"dir": str(tmp_path / "cache")})
-    assert engine_analyze.network_in_flight(engine) is None
+    assert engine_analyze.network_calls(engine) is None
 
 
 def test_a_connection_held_open_since_before_this_screen_is_not_reported(tmp_path: Any) -> None:
     """The streamed chat connection is open on every screen; it is not what "loading" means."""
     journal = _Journal([_open("/v1/stream", method="GET", ago=600.0), _open("/v1/auth/login")])
     engine = _engine(tmp_path, journal, app_hosts=["example.test"])
-    assert engine_analyze.network_in_flight(engine) == [
-        "POST /v1/auth/login"
+    assert engine_analyze.network_calls(engine) == [
+        "POST /v1/auth/login -> no answer yet"
     ]
     assert engine is not None
 
@@ -85,22 +109,23 @@ def test_a_connection_held_open_since_before_this_screen_is_not_reported(tmp_pat
 def test_the_window_asked_for_is_recent_not_the_whole_run(tmp_path: Any) -> None:
     journal = _Journal([])
     before = time.time()
-    engine_analyze.network_in_flight(_engine(tmp_path, journal, app_hosts=["theapp.test"]))
-    assert journal.asked and before - journal.asked[0] <= engine_analyze.IN_FLIGHT_WINDOW_S + 1
+    engine_analyze.network_calls(_engine(tmp_path, journal, app_hosts=["theapp.test"]))
+    assert journal.asked and before - journal.asked[0] <= engine_analyze.NETWORK_WINDOW_S + 1
 
 
 def test_the_journal_is_not_even_read_when_no_backend_is_named(tmp_path: Any) -> None:
     """The default costs nothing: no file is opened on any of the runs that never configure this."""
     journal = _Journal([_open("/api/v4.0/chat")])
-    assert engine_analyze.network_in_flight(_engine(tmp_path, journal)) is None
+    assert engine_analyze.network_calls(_engine(tmp_path, journal)) is None
     assert journal.asked == []
 
 
 def test_the_calls_are_named_semantically_and_carry_no_numbers(tmp_path: Any) -> None:
     """jev-1.13 is documented to read opaque and numeric values worse than semantic ones."""
     journal = _Journal([_open("/v1/auth/login"), _open("/v1/profile", method="GET")])
-    named = engine_analyze.network_in_flight(_engine(tmp_path, journal, app_hosts=["example.test"]))
-    assert named == ["POST /v1/auth/login", "GET /v1/profile"]
+    named = engine_analyze.network_calls(_engine(tmp_path, journal, app_hosts=["example.test"]))
+    assert named == ["POST /v1/auth/login -> no answer yet",
+                     "GET /v1/profile -> no answer yet"]
     assert all(isinstance(item, str) for item in named)
 
 
@@ -116,7 +141,7 @@ def test_nothing_is_reported_until_the_caller_names_their_backend(tmp_path: Any)
     have been handed back to the expensive model for nothing. Silence is the honest default.
     """
     journal = _Journal([_open("/v1/firelog/legacy/batchlog", host="crashlyticsreports-pa.googleapis.com")])
-    assert engine_analyze.network_in_flight(_engine(tmp_path, journal)) is None
+    assert engine_analyze.network_calls(_engine(tmp_path, journal)) is None
 
 
 def test_only_the_named_backend_is_reported(tmp_path: Any) -> None:
@@ -125,27 +150,27 @@ def test_only_the_named_backend_is_reported(tmp_path: Any) -> None:
         _open("/api/v4.0/chat", host="api.theapp.test"),
         _open("/v16.0/app", method="GET", host="graph.facebook.com"),
     ])
-    named = engine_analyze.network_in_flight(_engine(tmp_path, journal, app_hosts=["api.theapp.test"]))
-    assert named == ["POST /api/v4.0/chat"]
+    named = engine_analyze.network_calls(_engine(tmp_path, journal, app_hosts=["api.theapp.test"]))
+    assert named == ["POST /api/v4.0/chat -> no answer yet"]
 
 
 def test_a_named_host_covers_its_subdomains(tmp_path: Any) -> None:
     """A backend is named once and reached at several subdomains: staging, api, eu1."""
     journal = _Journal([_open("/api/v4.0/chat", host="api.staging.theapp.test")])
-    assert engine_analyze.network_in_flight(
-        _engine(tmp_path, journal, app_hosts=["theapp.test"])) == ["POST /api/v4.0/chat"]
+    assert engine_analyze.network_calls(
+        _engine(tmp_path, journal, app_hosts=["theapp.test"])) == ["POST /api/v4.0/chat -> no answer yet"]
 
 
 def test_a_named_host_does_not_match_a_lookalike(tmp_path: Any) -> None:
     """`theapp.test` must not swallow `nottheapp.test`; the boundary is a dot, not a substring."""
     journal = _Journal([_open("/api/v4.0/chat", host="nottheapp.test")])
-    assert engine_analyze.network_in_flight(
+    assert engine_analyze.network_calls(
         _engine(tmp_path, journal, app_hosts=["theapp.test"])) is None
 
 
 def test_a_call_with_no_host_is_not_guessed_at(tmp_path: Any) -> None:
     journal = _Journal([{"flow": 1, "ts": time.time(), "method": "GET", "path": "/x", "open": True}])
-    assert engine_analyze.network_in_flight(
+    assert engine_analyze.network_calls(
         _engine(tmp_path, journal, app_hosts=["theapp.test"])) is None
 
 
@@ -162,7 +187,7 @@ def test_an_action_keeps_the_field_on_its_folded_observation() -> None:
     """
     from android_ui_analyser.projection import OBSERVATION_META_PRESETS, Projection
 
-    assert "network_in_flight" in OBSERVATION_META_PRESETS["changed"]
+    assert "network_calls" in OBSERVATION_META_PRESETS["changed"]
     view = Projection.for_observation(None, meta="changed")
     assert view is not None
     kept = view.apply({
@@ -171,11 +196,11 @@ def test_an_action_keeps_the_field_on_its_folded_observation() -> None:
             "elements": [{"id": "el:a", "text": "Sign in", "clickable": True,
                           "bounds": [0, 0, 10, 10]}],
             "meta": {"fingerprint": "abc", "duration_ms": 3,
-                     "network_in_flight": ["POST /v1/auth/login"]},
+                     "network_calls": ["POST /v1/auth/login -> 200"]},
         }
     })
-    assert (kept["observation"]["meta"].get("network_in_flight")
-            == ["POST /v1/auth/login"]), kept["observation"]["meta"]
+    assert (kept["observation"]["meta"].get("network_calls")
+            == ["POST /v1/auth/login -> 200"]), kept["observation"]["meta"]
 
 
 def test_one_backend_can_be_named_from_the_environment(monkeypatch: Any) -> None:
@@ -191,3 +216,69 @@ def test_one_backend_can_be_named_from_the_environment(monkeypatch: Any) -> None
     assert load_config().network.app_hosts == ["theapp.test"]
     monkeypatch.setenv("AUA_NETWORK__APP_HOSTS", "theapp.test,other.test")
     assert load_config().network.app_hosts == ["theapp.test", "other.test"]
+
+
+# ------------------------------------ what the app asked for, and what came back
+
+def test_a_call_that_came_back_is_reported_with_its_status(tmp_path: Any) -> None:
+    """The half that was missing. Reporting only unanswered calls threw away the whole journal.
+
+    Measured on a real run of a real app: 25 backend calls across the run and not one of them was
+    unanswered at the moment an observation was taken, because that backend answers in 55 ms and
+    AUA settles the screen before handing anything back. Reported: nothing. Yet those windows held
+    a `PUT /user/messaging-tokens -> 401` and its retry, and the `PUT /user/profile -> 200` that
+    *was* the change under test -- the judge called that clause unevidenced while the proof sat in
+    the journal.
+    """
+    journal = _Journal(_answered("/api/v4.0/auth/guest", status=201))
+    assert engine_analyze.network_calls(
+        _engine(tmp_path, journal, app_hosts=["example.test"])) == ["POST /api/v4.0/auth/guest -> 201"]
+
+
+def test_an_unanswered_call_says_so_in_words(tmp_path: Any) -> None:
+    """Not a number: this model reads a status code as a label, not as arithmetic."""
+    journal = _Journal([_open("/api/v4.0/login")])
+    assert engine_analyze.network_calls(
+        _engine(tmp_path, journal, app_hosts=["example.test"])) == [
+            "POST /api/v4.0/login -> no answer yet"]
+
+
+def test_a_failure_and_its_retry_both_survive(tmp_path: Any) -> None:
+    """A 401 followed by a 200 is the app recovering; either alone tells the wrong story."""
+    journal = _Journal(_answered("/api/v4.0/user/messaging-tokens", status=401, method="PUT", ago=0.4)
+                       + _answered("/api/v4.0/user/messaging-tokens", status=200, method="PUT"))
+    assert engine_analyze.network_calls(
+        _engine(tmp_path, journal, app_hosts=["example.test"])) == [
+            "PUT /api/v4.0/user/messaging-tokens -> 401",
+            "PUT /api/v4.0/user/messaging-tokens -> 200"]
+
+
+def test_calls_are_reported_oldest_first(tmp_path: Any) -> None:
+    journal = _Journal(_answered("/api/v4.0/config", method="GET", ago=0.9)
+                       + _answered("/api/v4.0/threads", method="GET", ago=0.5)
+                       + [_open("/api/v4.0/send", ago=0.1)])
+    assert engine_analyze.network_calls(
+        _engine(tmp_path, journal, app_hosts=["example.test"])) == [
+            "GET /api/v4.0/config -> 200",
+            "GET /api/v4.0/threads -> 200",
+            "POST /api/v4.0/send -> no answer yet"]
+
+
+def test_a_tap_that_asked_the_backend_for_nothing_says_nothing(tmp_path: Any) -> None:
+    """Silence is itself an answer -- three taps in the measured run moved no traffic at all."""
+    assert engine_analyze.network_calls(_engine(tmp_path, _Journal([]), app_hosts=["example.test"])) is None
+
+
+def test_a_vendor_call_is_still_excluded_once_it_answers(tmp_path: Any) -> None:
+    journal = _Journal(_answered("/v1/firelog/legacy/batchlog", host="crashlyticsreports-pa.googleapis.com"))
+    assert engine_analyze.network_calls(
+        _engine(tmp_path, journal, app_hosts=["example.test"])) is None
+
+
+def test_the_window_starts_where_the_last_observation_ended(tmp_path: Any) -> None:
+    """"Since the last call" is the question -- not "open at this instant", which was the bug."""
+    journal = _Journal(_answered("/api/v4.0/first", ago=0.4))
+    engine = _engine(tmp_path, journal, app_hosts=["example.test"])
+    assert engine_analyze.network_calls(engine) == ["POST /api/v4.0/first -> 200"]
+    # the same call must not be reported twice: the next observation starts after this one
+    assert engine_analyze.network_calls(engine) is None

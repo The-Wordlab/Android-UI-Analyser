@@ -12,7 +12,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
@@ -50,15 +50,13 @@ QUERY_CONFIDENT = 1.0  # all salient tokens / exact phrase present
 
 
 QUERY_SOFT = 0.5  # best-effort threshold when escalation is exhausted
-#: How recently a call must have started to count as "this screen is loading". Not a tuned
-#: number -- it is the shortest window that still covers a slow login on an emulator. A window is
-#: required rather than merely tidy: a chat app holds a streamed connection open by design (see
-#: `aua guide` -> "Still not network idle: this app never is"), so reporting every unanswered call
-#: would report one on every screen forever, and a signal that is always on is not a signal.
-IN_FLIGHT_WINDOW_S = 10.0
-#: Enough to say "something is loading" without turning the state into a network log. This model
-#: is documented to lose accuracy as the state fills with material that is not about the decision.
-MAX_IN_FLIGHT = 5
+#: How far back to look when there is no previous observation to start from -- the first call of
+#: a run, or one after a pause. Not a tuned number: it is a bound on how much history a single
+#: observation may carry, so a long gap cannot dump a whole session into one frame.
+NETWORK_WINDOW_S = 30.0
+#: A safety bound, not a tuning knob. Measured windows held one to thirteen calls; this exists so
+#: a pathological one cannot bury the screen it is attached to.
+MAX_NETWORK_CALLS = 20
 
 
 class _PendingOcr(NamedTuple):
@@ -645,40 +643,63 @@ def _is_app_host(host: str, app_hosts: Sequence[str]) -> bool:
                for name in (str(h).lower().strip().rstrip(".") for h in app_hosts) if name)
 
 
-def network_in_flight(self: Engine) -> list[str] | None:
-    """Calls the app's own backend started recently and has not answered: ``"POST /v1/login"``.
+def network_calls(self: Engine) -> list[str] | None:
+    """What the app asked its own backend since the last observation, and what came back.
 
-    ``None`` rather than ``[]`` when there is nothing to say, because `Meta` drops falsey values
-    and a quiet screen must pay nothing for this field -- the key appearing *is* the signal, the
-    same contract `screen_moved` and `stale_risk` follow.
+    ``["PUT /api/v4.0/user/profile -> 200", "POST /api/v4.0/send -> no answer yet"]``.
 
-    Only the hosts `network.app_hosts` names, and by default it names none, so this says nothing
+    The first cut of this reported only the calls still unanswered, which measured to nothing at
+    all: on a real run the backend answered in 55 ms at the median and AUA settles the screen
+    before handing an observation back, so by then every call had landed. Twenty-five backend
+    calls happened and none were in the air at an observation. Meanwhile those same windows held
+    a ``PUT /user/messaging-tokens -> 401`` and its retry, and the ``PUT /user/profile -> 200``
+    that *was* the change under test -- which the judge then called unevidenced.
+
+    So the window is the gap since this engine last produced an observation, not an instant, and
+    a completed call is reported with its status. Three things a screen cannot say become
+    sayable: the tap reached the backend, it succeeded or failed, or it is still waiting. A tap
+    that moved no traffic reports nothing, which is itself the answer.
+
+    Only the hosts ``network.app_hosts`` names, and by default it names none, so this says nothing
     until a caller opts in. That default is measured rather than cautious: running the proxy
-    against a real app, every call it caught belonged to a vendor SDK -- push registration, a
-    Firebase config stream, RevenueCat, Facebook, an analytics beacon -- and none of them hold a
-    screen up. Replayed through a navigator they raised no false `wait`, but they cost confidence
-    on every screen that carried one, enough to push two ready screens back to the expensive
-    model. Nothing in a URL distinguishes a backend from a vendor, so the caller says which.
+    against a real app, fourteen of every fifteen calls belonged to a vendor SDK -- push
+    registration, a Firebase config stream, RevenueCat, Facebook, an analytics beacon -- and none
+    of them hold a screen up. Replayed through a navigator they raised no false `wait`, but cost
+    confidence on every screen that carried one, enough to push two ready screens back to the
+    expensive model. Nothing in a URL tells a backend from a vendor, so the caller says which.
 
     Needs a running proxy, which most runs do not have, so every way of not having one -- no
-    capability, no process, no journal -- is silence rather than an error. Named by method and
-    route and never by number: jev-1.13 and its kin read semantic values better than opaque ones,
-    and a duration here would invite arithmetic this class of model does not do.
+    capability, no process, no journal -- is silence rather than an error. A status is written as
+    a bare label beside the route and never turned into a duration: this class of model reads
+    ``401`` as a name, not as a number to do arithmetic on.
     """
     app_hosts = self.config.network.app_hosts
     if not app_hosts:
         return None
+    now = time.time()
+    # Since the caller last looked, but never further back than the window: the first call of a
+    # run, or one after a long pause, must not dump the whole session into one observation.
+    since = max(self._last_network_ts or 0.0, now - NETWORK_WINDOW_S)
     try:
         proxy = self.platform.capability("proxy")
-        flying = proxy.read_flows_in_flight(
-            self.config.cache.dir, time.time() - IN_FLIGHT_WINDOW_S, self._proxy_serial()
-        )
+        answered = proxy.read_flows_since(self.config.cache.dir, since, self._proxy_serial())
+        flying = proxy.read_flows_in_flight(self.config.cache.dir, since, self._proxy_serial())
     except Exception:  # no proxy capability, no proxy running, no journal yet
         return None
-    named = [f"{str(e.get('method') or '').upper()} {e.get('path') or ''}".strip()
-             for e in flying
-             if e.get("path") and _is_app_host(str(e.get("host") or ""), app_hosts)]
-    return named[:MAX_IN_FLIGHT] or None
+    self._last_network_ts = now
+    seen: list[tuple[float, str]] = []
+    for entry in answered:
+        if entry.get("path") and _is_app_host(str(entry.get("host") or ""), app_hosts):
+            seen.append((float(entry.get("ts") or 0), _named(entry, str(entry.get("status")))))
+    for entry in flying:
+        if entry.get("path") and _is_app_host(str(entry.get("host") or ""), app_hosts):
+            seen.append((float(entry.get("ts") or 0), _named(entry, "no answer yet")))
+    ordered = [text for _, text in sorted(seen, key=lambda pair: pair[0])]
+    return ordered[:MAX_NETWORK_CALLS] or None
+
+
+def _named(entry: Mapping[str, Any], outcome: str) -> str:
+    return f"{str(entry.get('method') or '').upper()} {entry.get('path') or ''} -> {outcome}".strip()
 
 
 def analyze(
@@ -1097,7 +1118,7 @@ def _analyze_screen(
             unchanged=False,
             fingerprint=fp,
             via=path.value if hasattr(path, "value") else str(path),
-            network_in_flight=network_in_flight(self),
+            network_calls=network_calls(self),
         ),
     )
     if xml_hash:
@@ -1388,7 +1409,7 @@ def _finish_query(
             annotated_image=annotated,
             device_serial=device.serial,
             device_locale=device.device_locale(),
-            network_in_flight=network_in_flight(self),
+            network_calls=network_calls(self),
         ),
     )
     if not no_cache:
