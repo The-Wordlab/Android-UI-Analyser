@@ -457,3 +457,100 @@ def test_bracket_and_dot_json_paths_both_reach_the_same_field(
     patched = json.loads(flow.response.text)
     assert patched["items"][0]["title"] == "prefixed"
     assert "cursor" not in patched["meta"]
+
+
+# ------------------------------------------------------- calls that have not answered yet
+
+
+def _begin(addon, *, method="GET", path="/", host="api.example.com", body=""):
+    """Start an exchange and leave it hanging, the way a request in flight really is."""
+    flow = _Flow(_Request(method=method, path=path, host=host, text=body))
+    addon.request(flow)
+    return flow
+
+
+def _finish(addon, flow, upstream=None):
+    flow.response = upstream if upstream is not None else _Response(200, text="{}")
+    addon.response(flow)
+    return flow
+
+
+def test_a_call_that_has_not_answered_yet_is_reported_as_in_flight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The whole point: a screen mid-load is indistinguishable from an idle one without this.
+
+    The journal only ever held completed exchanges, so an agent reading it during a login saw
+    nothing at all and pressed the button again.
+    """
+    addon = _load(monkeypatch, tmp_path)
+    _begin(addon, method="POST", path="/v1/auth/login")
+    flying = pm.read_flows_in_flight(tmp_path, 0)
+    assert [(e["method"], e["path"]) for e in flying] == [("POST", "/v1/auth/login")]
+
+
+def test_a_call_that_answered_is_no_longer_in_flight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    addon = _load(monkeypatch, tmp_path)
+    flow = _begin(addon, method="POST", path="/v1/auth/login")
+    _finish(addon, flow)
+    assert pm.read_flows_in_flight(tmp_path, 0) == []
+    assert [(e["method"], e["path"], e["status"]) for e in pm.read_flows_since(tmp_path, 0)] == [
+        ("POST", "/v1/auth/login", 200)
+    ]
+
+
+def test_two_identical_calls_are_tracked_apart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Pairing on method and path alone would call both finished when one answered."""
+    addon = _load(monkeypatch, tmp_path)
+    first = _begin(addon, method="GET", path="/v1/feed")
+    _begin(addon, method="GET", path="/v1/feed")
+    _finish(addon, first)
+    assert len(pm.read_flows_in_flight(tmp_path, 0)) == 1
+
+
+def test_an_in_flight_call_older_than_the_window_is_not_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`since_ts` is what makes this "since the last action" rather than "since the run began"."""
+    addon = _load(monkeypatch, tmp_path)
+    _begin(addon, method="GET", path="/v1/old")
+    cutoff = pm.read_flows_in_flight(tmp_path, 0)[0]["ts"]
+    _begin(addon, method="GET", path="/v1/new")
+    flying = pm.read_flows_in_flight(tmp_path, cutoff)
+    assert [e["path"] for e in flying] == ["/v1/new"]
+
+
+def test_no_proxy_means_no_calls_and_no_crash(tmp_path: Path) -> None:
+    """Every caller runs with the proxy off far more often than on."""
+    assert pm.read_flows_in_flight(tmp_path, 0) == []
+    assert pm.read_flows_since(tmp_path, 0) == []
+    assert pm.flows_in_flight([]) == []
+
+
+def test_the_open_record_carries_no_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same reason the completed record carries none: this file is polled in a loop."""
+    addon = _load(monkeypatch, tmp_path)
+    _begin(addon, method="POST", path="/v1/chat", body="y" * 5000)
+    raw = pm.flow_log_path(tmp_path).read_text(encoding="utf-8")
+    assert "yyyy" not in raw
+    assert len(raw) < 500
+
+
+def test_the_completed_log_never_shows_a_call_still_in_the_air(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`net:` awaits, `mock list` and the dashboard all read this list as finished exchanges.
+
+    An unanswered one has no status and no rule, so letting it through here would read as a
+    flow that completed with status 0 and no rule armed.
+    """
+    addon = _load(monkeypatch, tmp_path)
+    _begin(addon, method="POST", path="/v1/auth/login")
+    assert pm.read_flows_since(tmp_path, 0) == []
+    assert len(pm.read_flows_in_flight(tmp_path, 0)) == 1

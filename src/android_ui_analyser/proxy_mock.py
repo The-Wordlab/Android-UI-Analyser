@@ -20,6 +20,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +96,10 @@ _TEXT_TYPES = (
 # living there would be lost the next time a rule was added.
 _APPLIED = {}
 _SEQ = [0]
+# Assigned when a request starts, so the record written then and the record written at
+# completion name the same exchange. `_SEQ` counts completions and cannot: two identical calls
+# in flight at once would pair to whichever answered first.
+_FLOW_SEQ = [0]
 
 
 def _doc():
@@ -325,6 +330,21 @@ def _snippet(message):
 
 class AuaMock:
     def request(self, flow: http.HTTPFlow) -> None:
+        # Written before anything can rewrite or stub the flow, so a request that dies in this
+        # addon still shows up as started. A reader pairs it with the completion record by
+        # `flow`; an unpaired one is still in the air.
+        _FLOW_SEQ[0] += 1
+        flow.metadata["aua_flow"] = _FLOW_SEQ[0]
+        if str(_FLOW_LOG_PATH):
+            _append(_FLOW_LOG_PATH, {
+                "flow": _FLOW_SEQ[0],
+                "ts": time.time(),
+                "method": flow.request.method.upper(),
+                "path": flow.request.path.split("?", 1)[0],
+                "host": flow.request.host,
+                "open": True,
+            })
+
         rule = _pick(flow, "stub")
         if rule is not None:
             _consume(rule)
@@ -352,6 +372,7 @@ class AuaMock:
         status = flow.response.status_code if flow.response else 0
         summary = {
             "n": seq,
+            "flow": flow.metadata.get("aua_flow"),
             "ts": time.time(),
             "method": flow.request.method.upper(),
             "path": flow.request.path.split("?", 1)[0],
@@ -555,6 +576,25 @@ def read_flows_since(
 ) -> list[dict[str, Any]]:
     """One target's completed exchanges logged after *since_ts* (epoch seconds).
 
+    Completed only, which is what `net:` awaits, `mock list` and the dashboard all assume: an
+    exchange that has not answered carries no status and no rule, and letting one through here
+    would show up as a phantom flow with neither. `read_flows_in_flight` is the other half.
+    """
+    return [entry for entry in _read_journal(cache_dir, since_ts, serial) if not entry.get("open")]
+
+
+def read_flows_in_flight(
+    cache_dir: str | Path, since_ts: float, serial: str | None = None
+) -> list[dict[str, Any]]:
+    """One target's exchanges that started after *since_ts* and have not answered."""
+    return flows_in_flight(_read_journal(cache_dir, since_ts, serial))
+
+
+def _read_journal(
+    cache_dir: str | Path, since_ts: float, serial: str | None = None
+) -> list[dict[str, Any]]:
+    """Every journal line after *since_ts*, started and completed alike.
+
     Tolerates partial trailing lines: the proxy appends while we read.
     """
     path = _existing(flow_log_path(cache_dir, serial), flow_log_path(cache_dir))
@@ -602,6 +642,24 @@ def read_flows_since(
     except OSError:
         return []
     return out
+
+
+def flows_in_flight(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The exchanges in *entries* that started and have not answered, oldest first.
+
+    A screen that is mid-load looks exactly like an idle one in the hierarchy, and until now the
+    journal could not tell them apart either: it held completed exchanges only, so an agent
+    reading it during a login saw an empty list and pressed the button a second time.
+
+    Pairing is on the addon's ``flow`` id rather than on method and path, because two identical
+    calls are ordinary -- a list and its refresh -- and pairing on the route would call both
+    finished the moment either answered. Entries the caller has already narrowed by timestamp
+    stay narrowed: an exchange whose completion record falls outside that window simply has no
+    open record to pair with and is not reported.
+    """
+    answered = {entry.get("flow") for entry in entries if not entry.get("open")}
+    return [entry for entry in entries
+            if entry.get("open") and entry.get("flow") not in answered]
 
 
 def flow_matches(entry: dict[str, Any], spec: str) -> bool:
