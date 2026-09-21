@@ -68,7 +68,16 @@ SCROLL_DIRECTIONS: dict[str, str] = {
     "down": "Move further down this screen to reveal what is below",
     "up": "Move back up this screen to reveal what is above",
 }
+#: `in_progress` is not one of the harness's finish outcomes and is never passed to one. It is
+#: here because the other four describe a *finished* run, and on a step in the middle of one none
+#: of them is true -- so the model had to answer something anyway. Measured over 10 saved screens
+#: from a real run, it answered `blocked` on 6 of them, with blocked probability between 0.41 and
+#: 0.81 while nothing whatsoever was blocking the run. Worse, on the step that finally chose
+#: `done`, `blocked` was outscoring `achieved` 0.41 to 0.35 -- one coin flip from recording a
+#: working run as blocked. Adding the true option drained it: `in_progress` on 9 of 10 at 0.78 to
+#: 1.00, and blocked fell to 0.00-0.05 everywhere.
 FINISH_OUTCOMES: dict[str, str] = {
+    "in_progress": "The run is still working toward the goal; it is neither finished nor stopped",
     "achieved": "The goal was carried out during this run",
     "already_satisfied": "The goal was already true when the run started; nothing was needed",
     "blocked": "Something outside the goal stops it being carried out",
@@ -93,6 +102,8 @@ ACTION_KINDS: dict[str, str] = {
 }
 #: Chosen to be declined. They carry no tool and exist so a boundary case has a home.
 NON_ACTIONS = ("wait", "blocked")
+#: The outcome that means "do not finish". Never a `session_finish` argument.
+UNFINISHED = "in_progress"
 
 
 def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTIONS) -> dict[str, str]:
@@ -134,9 +145,13 @@ def plain(value: Any) -> Any:
         return [plain(v) for v in value]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
-    return {key: plain(getattr(value, key)) for key in
-            ("choice", "confidence", "probabilities", "noul", "expectation", "legend")
-            if hasattr(value, key)} or str(value)
+    fields = getattr(value, "__dict__", None)
+    if isinstance(fields, Mapping) and fields:
+        return {str(k): plain(v) for k, v in fields.items() if not str(k).startswith("_")}
+    named = {key: plain(getattr(value, key)) for key in
+             ("choice", "confidence", "probabilities", "noul", "expectation", "legend")
+             if hasattr(value, key)}
+    return named or str(value)
 
 
 def tool_names(tools: Sequence[Any]) -> set[str]:
@@ -333,13 +348,18 @@ class TypeSafeNavigator:
             "request_ms": round(elapsed_ms, 1),
             "input_tokens": tokens,
             "usd": round(tokens * USD_PER_INPUT_TOKEN, 9),
-            "model": self.model,
-            "state": state,
-            "questions": {name: plain(question)
-                          for name, question in build_questions(
-                              options, action_space=self.action_space).items()},
+            # The request body verbatim, in the shape the SDK puts on the wire: state, model and
+            # the questions as they serialise. Anything trimmed or prettified here is a step a
+            # reader cannot check, which defeats the point of keeping it.
+            "request": {
+                "model": self.model,
+                "state": state,
+                "questions": {name: plain(question)
+                              for name, question in build_questions(
+                                  options, action_space=self.action_space).items()},
+            },
+            "response": plain(response),
             "menu": numbered(options)[0],
-            "answers": {name: plain(answer) for name, answer in response.answers.items()},
         })
         action, target = response.answers["action"], response.answers["target"]
         record = {
@@ -438,6 +458,11 @@ class TypeSafeNavigator:
             if outcome is None:
                 self._decline("no_outcome")
                 return None
+            if outcome.choice == UNFINISHED:
+                # It asked to stop and said the goal is not finished. Those cannot both be acted
+                # on, and the contradiction is exactly the kind of step the chat model should own.
+                self._decline("done_but_unfinished")
+                return None
             # No note: it is free text, and a fabricated one would reach the judge as evidence.
             return (FINISH_TOOL, {"outcome": outcome.choice}, outcome.choice,
                     outcome.confidence, f"finish as {outcome.choice}")
@@ -475,4 +500,4 @@ class TypeSafeNavigator:
 __all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered",
            "MODEL", "MIN_CONFIDENCE",
            "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "SCROLL_DIRECTIONS",
-           "FINISH_OUTCOMES", "build_questions", "candidates", "tool_names"]
+           "FINISH_OUTCOMES", "UNFINISHED", "build_questions", "candidates", "tool_names"]

@@ -71,6 +71,16 @@ notes, so you can check for a newer version — and read what changed — withou
   shared map surface, and goal cleanup restores the browser session baseline.
 
 ## [0.29.0] - 2026-09-18
+- The System One navigator's `outcome` question gains an `in_progress` option. The other four
+  outcomes all describe a run that has *stopped*, so on any step in the middle of one none of
+  them was true and the model had to answer something regardless. Measured on ten saved screens
+  from a real run it answered `blocked` on six, with blocked probability between 0.41 and 0.81
+  while nothing was blocking the run — and on the step that chose to finish, `blocked` was
+  outscoring `achieved` 0.41 to 0.35. Offering the true option drained it: `in_progress` on nine
+  of ten at 0.78–1.00 confidence, blocked down to 0.00–0.05. `in_progress` is never passed to
+  `session_finish`; asking to stop while reporting the goal unfinished is a contradiction and the
+  step goes back to the controller model.
+
 - A System One navigator run now writes `controller/system-one-turns.jsonl` beside the chat
   model's own `model-turns.jsonl`: one object per call holding the state sent, the questions
   asked, the raw answers with their probability distributions, the latency, the input tokens and

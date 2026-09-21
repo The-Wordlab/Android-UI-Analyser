@@ -385,10 +385,12 @@ def test_every_call_is_written_to_the_transcript_with_its_cost(tmp_path) -> None
     entry = json.loads(path.read_text().strip())
     assert entry["call"] == 1
     assert entry["menu"] == {"1": "Notifications", "2": "Privacy"}
-    assert entry["state"]["this_is_the_new_screen"]["elements"]
-    assert set(entry["questions"]) == {"action", "target", "settled"}
-    assert entry["answers"]["action"]["choice"] == "tap"
-    assert entry["answers"]["target"]["confidence"] == 0.95
+    # The request is kept in the shape it goes out in, not a summary of it.
+    assert set(entry["request"]) == {"model", "state", "questions"}
+    assert entry["request"]["state"]["this_is_the_new_screen"]["elements"]
+    assert set(entry["request"]["questions"]) == {"action", "target", "settled"}
+    assert entry["response"]["answers"]["action"]["choice"] == "tap"
+    assert entry["response"]["answers"]["target"]["confidence"] == 0.95
     assert entry["input_tokens"] == 430
     assert entry["usd"] == pytest.approx(430 * 42 / 1e9)
     assert navigator.report()["usd"] == pytest.approx(430 * 42 / 1e9)
@@ -399,3 +401,22 @@ def test_a_run_without_a_transcript_path_writes_nothing_and_still_works(tmp_path
     assert asyncio.run(navigator(SCREEN)) is not None
     assert navigator.report()["transcript"] is None
     assert not list(tmp_path.iterdir())
+
+
+def test_finishing_while_the_goal_is_unfinished_is_refused() -> None:
+    # The four finish outcomes all describe a run that has stopped, so on a step in the middle of
+    # one none of them is true and the model answered `blocked` on 6 of 10 real screens with
+    # nothing blocking anything. `in_progress` gives the truth somewhere to go -- and asking to
+    # stop while reporting the goal unfinished is a contradiction, not a decision to act on.
+    action, navigator = wide(WideClient(kind="done", outcome="in_progress"))
+    assert action is None
+    assert navigator.report()["declined"] == {"done_but_unfinished": 1}
+
+
+def test_in_progress_is_offered_but_is_never_a_finish_argument() -> None:
+    from experiments.aua_controller.typesafe_navigator import FINISH_OUTCOMES, UNFINISHED
+
+    assert UNFINISHED in FINISH_OUTCOMES, "the model must be able to say it is mid-run"
+    action, _ = wide(WideClient(kind="done", outcome="achieved"))
+    assert action["arguments"]["outcome"] != UNFINISHED
+    assert action["arguments"] == {"outcome": "achieved"}
