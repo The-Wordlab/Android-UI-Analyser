@@ -350,9 +350,7 @@ def test_device_runtime_status_reports_lease_and_idle_watchdog(tmp_path: Path) -
         tmp_path,
         serial,
         now=now,
-        supervision=android_supervision.target_supervision_status(
-            serial, cache_dir=tmp_path
-        ),
+        supervision=android_supervision.target_supervision_status(serial, cache_dir=tmp_path),
     )
 
     assert runtime["lease"]["held"] is True
@@ -386,9 +384,7 @@ def test_device_runtime_status_reports_lease_and_idle_watchdog(tmp_path: Path) -
         tmp_path,
         serial,
         now=now,
-        supervision=android_supervision.target_supervision_status(
-            serial, cache_dir=tmp_path
-        ),
+        supervision=android_supervision.target_supervision_status(serial, cache_dir=tmp_path),
     )
     assert disabled["watchdog"]["enabled"] is False
     assert disabled["watchdog"]["running"] is False
@@ -835,9 +831,7 @@ def test_dashboard_navigation_actions_use_the_shared_daemon_engine_path(
 
     monkeypatch.setattr(state, "_inspection_daemon_call", fake_call)
 
-    goto = state.navigation_operation(
-        "goto", {"serial": "emulator-5554", "target": "Settings"}
-    )
+    goto = state.navigation_operation("goto", {"serial": "emulator-5554", "target": "Settings"})
     assert goto["result"]["arrived"] is True
 
     with pytest.raises(UsageError, match="confirm this navigation-library action"):
@@ -965,9 +959,7 @@ def test_dashboard_clear_journal_removes_compact_details_and_rotations(tmp_path:
 
     assert result["deleted"] == 8
     assert not any(
-        path.exists()
-        for root in roots
-        for path in (root, root.with_suffix(root.suffix + ".1"))
+        path.exists() for root in roots for path in (root, root.with_suffix(root.suffix + ".1"))
     )
 
 
@@ -1327,7 +1319,9 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
             "final agent response"
         )
 
-        with urllib.request.urlopen(root_url + "api/devices", timeout=_LOCAL_HTTP_TIMEOUT_S) as response:
+        with urllib.request.urlopen(
+            root_url + "api/devices", timeout=_LOCAL_HTTP_TIMEOUT_S
+        ) as response:
             devices = json.loads(response.read())
         assert devices["mode"] == "detail"
         assert [device["serial"] for device in devices["devices"]] == ["emulator-5554"]
@@ -1342,11 +1336,15 @@ def test_dashboard_journal_detail_is_token_protected_and_serial_scoped(
         assert not_found.value.code == 400
 
         with pytest.raises(urllib.error.HTTPError) as events_out_of_scope:
-            urllib.request.urlopen(root_url + "api/events?serial=emulator-9999&limit=1", timeout=_LOCAL_HTTP_TIMEOUT_S)
+            urllib.request.urlopen(
+                root_url + "api/events?serial=emulator-9999&limit=1", timeout=_LOCAL_HTTP_TIMEOUT_S
+            )
         assert events_out_of_scope.value.code == 400
 
         with pytest.raises(urllib.error.HTTPError) as logs_out_of_scope:
-            urllib.request.urlopen(root_url + "api/logcat?serial=emulator-9999", timeout=_LOCAL_HTTP_TIMEOUT_S)
+            urllib.request.urlopen(
+                root_url + "api/logcat?serial=emulator-9999", timeout=_LOCAL_HTTP_TIMEOUT_S
+            )
         assert logs_out_of_scope.value.code == 400
 
         injected_serial = root_url + "?serial=%27%3BglobalThis.SERIAL_XSS%3Dtrue%3B%2F%2F"
@@ -2119,3 +2117,64 @@ def test_the_proxy_panel_reads_only_its_own_device(tmp_path: Path) -> None:
     state.proxy_flow_detail(1, None, "emulator-5554")
     assert svc.flow_reads == ["emulator-5554"]
     assert svc.body_reads == ["emulator-5554"]
+
+
+def test_map_payload_carries_each_screen_layout_tree_and_the_page_draws_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    from android_ui_analyser import flows as flows_mod
+    from android_ui_analyser import memory as memory_mod
+
+    tree = 'orders\n├─ ↕ order_list @y440 1080×1660\n└─ ◉★ "Home" [bottom] 360×240\n'
+    screen = SimpleNamespace(
+        name="orders",
+        id="screen-orders",
+        canonical_name="orders",
+        logical_name="orders",
+        aliases=[],
+        activity=None,
+        visit_count=2,
+        stale=False,
+        context_id="default",
+        surface="native",
+        tier="hierarchy",
+        anchors=[],
+        notes=[],
+        last_verified="2026-09-22T09:00:00Z",
+        layout=tree,
+    )
+    app = SimpleNamespace(label=None, description=None, screens={"orders": screen}, routes=[])
+
+    class FakeFlowStore:
+        def __init__(self, _config: Any, **_kwargs: Any) -> None:
+            pass
+
+        def list(self) -> list[dict[str, Any]]:
+            return []
+
+    class FakeAppMemoryStore:
+        def __init__(self, _config: Any, **_kwargs: Any) -> None:
+            pass
+
+        def load(self, package: str) -> Any:
+            return app
+
+        def list_apps(self) -> list[str]:
+            return ["com.example.shop"]
+
+    monkeypatch.setattr(flows_mod, "FlowStore", FakeFlowStore)
+    monkeypatch.setattr(memory_mod, "AppMemoryStore", FakeAppMemoryStore)
+    state = _dashboard_state(tmp_path)
+    monkeypatch.setattr(state, "foreground_package", lambda _serial: "com.example.shop")
+
+    payload = state.map_payload("emulator-5554")
+    assert payload["screens"][0]["layout"] == tree
+
+    # Page-shape guard: the screen card renders the tree as preformatted text, not JSON.
+    from android_ui_analyser import dashboard as dash
+
+    html = dash._DASHBOARD_HTML
+    assert "knowledgeTree(screen.layout)" in html
+    assert ".knowledge-tree {" in html and "white-space: pre;" in html
