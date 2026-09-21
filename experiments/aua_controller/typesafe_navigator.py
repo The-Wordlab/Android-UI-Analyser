@@ -154,6 +154,33 @@ def plain(value: Any) -> Any:
     return named or str(value)
 
 
+def what_happened(result: Any, moved: bool) -> str:
+    """Say what the last action did, in the terms that separate progress from a redraw.
+
+    "screen changed" was a boolean off the fingerprint, so a button losing its label while a
+    login was in flight read exactly like arriving somewhere new. Observed live: the tap on the
+    sign-in button left the activity unchanged and swapped 2 of 32 controls -- AUA settled it and
+    reported a change -- and the navigator, told only that the screen had changed, pressed the
+    same button again. The frame already carries what actually happened; it was being thrown away
+    by compaction before anyone read it.
+    """
+    if not moved:
+        return "SCREEN DID NOT CHANGE"
+    change = result.get("change") if isinstance(result, Mapping) else None
+    diff = result.get("action_diff_summary") if isinstance(result, Mapping) else None
+    if isinstance(change, Mapping) and change.get("activity_changed") is True:
+        return "a different screen opened"
+    if isinstance(diff, Mapping):
+        # A control swapped for another counts once, not twice: it is one slot that differs.
+        moved_count = max(int(diff.get("added") or 0), int(diff.get("removed") or 0))
+        total = int(diff.get("curr_count") or 0)
+        if total and moved_count * 4 <= total:
+            # Same screen, a handful of controls redrawn: a spinner, a label, a disabled button.
+            return (f"the SAME screen redrew -- only {moved_count} of {total} controls changed, "
+                    "which usually means it is still working on the last action")
+    return "screen changed"
+
+
 def tool_names(tools: Sequence[Any]) -> set[str]:
     """Accept the offered tools however the caller holds them.
 
@@ -311,9 +338,8 @@ class TypeSafeNavigator:
         # Close the previous turn now that its result is on screen: whether the chosen action
         # moved anything is the single most useful fact about it.
         if self._pending is not None:
-            self._pending["what_happened"] = (
-                "SCREEN DID NOT CHANGE" if fingerprint == self._last_fingerprint else "screen changed"
-            )
+            self._pending["what_happened"] = what_happened(
+                result, moved=fingerprint != self._last_fingerprint)
             self._journey.append(self._pending)
             self._pending = None
         self._last_fingerprint = fingerprint if isinstance(fingerprint, str) else None
@@ -500,4 +526,4 @@ class TypeSafeNavigator:
 __all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered",
            "MODEL", "MIN_CONFIDENCE",
            "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "SCROLL_DIRECTIONS",
-           "FINISH_OUTCOMES", "UNFINISHED", "build_questions", "candidates", "tool_names"]
+           "FINISH_OUTCOMES", "UNFINISHED", "build_questions", "what_happened", "candidates", "tool_names"]

@@ -420,3 +420,44 @@ def test_in_progress_is_offered_but_is_never_a_finish_argument() -> None:
     action, _ = wide(WideClient(kind="done", outcome="achieved"))
     assert action["arguments"]["outcome"] != UNFINISHED
     assert action["arguments"] == {"outcome": "achieved"}
+
+
+def test_a_new_activity_is_reported_as_a_different_screen() -> None:
+    from experiments.aua_controller.typesafe_navigator import what_happened
+
+    assert what_happened({"change": {"activity_changed": True}}, moved=True) == \
+        "a different screen opened"
+
+
+def test_a_handful_of_redrawn_controls_is_not_reported_as_progress() -> None:
+    # Observed live: tapping sign-in left the activity alone and swapped 2 of 32 controls while
+    # the login was in flight. Told only "screen changed", the navigator pressed sign-in again.
+    from experiments.aua_controller.typesafe_navigator import what_happened
+
+    said = what_happened({"change": {"activity_changed": False},
+                          "action_diff_summary": {"added": 2, "removed": 2, "curr_count": 32}},
+                         moved=True)
+    assert "SAME screen redrew" in said and "2 of 32" in said
+    assert "still working" in said, "the model needs the reason, not just the count"
+
+
+def test_a_wholesale_replacement_is_still_ordinary_progress() -> None:
+    from experiments.aua_controller.typesafe_navigator import what_happened
+
+    said = what_happened({"change": {"activity_changed": False},
+                          "action_diff_summary": {"added": 33, "removed": 40, "curr_count": 52}},
+                         moved=True)
+    assert said == "screen changed"
+
+
+def test_an_unmoved_screen_still_says_so_whatever_the_frame_carries() -> None:
+    from experiments.aua_controller.typesafe_navigator import what_happened
+
+    assert what_happened({"change": {"activity_changed": True}}, moved=False) == \
+        "SCREEN DID NOT CHANGE"
+
+
+def test_a_frame_without_change_telemetry_falls_back_to_the_old_wording() -> None:
+    from experiments.aua_controller.typesafe_navigator import what_happened
+
+    assert what_happened({}, moved=True) == "screen changed"

@@ -71,6 +71,15 @@ notes, so you can check for a newer version — and read what changed — withou
   shared map surface, and goal cleanup restores the browser session baseline.
 
 ## [0.29.0] - 2026-09-18
+- The System One navigator's journey now says what an action actually did instead of whether the
+  screen fingerprint moved. "screen changed" was a boolean, so a button losing its label while a
+  login was in flight read exactly like arriving somewhere new — and the navigator, told only
+  that, pressed the same button again. The frame already carried the difference (same activity,
+  2 of 32 controls redrawn, against a wholesale replacement) and compaction was dropping it before
+  anyone read it. Replayed on the real step, confidence fell from 0.86 to 0.63 — below the default
+  gate, so the step goes to the controller model — while the steps that were genuine progress
+  stayed at 0.96 and 0.99.
+
 - The System One navigator's `outcome` question gains an `in_progress` option. The other four
   outcomes all describe a run that has *stopped*, so on any step in the middle of one none of
   them was true and the model had to answer something regardless. Measured on ten saved screens
