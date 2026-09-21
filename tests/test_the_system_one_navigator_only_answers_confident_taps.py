@@ -18,11 +18,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from experiments.aua_controller.compaction import compact_frame  # noqa: E402
 from experiments.aua_controller.typesafe_navigator import (  # noqa: E402
     TAP_TOOL,
     TypeSafeNavigator,
     candidates,
     numbered,
+    screen_for_model,
 )
 
 SCREEN = {
@@ -718,3 +720,44 @@ def test_the_finish_outcomes_still_match_the_harness_they_are_sent_to() -> None:
 
     assert set(FINISH_OUTCOMES) - {UNFINISHED} == set(HARNESS)
     assert UNFINISHED not in HARNESS, "it is not a verdict the harness can record"
+
+
+# --------------------------------------------------- what the app is still waiting on
+
+
+def test_the_calls_still_in_the_air_reach_the_model() -> None:
+    """Without this the model cannot tell a loading screen from a finished one.
+
+    On the real step it got wrong, being told the login POST had not answered moved it from
+    `tap` at 0.92 to `wait` at 0.72 -- the same screen, the same menu, one extra line of state.
+    """
+    screen = screen_for_model({"observation": {
+        "screen": {"package": "com.example.app"},
+        "meta": {"network_in_flight": ["POST /v1/auth/login"]},
+        "elements": [{"text": "Sign in", "id": "el:abc"}],
+    }})
+    assert screen["waiting_on"] == ["POST /v1/auth/login"]
+
+
+def test_a_quiet_screen_carries_no_network_key_at_all() -> None:
+    """Every token of state that is not about the decision costs accuracy on this model."""
+    screen = screen_for_model({"observation": {
+        "screen": {"package": "com.example.app"},
+        "meta": {"fingerprint": "abc123"},
+        "elements": [{"text": "Sign in", "id": "el:abc"}],
+    }})
+    assert "waiting_on" not in screen
+
+
+def test_compaction_does_not_drop_the_calls_still_in_the_air() -> None:
+    """`META_FIELDS` is an allowlist, so a new field is invisible until it is named there.
+
+    This is exactly how the `checked` flag went missing: the engine reported it, compaction
+    dropped it, and a contract bullet about a switch could never be verified.
+    """
+    compact = compact_frame({"observation": {
+        "screen": {"package": "com.example.app"},
+        "meta": {"fingerprint": "abc", "network_in_flight": ["POST /v1/auth/login"]},
+        "elements": [{"text": "Sign in", "id": "el:abc", "clickable": True}],
+    }}, keep_ids=True)
+    assert compact["observation"]["meta"]["network_in_flight"] == ["POST /v1/auth/login"]

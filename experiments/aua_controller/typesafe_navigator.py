@@ -238,6 +238,7 @@ def screen_for_model(compact: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(observation, Mapping):
         return {}
     screen = observation.get("screen") if isinstance(observation.get("screen"), Mapping) else {}
+    meta = observation.get("meta") if isinstance(observation.get("meta"), Mapping) else {}
     elements = []
     for element in observation.get("elements") or []:
         if not isinstance(element, Mapping):
@@ -245,7 +246,15 @@ def screen_for_model(compact: Mapping[str, Any] | None) -> dict[str, Any]:
         kept = {key: element[key] for key in READABLE if element.get(key) not in (None, "")}
         if kept:
             elements.append(kept)
-    return {"app": screen.get("package"), "elements": elements}
+    out: dict[str, Any] = {"app": screen.get("package"), "elements": elements}
+    # Only when there is something to say. A screen mid-load and an idle screen are the same
+    # hierarchy, and told nothing about the network this model re-pressed a button it had already
+    # pressed; told the login POST had not answered, it waited instead. The key is absent on a
+    # quiet screen because every line of state that is not about the decision costs accuracy.
+    waiting_on = meta.get("network_in_flight")
+    if isinstance(waiting_on, list) and waiting_on:
+        out["waiting_on"] = [str(item) for item in waiting_on]
+    return out
 
 
 def tool_names(tools: Sequence[Any]) -> set[str]:

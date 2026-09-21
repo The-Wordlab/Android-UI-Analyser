@@ -18,7 +18,11 @@ ELEMENT_FIELDS = (
     "clickable", "editable", "checked", "selected", "scrollable", "focused", "window",
 )
 STATE_FLAGS = ("clickable", "editable", "scrollable")
-META_FIELDS = ("fingerprint", "stale_risk", "changed", "known_screen", "arrival_state")
+META_FIELDS = ("fingerprint", "stale_risk", "changed", "known_screen", "arrival_state",
+               # What the app asked for and has not been answered. A loading screen and a
+               # finished one are the same hierarchy; this is the only field that separates
+               # them, so dropping it here would hide the whole signal.
+               "network_in_flight")
 TOP_FIELDS = ("ok", "code", "error", "errors", "warnings", "finished", "terminated",
               "submitted", "verified")
 PROGRESS_FIELDS = ("completed", "total", "done", "status", "terminated")
