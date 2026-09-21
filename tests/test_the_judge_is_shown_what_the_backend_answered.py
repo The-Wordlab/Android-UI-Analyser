@@ -3,7 +3,7 @@
 Measured on a real run. The contract asked whether a language change was still in effect after
 leaving Settings; the judge marked it `not_verified` -- "no frame captures the Settings screen
 after the change". The window between two observations held
-`PUT /api/v4.0/user/profile -> 200`: the app telling its backend exactly that, and the backend
+`PUT /v1/profile -> 200`: the app telling its backend exactly that, and the backend
 agreeing. The proxy had it the whole time and nothing carried it to the judge.
 
 It is evidence about the server, not about pixels, and the instruction says so: a 200 proves the
@@ -18,7 +18,7 @@ from typing import Any
 
 from experiments.aua_controller.judgement import evidence_frame, judge_outcome
 
-CALLS = ["PUT /api/v4.0/user/profile -> 200", "POST /api/v4.0/send -> no answer yet"]
+CALLS = ["PUT /v1/profile -> 200", "POST /v1/send -> no answer yet"]
 
 
 def _frame(calls: list[str] | None = None) -> dict[str, Any]:
@@ -65,7 +65,7 @@ def _asked(frames: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def test_the_judge_is_told_what_those_lines_are() -> None:
-    """Unlabelled, `PUT /api/v4.0/user/profile -> 200` is a string the judge may simply skip."""
+    """Unlabelled, `PUT /v1/profile -> 200` is a string the judge may simply skip."""
     asked = _asked([_frame(CALLS), _frame(CALLS)])
     assert "network_calls" in json.dumps(asked, default=str)
     note = asked["context"].get("network_evidence_note")

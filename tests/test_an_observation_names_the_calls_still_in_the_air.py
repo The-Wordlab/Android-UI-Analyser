@@ -115,7 +115,7 @@ def test_the_window_asked_for_is_recent_not_the_whole_run(tmp_path: Any) -> None
 
 def test_the_journal_is_not_even_read_when_no_backend_is_named(tmp_path: Any) -> None:
     """The default costs nothing: no file is opened on any of the runs that never configure this."""
-    journal = _Journal([_open("/api/v4.0/chat")])
+    journal = _Journal([_open("/v1/chat")])
     assert engine_analyze.network_calls(_engine(tmp_path, journal)) is None
     assert journal.asked == []
 
@@ -147,23 +147,23 @@ def test_nothing_is_reported_until_the_caller_names_their_backend(tmp_path: Any)
 def test_only_the_named_backend_is_reported(tmp_path: Any) -> None:
     journal = _Journal([
         _open("/c2dm/register3", host="android.googleapis.com"),
-        _open("/api/v4.0/chat", host="api.theapp.test"),
+        _open("/v1/chat", host="api.theapp.test"),
         _open("/v16.0/app", method="GET", host="graph.facebook.com"),
     ])
     named = engine_analyze.network_calls(_engine(tmp_path, journal, app_hosts=["api.theapp.test"]))
-    assert named == ["POST /api/v4.0/chat -> no answer yet"]
+    assert named == ["POST /v1/chat -> no answer yet"]
 
 
 def test_a_named_host_covers_its_subdomains(tmp_path: Any) -> None:
     """A backend is named once and reached at several subdomains: staging, api, eu1."""
-    journal = _Journal([_open("/api/v4.0/chat", host="api.staging.theapp.test")])
+    journal = _Journal([_open("/v1/chat", host="api.staging.theapp.test")])
     assert engine_analyze.network_calls(
-        _engine(tmp_path, journal, app_hosts=["theapp.test"])) == ["POST /api/v4.0/chat -> no answer yet"]
+        _engine(tmp_path, journal, app_hosts=["theapp.test"])) == ["POST /v1/chat -> no answer yet"]
 
 
 def test_a_named_host_does_not_match_a_lookalike(tmp_path: Any) -> None:
     """`theapp.test` must not swallow `nottheapp.test`; the boundary is a dot, not a substring."""
-    journal = _Journal([_open("/api/v4.0/chat", host="nottheapp.test")])
+    journal = _Journal([_open("/v1/chat", host="nottheapp.test")])
     assert engine_analyze.network_calls(
         _engine(tmp_path, journal, app_hosts=["theapp.test"])) is None
 
@@ -226,42 +226,42 @@ def test_a_call_that_came_back_is_reported_with_its_status(tmp_path: Any) -> Non
     Measured on a real run of a real app: 25 backend calls across the run and not one of them was
     unanswered at the moment an observation was taken, because that backend answers in 55 ms and
     AUA settles the screen before handing anything back. Reported: nothing. Yet those windows held
-    a `PUT /user/messaging-tokens -> 401` and its retry, and the `PUT /user/profile -> 200` that
+    a `PUT /v1/push-token -> 401` and its retry, and the `PUT /v1/profile -> 200` that
     *was* the change under test -- the judge called that clause unevidenced while the proof sat in
     the journal.
     """
-    journal = _Journal(_answered("/api/v4.0/auth/guest", status=201))
+    journal = _Journal(_answered("/v1/session", status=201))
     assert engine_analyze.network_calls(
-        _engine(tmp_path, journal, app_hosts=["example.test"])) == ["POST /api/v4.0/auth/guest -> 201"]
+        _engine(tmp_path, journal, app_hosts=["example.test"])) == ["POST /v1/session -> 201"]
 
 
 def test_an_unanswered_call_says_so_in_words(tmp_path: Any) -> None:
     """Not a number: this model reads a status code as a label, not as arithmetic."""
-    journal = _Journal([_open("/api/v4.0/login")])
+    journal = _Journal([_open("/v1/login")])
     assert engine_analyze.network_calls(
         _engine(tmp_path, journal, app_hosts=["example.test"])) == [
-            "POST /api/v4.0/login -> no answer yet"]
+            "POST /v1/login -> no answer yet"]
 
 
 def test_a_failure_and_its_retry_both_survive(tmp_path: Any) -> None:
     """A 401 followed by a 200 is the app recovering; either alone tells the wrong story."""
-    journal = _Journal(_answered("/api/v4.0/user/messaging-tokens", status=401, method="PUT", ago=0.4)
-                       + _answered("/api/v4.0/user/messaging-tokens", status=200, method="PUT"))
+    journal = _Journal(_answered("/v1/push-token", status=401, method="PUT", ago=0.4)
+                       + _answered("/v1/push-token", status=200, method="PUT"))
     assert engine_analyze.network_calls(
         _engine(tmp_path, journal, app_hosts=["example.test"])) == [
-            "PUT /api/v4.0/user/messaging-tokens -> 401",
-            "PUT /api/v4.0/user/messaging-tokens -> 200"]
+            "PUT /v1/push-token -> 401",
+            "PUT /v1/push-token -> 200"]
 
 
 def test_calls_are_reported_oldest_first(tmp_path: Any) -> None:
-    journal = _Journal(_answered("/api/v4.0/config", method="GET", ago=0.9)
-                       + _answered("/api/v4.0/threads", method="GET", ago=0.5)
-                       + [_open("/api/v4.0/send", ago=0.1)])
+    journal = _Journal(_answered("/v1/config", method="GET", ago=0.9)
+                       + _answered("/v1/items", method="GET", ago=0.5)
+                       + [_open("/v1/send", ago=0.1)])
     assert engine_analyze.network_calls(
         _engine(tmp_path, journal, app_hosts=["example.test"])) == [
-            "GET /api/v4.0/config -> 200",
-            "GET /api/v4.0/threads -> 200",
-            "POST /api/v4.0/send -> no answer yet"]
+            "GET /v1/config -> 200",
+            "GET /v1/items -> 200",
+            "POST /v1/send -> no answer yet"]
 
 
 def test_a_tap_that_asked_the_backend_for_nothing_says_nothing(tmp_path: Any) -> None:
@@ -277,8 +277,8 @@ def test_a_vendor_call_is_still_excluded_once_it_answers(tmp_path: Any) -> None:
 
 def test_the_window_starts_where_the_last_observation_ended(tmp_path: Any) -> None:
     """"Since the last call" is the question -- not "open at this instant", which was the bug."""
-    journal = _Journal(_answered("/api/v4.0/first", ago=0.4))
+    journal = _Journal(_answered("/v1/first", ago=0.4))
     engine = _engine(tmp_path, journal, app_hosts=["example.test"])
-    assert engine_analyze.network_calls(engine) == ["POST /api/v4.0/first -> 200"]
+    assert engine_analyze.network_calls(engine) == ["POST /v1/first -> 200"]
     # the same call must not be reported twice: the next observation starts after this one
     assert engine_analyze.network_calls(engine) is None

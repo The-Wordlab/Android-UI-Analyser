@@ -646,13 +646,13 @@ def _is_app_host(host: str, app_hosts: Sequence[str]) -> bool:
 def network_calls(self: Engine) -> list[str] | None:
     """What the app asked its own backend since the last observation, and what came back.
 
-    ``["PUT /api/v4.0/user/profile -> 200", "POST /api/v4.0/send -> no answer yet"]``.
+    ``["PUT /v1/profile -> 200", "POST /v1/send -> no answer yet"]``.
 
     The first cut of this reported only the calls still unanswered, which measured to nothing at
     all: on a real run the backend answered in 55 ms at the median and AUA settles the screen
     before handing an observation back, so by then every call had landed. Twenty-five backend
     calls happened and none were in the air at an observation. Meanwhile those same windows held
-    a ``PUT /user/messaging-tokens -> 401`` and its retry, and the ``PUT /user/profile -> 200``
+    a ``PUT /v1/push-token -> 401`` and its retry, and the ``PUT /v1/profile -> 200``
     that *was* the change under test -- which the judge then called unevidenced.
 
     So the window is the gap since this engine last produced an observation, not an instant, and

@@ -26,6 +26,7 @@ from experiments.aua_controller.typesafe_navigator import (  # noqa: E402
     candidates,
     numbered,
     screen_for_model,
+    what_happened,
 )
 
 SCREEN = {
@@ -223,8 +224,9 @@ def test_the_whole_journey_is_sent_not_a_list_of_tool_names() -> None:
     first, second = client.states
     assert first["journey_so_far"] == [], "nothing has happened yet"
     turn = second["journey_so_far"][0]
-    assert turn["you_chose"] == f"{TAP_TOOL} on 'Notifications'"
-    assert "a different screen opened" in turn["what_happened"] or "changed" in turn["what_happened"]
+    assert turn["you_chose"] == "press 'Notifications'", "the model's words, not AUA's"
+    assert turn["what_happened"].startswith("now showing:")
+    assert "[Notifications]" in turn["what_happened"], "and the journey shows what was there"
     assert "screen_you_saw" not in turn, "a list of every label per turn is context rot"
 
 
@@ -235,8 +237,9 @@ def test_a_screen_that_did_not_move_is_said_so_in_the_journey() -> None:
     asyncio.run(navigator(SCREEN))
     navigator.observed(TAP_TOOL, {"id": "el:aaa"})
     asyncio.run(navigator(SCREEN))
-    assert client.states[1]["journey_so_far"][0]["what_happened"] == \
-        "the screen did not change at all"
+    said = client.states[1]["journey_so_far"][0]["what_happened"]
+    assert said.startswith("the screen did not change")
+    assert "Notifications" in said, "and it says which screen refused to move"
 
 
 class WideClient(FakeClient):
@@ -436,59 +439,58 @@ def test_in_progress_is_offered_but_is_never_a_finish_argument() -> None:
     assert action["arguments"] == {"outcome": "achieved"}
 
 
-def test_a_new_activity_is_reported_as_a_different_screen() -> None:
+def test_a_screen_with_no_readable_labels_still_says_it_moved() -> None:
+    # A canvas, a game, a WebView that announces nothing: there is no sketch to draw, and the
+    # one-bit answer is all there is. It must not come out blank.
     from experiments.aua_controller.typesafe_navigator import what_happened
 
-    assert what_happened({"change": {"activity_changed": True}}, moved=True) == \
-        "a different screen opened"
+    assert what_happened({"change": {"activity_changed": True}}, moved=True) == "the screen changed"
 
 
-def test_a_handful_of_redrawn_controls_is_not_reported_as_progress() -> None:
+def test_a_screen_that_barely_moved_shows_it_is_the_same_screen() -> None:
     # Observed live: tapping sign-in left the activity alone and swapped 2 of 32 controls while
-    # the login was in flight. Told only "screen changed", the navigator pressed sign-in again.
+    # the login was in flight. Told "screen changed", the navigator pressed sign-in again. Told
+    # "2 controls appeared, 2 went away", it had no way to know which screen that was. The words
+    # say it: this is still the sign-in page.
     from experiments.aua_controller.typesafe_navigator import what_happened
 
     said = what_happened({"change": {"activity_changed": False},
-                          "action_diff_summary": {"added": 2, "removed": 2, "changed": 0,
-                                                  "curr_count": 32}},
+                          "observation": {"elements": [{"text": "Sign in", "clickable": True},
+                                                       {"text": "Forgot password?"}]}},
                          moved=True)
-    assert said == ("same screen: 2 controls appeared, 2 went away, 0 were relabelled, out of 32")
-    assert "still working" not in said, "the counts are facts; what they mean is the model's job"
+    assert "[Sign in]" in said and "Forgot password?" in said
+    assert "still working" not in said, "nothing is inferred; the screen speaks for itself"
 
 
-def test_a_relabel_is_reported_as_a_relabel_not_as_nothing() -> None:
-    # AUA reports a control that only changed its text as `changed`, with nothing added or
-    # removed. Reading only added/removed called that "0 of 32 changed" and then told the model
-    # the screen was still working -- twice wrong on the same line.
+def test_a_relabel_shows_the_new_label() -> None:
+    # A control that only changed its text used to be counted and never quoted, so "2 were
+    # relabelled" left the one fact that mattered -- what it now says -- out of the journey.
     from experiments.aua_controller.typesafe_navigator import what_happened
 
     said = what_happened({"change": {"activity_changed": False},
-                          "action_diff_summary": {"added": 0, "removed": 0, "changed": 2,
-                                                  "curr_count": 32}},
-                         moved=True)
-    assert "2 were relabelled" in said
+                          "observation": {"elements": [{"text": "Signing in…"}]}}, moved=True)
+    assert "Signing in…" in said
 
 
-def test_a_toggled_switch_is_not_described_as_unfinished_work() -> None:
-    # One control changing IS the completed action on a settings toggle. The old wording told the
-    # model to wait for an action that had already happened.
+def test_nothing_about_the_meaning_of_a_change_is_ever_asserted() -> None:
+    # One control changing IS the completed action on a settings toggle, and IS mid-flight work
+    # on a login. No wording can be right for both, so the journey states and never interprets.
     from experiments.aua_controller.typesafe_navigator import what_happened
 
     said = what_happened({"change": {"activity_changed": False},
-                          "action_diff_summary": {"added": 1, "removed": 1, "changed": 0,
-                                                  "curr_count": 30}},
+                          "observation": {"elements": [{"text": "Dark mode", "checked": True}]}},
                          moved=True)
-    assert "still working" not in said and "1 controls appeared" in said
+    for guess in ("still working", "loading", "in progress", "finished", "succeeded"):
+        assert guess not in said, guess
 
 
-def test_a_wholesale_replacement_is_still_ordinary_progress() -> None:
+def test_a_pressable_control_is_marked_and_a_label_is_not() -> None:
+    # "What could I have pressed on that screen" is the question a journey turn gets read for.
     from experiments.aua_controller.typesafe_navigator import what_happened
 
-    said = what_happened({"change": {"activity_changed": False},
-                          "action_diff_summary": {"added": 33, "removed": 40, "changed": 0,
-                                                  "curr_count": 52}},
-                         moved=True)
-    assert "33 controls appeared" in said and "40 went away" in said
+    said = what_happened({"observation": {"elements": [{"text": "Settings", "clickable": True},
+                                                       {"text": "Version 1.2.3"}]}}, moved=True)
+    assert "[Settings]" in said and "Version 1.2.3" in said and "[Version" not in said
 
 
 def test_an_unmoved_screen_still_says_so_whatever_the_frame_carries() -> None:
@@ -661,7 +663,7 @@ def test_a_step_the_chat_model_took_still_appears_in_the_journey() -> None:
 
     journey = client.states[1]["journey_so_far"]
     assert len(journey) == 1
-    assert journey[0]["you_chose"] == "scroll_and_analyze"
+    assert journey[0]["you_chose"] == "scroll", "AUA's tool name said back as the model's word"
 
 
 def test_a_turn_survives_a_screen_this_navigator_could_not_read() -> None:
@@ -679,8 +681,7 @@ def test_a_turn_survives_a_screen_this_navigator_could_not_read() -> None:
                                                        "meta": {"fingerprint": "fp-3"}}}))
 
     journey = client.states[-1]["journey_so_far"]
-    assert [t["you_chose"] for t in journey] == [f"{TAP_TOOL} on 'Notifications'",
-                                                 "back_gesture_and_analyze"]
+    assert [t["you_chose"] for t in journey] == ["press 'Notifications'", "back"]
 
 
 def test_shadow_mode_declines_exactly_once() -> None:
@@ -816,3 +817,64 @@ def test_a_control_that_is_not_on_this_screen_is_refused() -> None:
                                   tools=[TAP_TOOL], min_confidence=0.5)
     assert asyncio.run(navigator(SCREEN)) is None
     assert navigator.declined.get("unknown_target") == 1
+
+
+# ------------------------------- the journey in the model's own words, with the screen in it
+
+
+def test_a_turn_shows_the_screen_it_landed_on() -> None:
+    """Counts were facts about a screen the model never saw, which is not the same as evidence.
+
+    "7 controls appeared, 2 went away, out of 32" cannot tell a login page from a settings list,
+    and the model has to decide whether it is looping. The labels can. The current screen is in
+    the state in full; what the journey was missing is what the *earlier* ones looked like.
+    """
+    landed = what_happened({"observation": {"elements": [
+        {"text": "Welcome back"},
+        {"text": "Sign in", "clickable": True},
+        {"text": "Browse as a guest", "clickable": True},
+    ]}}, moved=True)
+    assert "Welcome back" in landed
+    assert "[Sign in]" in landed, "a pressable control is marked as one"
+    assert "Browse as a guest" in landed
+    assert "controls appeared" not in landed
+
+
+def test_a_screen_that_did_not_move_still_says_so_first() -> None:
+    """The one-bit answer is what says "your tap did nothing"; the labels do not replace it."""
+    landed = what_happened({"observation": {"elements": [{"text": "Welcome back"}]}}, moved=False)
+    assert landed.startswith("the screen did not change")
+    assert "Welcome back" in landed
+
+
+def test_a_long_screen_is_cut_short() -> None:
+    """A journey turn carrying forty labels buys context rot on a model documented to suffer it."""
+    many = {"observation": {"elements": [{"text": f"Row number {n}"} for n in range(40)]}}
+    landed = what_happened(many, moved=True)
+    assert len(landed) < 400
+    assert "Row number 0" in landed
+
+
+def test_the_journey_says_what_the_model_chose_not_what_the_harness_called_it() -> None:
+    """`tap_and_analyze` is AUA's function name. The model answered "press 'Privacy'".
+
+    Showing it a word it never used, for a decision it did make, is a vocabulary it has to
+    translate before it can read its own history.
+    """
+    navigator = TypeSafeNavigator("open settings", client=FakeClient(target="2"),
+                                  tools=[TAP_TOOL])
+    asyncio.run(navigator(SCREEN))
+    navigator.observed(TAP_TOOL, {"id": "el:bbb"})
+    assert navigator._pending["you_chose"] == "press 'Privacy'"
+
+
+def test_a_step_the_chat_model_took_is_named_in_the_same_words() -> None:
+    """The journey is one story; half of it in AUA's vocabulary makes it two."""
+    navigator = TypeSafeNavigator("open settings", client=FakeClient(), tools=[TAP_TOOL])
+    asyncio.run(navigator(SCREEN))
+    for tool, expected in (("back_gesture_and_analyze", "back"),
+                           ("wait_and_analyze", "wait"),
+                           ("session_finish", "done"),
+                           ("input_and_analyze", "type")):
+        navigator.observed(tool, {})
+        assert navigator._pending["you_chose"] == expected, tool

@@ -27,23 +27,28 @@ faster. It is one question with one answer and nothing discarded.
 
 200 steps replayed out of verified-pass runs of a real app, scored against what the run did next
 -- a floor on correctness, not correctness: a different tap is not a wrong tap, and the chat model
-itself takes recoverable detours. Only a tap is ever acted on in the default space:
+itself takes recoverable detours. Only a tap is ever acted on in the default space. Three samples,
+the spread shown where they differ:
 
 ====  ==============  ===========================
 gate  steps acted on  same control the run tapped
 ====  ==============  ===========================
-0.00       103 (52%)                    40 (39%)
-0.70        23 (12%)                    16 (70%)
-0.80        21 (10%)                    15 (71%)
-0.85        19 (10%)                    14 (74%)
-0.90        11  (6%)                     9 (82%)
-0.95         9  (4%)                     8 (89%)
+0.00       106 (53%)                    ~49%
+0.70        33 (16%)                    ~76%
+0.80        28 (14%)                     79%
+0.85        26 (13%)                    ~83%
+0.90        19  (9%)                    ~93%
 ====  ==============  ===========================
 
-0.85 stays, and the table says the same thing the two-question one did: the threshold is not the
-lever. 0.80, 0.85 and 0.90 are one sample of each other, and above 0.90 there is no sample left.
-Naming a control is still where the accuracy goes -- 39% of presses match the run when nothing is
-gated at all, against 82% at 0.90 -- so that is where effort belongs, not on the number.
+Every row of that table moved when the journey started quoting screens instead of counting
+controls (see ``what_happened``): at 0.85 it was 19 steps at 74%, and is now 26 at 83% -- more
+coverage *and* more accuracy, which is not a trade. That was the single largest measured change
+to this navigator, larger than the question shape and far larger than the threshold.
+
+0.85 stays the default. 0.90 is now a real alternative for the first time -- it was within noise
+of 0.85 under the old journey and is worth about ten points of fidelity under this one, for a
+third fewer steps. Naming a control is still where the accuracy goes: 49% of presses match the
+run when nothing is gated at all.
 
 A proposal is an opinion with no authority beyond the tools it was offered. ``shadow`` records
 what it would have done and returns ``None`` every time, which is how a run proves the gate on
@@ -120,6 +125,18 @@ ACTION_KINDS: dict[str, str] = {
 #: same action 11 times out of 11 and asked 2% fewer tokens, so the extra question was buying
 #: nothing. What it picks when a scroll is genuinely needed is untested either way.
 SCROLL_KINDS = {"scroll_down": "down", "scroll_up": "up"}
+#: AUA's tool names said back in the vocabulary the model answers in, so a journey the chat model
+#: half-wrote still reads as one story rather than two.
+TOOL_WORDS = {
+    TAP_TOOL: "press a control",
+    SCROLL_TOOL: "scroll",
+    "swipe_and_analyze": "scroll",
+    BACK_TOOL: "back",
+    "key_and_analyze": "back",
+    WAIT_TOOL: "wait",
+    FINISH_TOOL: "done",
+    "input_and_analyze": "type",
+}
 
 #: `blocked` is chosen to be declined: acting on it means ending the run, and ending a run early
 #: is this model's worst measured skill. `wait` is not in here because waiting is a real tool the
@@ -197,37 +214,52 @@ def plain(value: Any) -> Any:
     return str(value)
 
 
+#: Element fields the model can actually read. Everything else on an element is the harness's
+#: vocabulary: digests, pixel bounds, internal flags.
+READABLE = ("text", "desc", "content_desc", "resource_id", "rid", "checked")
+MAX_JOURNEY_LABELS = 10  # a turn is a reminder of a screen, not a second copy of one
+MAX_LABEL_CHARS = 34
+
+
+def sketch(result: Any) -> str:
+    """The screen in one line of its own words: ``Welcome back · [Sign in] · [Browse as a guest]``.
+
+    Pressable controls are bracketed, because "what could I have pressed there" is the question a
+    journey turn is read for. Cut short on purpose: the current screen is already in the state in
+    full, and a turn that reproduces one is a second copy of it in a model documented to lose
+    accuracy as the state fills.
+    """
+    observation = result.get("observation") if isinstance(result, Mapping) else None
+    elements = (observation or result or {}).get("elements") if isinstance(result, Mapping) else None
+    labels: list[str] = []
+    for element in elements or []:
+        if not isinstance(element, Mapping):
+            continue
+        text = str(element.get("text") or element.get("desc") or element.get("content_desc") or "")
+        text = " ".join(text.split())[:MAX_LABEL_CHARS]
+        if not text:
+            continue
+        labels.append(f"[{text}]" if element.get("clickable") else text)
+        if len(labels) >= MAX_JOURNEY_LABELS:
+            labels.append("…")
+            break
+    return " · ".join(labels)
+
+
 def what_happened(result: Any, moved: bool) -> str:
-    """State what the last action did. State it, do not interpret it.
+    """Whether the last action moved the screen, and what the screen then said.
 
     This began as a boolean off the fingerprint, so a button losing its label mid-login read like
-    arriving somewhere new. The first repair guessed the other way -- "which usually means it is
-    still working on the last action" -- which is wrong on a toggled switch, where one control
-    changing IS the completed action, and wrong again on a relabel, which AUA reports as `changed`
-    with nothing added or removed. Replacing one false inference with another is not a fix. The
-    counts are facts; what they mean is the model's job.
+    arriving somewhere new. The repair after that reported counts -- "7 controls appeared, 2 went
+    away, out of 32" -- which are facts, but facts about a screen the model never sees: they
+    cannot tell a login page from a settings list, and telling those apart is exactly how a model
+    knows it is going in circles. The labels can. The one-bit answer stays in front of them,
+    because "your tap did nothing" is not recoverable from a screen that looks plausible.
     """
+    seen = sketch(result)
     if not moved:
-        return "the screen did not change at all"
-    change = result.get("change") if isinstance(result, Mapping) else None
-    diff = result.get("action_diff_summary") if isinstance(result, Mapping) else None
-    if isinstance(change, Mapping) and change.get("activity_changed") is True:
-        return "a different screen opened"
-    if isinstance(diff, Mapping):
-        added = int(diff.get("added") or 0)
-        removed = int(diff.get("removed") or 0)
-        changed = int(diff.get("changed") or 0)
-        total = int(diff.get("curr_count") or 0)
-        if total:
-            return (f"same screen: {added} controls appeared, {removed} went away, "
-                    f"{changed} were relabelled, out of {total}")
-    return "the screen changed"
-
-
-#: Sent to the model as-is. Anything not on this list is either an internal handle or a number
-#: the model cannot use, and this model is documented to lose accuracy to irrelevant state.
-READABLE = ("text", "desc", "content_desc", "resource_id", "rid", "checked")
-
+        return f"the screen did not change: {seen}" if seen else "the screen did not change at all"
+    return f"now showing: {seen}" if seen else "the screen changed"
 
 def screen_for_model(compact: Mapping[str, Any] | None) -> dict[str, Any]:
     """The screen with everything the model cannot read taken out.
@@ -391,12 +423,21 @@ class TypeSafeNavigator:
         self.declined[why] = self.declined.get(why, 0) + 1
 
     def observed(self, tool: str, arguments: Mapping[str, Any] | None = None) -> None:
-        """Record what the run actually did on this step, whoever chose it."""
+        """Record what the run did on this step, in the words the model itself answers in.
+
+        The tool is AUA's function name. The model never says `tap_and_analyze`; it answers
+        "press 'Privacy'", and a history written in the harness's vocabulary is one the model has
+        to translate before it can read what it did. Steps the chat model took are named the same
+        way, because the journey is one story.
+        """
         if self._pending is None:
             return
         handle = (arguments or {}).get("id")
         label = self._options.get(handle) if isinstance(handle, str) else None
-        self._pending["you_chose"] = f"{tool} on '{label}'" if label else tool
+        if label:
+            self._pending["you_chose"] = f"press '{label}'"
+        else:
+            self._pending["you_chose"] = TOOL_WORDS.get(tool, tool)
 
     async def __call__(self, result: Any) -> dict[str, Any] | None:
         from experiments.aua_controller.compaction import compact_frame

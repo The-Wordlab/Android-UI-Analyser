@@ -1132,13 +1132,13 @@ async def judge_outcome(
     # unlabelled it reads as a stray string. On the run that prompted this, a contract clause about
     # a saved language change came back `not_verified` -- "no frame captures the Settings screen
     # after the change" -- while the window between two observations held
-    # `PUT /api/v4.0/user/profile -> 200`. The note is attached only when some frame carries the
+    # `PUT /v1/profile -> 200`. The note is attached only when some frame carries the
     # field, because a sentence about evidence a run does not have is paid for on every run.
     if any(_frame_network_calls(frame) for frame in context["intermediate_frames"]) or \
             _frame_network_calls(context["final_frame"]):
         context["network_evidence_note"] = (
             "meta.network_calls lists what the app asked its own backend between the previous "
-            "observation and this one, with what came back: `PUT /api/v4.0/user/profile -> 200`, "
+            "observation and this one, with what came back: `PUT /v1/profile -> 200`, "
             "or `-> no answer yet` for a call still open at capture. It is host-observed at the "
             "proxy, not read off the screen, and it is scoped to the app's backend only -- vendor "
             "and analytics traffic is excluded. A status proves the app sent that request and the "

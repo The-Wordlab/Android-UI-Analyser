@@ -122,12 +122,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 - An observation names what the app asked its own backend since the last one, and what came
   back: `meta.network_calls` carries
-  them as `["PUT /api/v4.0/user/profile -> 200", "POST /api/v4.0/send -> no answer yet"]`. A
+  them as `["PUT /v1/profile -> 200", "POST /v1/send -> no answer yet"]`. A
   screen mid-load, a screen whose tap failed, and a screen whose tap did nothing at all are the
   same hierarchy; this says which. Reporting only the *unanswered* calls measured to nothing on a
   real run — that backend answers in 55 ms and AUA settles the screen before handing an
   observation back, so 25 calls happened and none were in the air when anyone looked, while those
-  same windows held a `401` and its retry and the `PUT /user/profile -> 200` that was the change
+  same windows held a `401` and its retry and the `PUT /v1/profile -> 200` that was the change
   under test. Needs
   `aua proxy start` and `network.app_hosts` naming the app's own backend; the key is absent when
   nothing is in the air, when no backend is named, and when no proxy is running, so a quiet
@@ -155,6 +155,16 @@ notes, so you can check for a newer version — and read what changed — withou
   over 60 real screens three times, the merged form is steadier (median confidence 0.54–0.55
   against 0.47–0.48) and acts on the same taps at the same accuracy; it is one question with one
   answer and nothing discarded. Finishing still reads `outcome`, and is still held back by it.
+
+- A System One navigator's journey now quotes each screen instead of counting its controls, and
+  names each step in the words the model itself answers in. A turn used to read
+  `tap_and_analyze on 'X'` / `7 controls appeared, 2 went away, out of 32`; it now reads
+  `press 'X'` / `the screen did not change: Welcome back · [Sign in] · [Browse as a guest]`.
+  Counts are facts about a screen the model never sees — they cannot tell a login page from a
+  settings list, which is exactly how a model knows it is going in circles — and `tap_and_analyze`
+  is AUA's function name for a move the model described as pressing a control. Measured over 200
+  saved steps, three times: at the 0.85 gate this went from 19 steps at 74% fidelity to 26 at 83%,
+  more coverage *and* more accuracy. It is the largest measured change to this navigator.
 
 ### Fixed
 
