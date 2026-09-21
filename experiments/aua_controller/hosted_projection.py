@@ -41,6 +41,11 @@ _LABELLED_ID = re.compile(
 )
 # These are AUA's published action handles and selector semantics, not metadata.
 _HANDLES = {"id", "parent", "resourceid", "rid", "stablekey", "selector", "selectors"}
+# URL routes the app asked its own backend for, observed at the proxy. `_PATH` cannot tell one
+# from an operator's filesystem path, and scrubbing them sent the hosted model
+# `GET [private-path] -> 200` -- the evidence with the evidence removed. Identity scrubbing
+# still applies to them; only the host-path rule is skipped.
+_URL_PATHS = {"networkcalls"}
 
 
 def _key(value: str) -> str:
@@ -86,14 +91,14 @@ def hosted_model_view(value: Any) -> Any:
     collect(value)
     ordered = sorted(identities, key=len, reverse=True)
 
-    def project(item: Any, handle: bool = False) -> Any:
+    def project(item: Any, handle: bool = False, route: bool = False) -> Any:
         if isinstance(item, dict):
             return {
-                name: project(child, _key(name) in _HANDLES)
+                name: project(child, _key(name) in _HANDLES, _key(name) in _URL_PATHS)
                 for name, child in item.items() if _key(name) not in _REMOVED
             }
         if isinstance(item, list):
-            return [project(child, handle) for child in item]
+            return [project(child, handle, route) for child in item]
         if not isinstance(item, str) or handle:
             return item
         nested = _embedded(item)
@@ -103,6 +108,6 @@ def hosted_model_view(value: Any) -> Any:
             item = re.sub(r"(?<![\w])" + re.escape(identity) + r"(?![\w])", "[private-id]", item)
         item = _LABELLED_ID.sub(lambda match: match.group(0)[:match.start("value") - match.start()]
                                 + "[private-id]", item)
-        return _PATH.sub("[private-path]", item)
+        return item if route else _PATH.sub("[private-path]", item)
 
     return project(value)
