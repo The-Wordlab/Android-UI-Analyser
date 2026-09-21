@@ -1746,7 +1746,7 @@ async def run_realapp(
             # Whoever chose the step, the navigator judges the next one against what the run
             # has actually done -- the same history the offline measurement gave it.
             if navigator is not None:
-                navigator.observed(name)
+                navigator.observed(name, arguments)
             return await controller_call(name, arguments)
 
         report = await run_agent(

@@ -71,6 +71,21 @@ notes, so you can check for a newer version — and read what changed — withou
   shared map surface, and goal cleanup restores the browser session baseline.
 
 ## [0.29.0] - 2026-09-18
+- The System One navigator's journey now records every step the run took, not only the steps the
+  navigator itself won. In the default configuration it wins a minority of them, so the model was
+  being told it was on step 6 of a run that was on step 12 — and the measurement that justified
+  sending a journey at all had been taken on a journey built from every step, which is not what
+  shipped. Turns also close before any early return, so a step the navigator could not read no
+  longer closes the previous turn against a screen it never saw.
+
+- What an action did is now reported as counts rather than as a guess about their meaning. The
+  previous wording asserted a screen was "still working on the last action", which is wrong on a
+  toggled switch, where one control changing is the completed action, and wrong on a relabel,
+  which AUA reports as `changed` with nothing added or removed — a field that was not being read.
+
+- Element digests, screen fingerprints and pixel bounds no longer reach the model: the numbered
+  menu kept them out of the questions while the state body carried them on every element.
+
 - `wait` is now an action the System One navigator can actually take, mapped to
   `wait_and_analyze`. It was offered as an answer and never honoured: choosing it handed the step
   to the controller model, which was then paid to answer the same question about the same screen.

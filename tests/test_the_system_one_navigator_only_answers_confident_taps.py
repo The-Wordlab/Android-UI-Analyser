@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,7 +75,7 @@ def test_a_confident_tap_is_proposed_as_a_bound_tool_call() -> None:
     assert navigator.report()["accepted"] == 1
 
 
-@pytest.mark.parametrize("kind", ["done", "back", "scroll_down", "type", "wait"])
+@pytest.mark.parametrize("kind", ["done", "back", "scroll_down", "type"])
 def test_every_action_that_is_not_a_tap_goes_back_to_the_chat_model(kind: str) -> None:
     # Ending, rewinding, scrolling and typing were the measured weak spots; none of them is
     # this navigator's to decide, however sure it sounds.
@@ -211,7 +212,7 @@ def test_the_whole_journey_is_sent_not_a_list_of_tool_names() -> None:
     client = RecordingClient()
     navigator = TypeSafeNavigator("Open notification settings", client=client, tools=[TAP_TOOL])
     asyncio.run(navigator(SCREEN))
-    navigator.observed(TAP_TOOL)
+    navigator.observed(TAP_TOOL, {"id": "el:aaa"})
     moved = {"ok": True, "observation": {**SCREEN["observation"], "meta": {"fingerprint": "fp-2"}}}
     asyncio.run(navigator(moved))
 
@@ -219,8 +220,8 @@ def test_the_whole_journey_is_sent_not_a_list_of_tool_names() -> None:
     assert first["journey_so_far"] == [], "nothing has happened yet"
     turn = second["journey_so_far"][0]
     assert turn["you_chose"] == f"{TAP_TOOL} on 'Notifications'"
-    assert turn["what_happened"] == "screen changed"
-    assert "Notifications" in turn["screen_you_saw"]
+    assert "a different screen opened" in turn["what_happened"] or "changed" in turn["what_happened"]
+    assert "screen_you_saw" not in turn, "a list of every label per turn is context rot"
 
 
 def test_a_screen_that_did_not_move_is_said_so_in_the_journey() -> None:
@@ -228,9 +229,10 @@ def test_a_screen_that_did_not_move_is_said_so_in_the_journey() -> None:
     client = RecordingClient()
     navigator = TypeSafeNavigator("g", client=client, tools=[TAP_TOOL])
     asyncio.run(navigator(SCREEN))
-    navigator.observed(TAP_TOOL)
+    navigator.observed(TAP_TOOL, {"id": "el:aaa"})
     asyncio.run(navigator(SCREEN))
-    assert client.states[1]["journey_so_far"][0]["what_happened"] == "SCREEN DID NOT CHANGE"
+    assert client.states[1]["journey_so_far"][0]["what_happened"] == \
+        "the screen did not change at all"
 
 
 class WideClient(FakeClient):
@@ -243,8 +245,6 @@ class WideClient(FakeClient):
     async def system_one(self, *, state, questions, model, timeout=None):
         response = await super().system_one(state=state, questions=questions, model=model,
                                             timeout=timeout)
-        response.answers["direction"] = SimpleNamespace(choice=self.direction,
-                                                        confidence=self.operand_conf)
         response.answers["outcome"] = SimpleNamespace(choice=self.outcome,
                                                       confidence=self.operand_conf)
         self.questions = questions
@@ -324,14 +324,14 @@ def test_the_operand_questions_are_asked_in_the_same_single_request() -> None:
     client = WideClient()
     wide(client)
     assert client.calls == 1
-    assert {"action", "target", "settled", "outcome"} == set(client.questions)
+    assert {"action", "target", "outcome"} == set(client.questions)
 
 
 def test_the_narrow_default_asks_no_operand_questions() -> None:
     client = WideClient()
     TypeSafeNavigator("g", client=client, tools=WIDE_TOOLS)
     asyncio.run(TypeSafeNavigator("g", client=client, tools=WIDE_TOOLS)(SCREEN))
-    assert set(client.questions) == {"action", "target", "settled"}
+    assert set(client.questions) == {"action", "target"}
 
 
 def test_an_unknown_action_space_is_refused_at_construction() -> None:
@@ -393,7 +393,8 @@ def test_every_call_is_written_to_the_transcript_with_its_cost(tmp_path) -> None
     # The request is kept in the shape it goes out in, not a summary of it.
     assert set(entry["request"]) == {"model", "state", "questions"}
     assert entry["request"]["state"]["this_is_the_new_screen"]["elements"]
-    assert set(entry["request"]["questions"]) == {"action", "target", "settled"}
+    assert entry["verdict"]["accepted"] is True
+    assert set(entry["request"]["questions"]) == {"action", "target"}
     assert entry["response"]["answers"]["action"]["choice"] == "tap"
     assert entry["response"]["answers"]["target"]["confidence"] == 0.95
     assert entry["input_tokens"] == 430
@@ -401,11 +402,15 @@ def test_every_call_is_written_to_the_transcript_with_its_cost(tmp_path) -> None
     assert navigator.report()["usd"] == pytest.approx(430 * 42 / 1e9)
 
 
-def test_a_run_without_a_transcript_path_writes_nothing_and_still_works(tmp_path) -> None:
+def test_a_run_without_a_transcript_path_writes_nothing_and_still_works(tmp_path, monkeypatch) -> None:
+    # The first version of this asserted an empty tmp_path the navigator was never given, so it
+    # could not fail. Watch the write instead.
+    written: list[object] = []
     navigator = TypeSafeNavigator("g", client=FakeClient(), tools=[TAP_TOOL])
+    monkeypatch.setattr(navigator, "_record", lambda entry: written.append(entry))
     assert asyncio.run(navigator(SCREEN)) is not None
     assert navigator.report()["transcript"] is None
-    assert not list(tmp_path.iterdir())
+    assert written, "the turn is still assembled; only the file is absent"
 
 
 def test_finishing_while_the_goal_is_unfinished_is_refused() -> None:
@@ -440,32 +445,59 @@ def test_a_handful_of_redrawn_controls_is_not_reported_as_progress() -> None:
     from experiments.aua_controller.typesafe_navigator import what_happened
 
     said = what_happened({"change": {"activity_changed": False},
-                          "action_diff_summary": {"added": 2, "removed": 2, "curr_count": 32}},
+                          "action_diff_summary": {"added": 2, "removed": 2, "changed": 0,
+                                                  "curr_count": 32}},
                          moved=True)
-    assert "SAME screen redrew" in said and "2 of 32" in said
-    assert "still working" in said, "the model needs the reason, not just the count"
+    assert said == ("same screen: 2 controls appeared, 2 went away, 0 were relabelled, out of 32")
+    assert "still working" not in said, "the counts are facts; what they mean is the model's job"
+
+
+def test_a_relabel_is_reported_as_a_relabel_not_as_nothing() -> None:
+    # AUA reports a control that only changed its text as `changed`, with nothing added or
+    # removed. Reading only added/removed called that "0 of 32 changed" and then told the model
+    # the screen was still working -- twice wrong on the same line.
+    from experiments.aua_controller.typesafe_navigator import what_happened
+
+    said = what_happened({"change": {"activity_changed": False},
+                          "action_diff_summary": {"added": 0, "removed": 0, "changed": 2,
+                                                  "curr_count": 32}},
+                         moved=True)
+    assert "2 were relabelled" in said
+
+
+def test_a_toggled_switch_is_not_described_as_unfinished_work() -> None:
+    # One control changing IS the completed action on a settings toggle. The old wording told the
+    # model to wait for an action that had already happened.
+    from experiments.aua_controller.typesafe_navigator import what_happened
+
+    said = what_happened({"change": {"activity_changed": False},
+                          "action_diff_summary": {"added": 1, "removed": 1, "changed": 0,
+                                                  "curr_count": 30}},
+                         moved=True)
+    assert "still working" not in said and "1 controls appeared" in said
 
 
 def test_a_wholesale_replacement_is_still_ordinary_progress() -> None:
     from experiments.aua_controller.typesafe_navigator import what_happened
 
     said = what_happened({"change": {"activity_changed": False},
-                          "action_diff_summary": {"added": 33, "removed": 40, "curr_count": 52}},
+                          "action_diff_summary": {"added": 33, "removed": 40, "changed": 0,
+                                                  "curr_count": 52}},
                          moved=True)
-    assert said == "screen changed"
+    assert "33 controls appeared" in said and "40 went away" in said
 
 
 def test_an_unmoved_screen_still_says_so_whatever_the_frame_carries() -> None:
     from experiments.aua_controller.typesafe_navigator import what_happened
 
     assert what_happened({"change": {"activity_changed": True}}, moved=False) == \
-        "SCREEN DID NOT CHANGE"
+        "the screen did not change at all"
 
 
 def test_a_frame_without_change_telemetry_falls_back_to_the_old_wording() -> None:
     from experiments.aua_controller.typesafe_navigator import what_happened
 
-    assert what_happened({}, moved=True) == "screen changed"
+    assert what_happened({}, moved=True) == "the screen changed"
 
 
 def test_the_record_names_the_operand_the_gate_actually_read() -> None:
@@ -507,7 +539,7 @@ def test_exactly_one_transcript_line_is_written_per_call(tmp_path) -> None:
     path = tmp_path / "turns.jsonl"
     navigator = TypeSafeNavigator("g", client=FakeClient(), tools=[TAP_TOOL], transcript_path=path)
     asyncio.run(navigator(SCREEN))
-    navigator.observed(TAP_TOOL)
+    navigator.observed(TAP_TOOL, {"id": "el:aaa"})
     moved = {"ok": True, "observation": {**SCREEN["observation"], "meta": {"fingerprint": "fp-9"}}}
     asyncio.run(navigator(moved))
     assert len(path.read_text().strip().splitlines()) == 2
@@ -548,13 +580,18 @@ def test_waiting_is_an_action_the_navigator_can_actually_take() -> None:
     assert action["arguments"] == {"idle": True}
 
 
-def test_a_second_wait_on_a_screen_that_never_moved_escalates() -> None:
-    # No counter needed: waiting twice on an identical screen is the same (fingerprint, action)
-    # pair the repeat guard already refuses, so one wait per screen and then the chat model.
+def test_a_second_wait_on_the_same_activity_escalates_even_as_the_screen_churns() -> None:
+    # A loading screen re-fingerprints on every frame it redraws, so keying a wait on the
+    # fingerprint would never repeat and never escalate -- it would wait until the step budget.
+    # The activity is the thing that holds still while a screen loads.
     client = WideClient(kind="wait")
     navigator = TypeSafeNavigator("g", client=client, tools=WIDE_TOOLS, action_space="full")
-    assert asyncio.run(navigator(SCREEN)) is not None
-    assert asyncio.run(navigator(SCREEN)) is None
+    def loading(fingerprint):
+        return {"ok": True, "change": {"activity_after": ".Auth"},
+                "observation": {**SCREEN["observation"], "meta": {"fingerprint": fingerprint}}}
+
+    assert asyncio.run(navigator(loading("fp-1"))) is not None
+    assert asyncio.run(navigator(loading("fp-2"))) is None, "same activity, still loading"
     assert navigator.report()["declined"] == {"repeat_on_unchanged_screen": 1}
 
 
@@ -563,3 +600,121 @@ def test_waiting_is_refused_when_the_run_was_never_offered_the_tool() -> None:
                                   action_space="full")
     assert asyncio.run(navigator(SCREEN)) is None
     assert navigator.report()["declined"] == {"wait_not_offered": 1}
+
+
+# --- what goes on the wire -------------------------------------------------------------------
+# Every test above this line drives a fake client, so none of them could see what the request
+# body actually contains. Four of the last five fixes were found by a human reading that body.
+
+def sent(navigator_kwargs=None, screens=(SCREEN,)):
+    """Run the navigator over some screens and hand back every state it sent."""
+    client = RecordingClient()
+    navigator = TypeSafeNavigator("Open notification settings", client=client, tools=[TAP_TOOL],
+                                  **(navigator_kwargs or {}))
+    for screen in screens:
+        asyncio.run(navigator(screen))
+        navigator.observed(TAP_TOOL, {"id": "el:aaa"})
+    return client.states, navigator
+
+
+def test_no_element_digest_ever_reaches_the_model() -> None:
+    # The numbered menu exists to keep 32-character handles out of the request. They went on
+    # arriving anyway, on every element of the state body.
+    states, _ = sent()
+    body = json.dumps(states)
+    assert not re.search(r"[0-9a-f]{32}", body), "a digest is in the request"
+    assert "el:aaa" not in body
+
+
+def test_no_fingerprint_or_pixel_bounds_reach_the_model() -> None:
+    states, _ = sent()
+    screen = states[0]["this_is_the_new_screen"]
+    assert "meta" not in screen and "fingerprint" not in json.dumps(screen)
+    assert "bounds" not in json.dumps(screen), "pixel numbers are not something it can use"
+
+
+def test_every_journey_turn_says_what_was_chosen_and_what_followed() -> None:
+    moved = {"ok": True, "observation": {**SCREEN["observation"], "meta": {"fingerprint": "fp-2"}}}
+    states, _ = sent(screens=(SCREEN, moved, SCREEN))
+    for state in states:
+        for turn in state["journey_so_far"]:
+            assert turn["you_chose"] and turn["you_chose"] != "(nothing yet)"
+            assert turn["what_happened"]
+            assert "_label" not in turn
+
+
+def test_a_step_the_chat_model_took_still_appears_in_the_journey() -> None:
+    # The journey only ever recorded steps this navigator won. In the default space that is a
+    # small minority, so the model was told it was on step 6 of a run that was on step 12.
+    client = RecordingClient(target_conf=0.10)          # every proposal falls under the gate
+    navigator = TypeSafeNavigator("g", client=client, tools=[TAP_TOOL])
+    assert asyncio.run(navigator(SCREEN)) is None, "declined, so the chat model acts"
+    navigator.observed("scroll_and_analyze", {})
+    moved = {"ok": True, "observation": {**SCREEN["observation"], "meta": {"fingerprint": "fp-2"}}}
+    asyncio.run(navigator(moved))
+
+    journey = client.states[1]["journey_so_far"]
+    assert len(journey) == 1
+    assert journey[0]["you_chose"] == "scroll_and_analyze"
+
+
+def test_a_turn_survives_a_screen_this_navigator_could_not_read() -> None:
+    # `too_few_controls` returned before the turn was closed, so the turn was closed later
+    # against a screen it never saw -- a tap on Notifications came back as a scroll on '?'.
+    client = RecordingClient()
+    navigator = TypeSafeNavigator("g", client=client, tools=[TAP_TOOL])
+    asyncio.run(navigator(SCREEN))
+    navigator.observed(TAP_TOOL, {"id": "el:aaa"})
+    bare = {"ok": True, "observation": {"meta": {"fingerprint": "fp-2"},
+                                        "elements": [{"id": "el:z", "text": "OK", "clickable": True}]}}
+    assert asyncio.run(navigator(bare)) is None
+    navigator.observed("back_gesture_and_analyze", {})
+    asyncio.run(navigator({"ok": True, "observation": {**SCREEN["observation"],
+                                                       "meta": {"fingerprint": "fp-3"}}}))
+
+    journey = client.states[-1]["journey_so_far"]
+    assert [t["you_chose"] for t in journey] == [f"{TAP_TOOL} on 'Notifications'",
+                                                 "back_gesture_and_analyze"]
+
+
+def test_shadow_mode_declines_exactly_once() -> None:
+    # `_decline("shadow")` was called on two separate lines, so one shadow proposal reported two.
+    client = FakeClient()
+    navigator = TypeSafeNavigator("g", client=client, tools=[TAP_TOOL], shadow=True)
+    assert asyncio.run(navigator(SCREEN)) is None
+    assert navigator.report()["declined"] == {"shadow": 1}
+
+
+def test_the_journey_is_trimmed_from_the_oldest_end() -> None:
+    from experiments.aua_controller.typesafe_navigator import MAX_JOURNEY_CHARS
+
+    client = RecordingClient()
+    navigator = TypeSafeNavigator("g", client=client, tools=[TAP_TOOL])
+    navigator._journey = [{"n": i, "you_chose": "tap on 'x'", "what_happened": "y" * 400}
+                          for i in range(1, 401)]
+    asyncio.run(navigator(SCREEN))
+    journey = client.states[0]["journey_so_far"]
+    assert len(json.dumps(journey)) <= MAX_JOURNEY_CHARS
+    assert journey[-1]["n"] == 400, "the newest turns are the ones a loop is made of"
+
+
+@pytest.mark.parametrize("bounds,expected", [
+    ([0, 0, 100, 100], "top left"),
+    ([450, 950, 550, 1050], "middle centre"),
+    ([900, 1900, 1000, 2000], "bottom right"),
+])
+def test_an_unnamed_control_is_placed_on_the_right_third(bounds, expected) -> None:
+    from experiments.aua_controller.typesafe_navigator import where
+
+    said = where({"bounds": bounds}, {"width": 1000, "height": 2000})
+    assert said == f"unlabelled control, {expected} of the screen"
+
+
+def test_the_finish_outcomes_still_match_the_harness_they_are_sent_to() -> None:
+    # This enum is a copy of the harness's, plus `in_progress`, which is never passed on. A
+    # harness change would not propagate, and the mismatch would only show as a rejected call.
+    from experiments.aua_controller.run_realapp import FINISH_OUTCOMES as HARNESS
+    from experiments.aua_controller.typesafe_navigator import FINISH_OUTCOMES, UNFINISHED
+
+    assert set(FINISH_OUTCOMES) - {UNFINISHED} == set(HARNESS)
+    assert UNFINISHED not in HARNESS, "it is not a verdict the harness can record"
