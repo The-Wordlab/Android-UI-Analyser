@@ -303,3 +303,24 @@ Rules that keep this shape honest:
   not `android_ui_analyser.engine`.
 - Target discovery and connection always go through the selected `PlatformAdapter`; the former
   Android-only `connect`/`list_devices` monkeypatch seam has been removed.
+
+## 11. App map schema versioning: learned data expires, taught data does not
+
+The per-app map (`memory.AppMap`) carries `schema_version`. Two constants in `memory.py` govern
+what happens when an installed AUA meets a map written by an older one:
+
+- **`MEMORY_SCHEMA_VERSION`** — bump it on *any* change to what the map stores. `upgrade_app_map`
+  migrates older maps forward in memory; additive fields just take their defaults.
+- **`MEMORY_LEARNING_FLOOR`** — raise it only when the old *learned* half would mislead the new
+  AUA (screen identity changed, routes mean something else, a field is now derived
+  differently). A map below the floor is retired on first load, on every machine, with nobody
+  clearing anything: `AppMemoryStore._retire_learning` archives it beside the map as
+  `index.v<N>.json`, keeps what a person or agent **taught** (knowledge, deeplinks, recipes,
+  notes, launch activity, vocabulary), drops what AUA **learned** (screens, routes, contexts,
+  research tasks, pending reports), and saves the result at the current version so it happens
+  exactly once. The session cursor may briefly name a screen that no longer exists; the first
+  hop after that draws no edge and the second one does.
+
+The split is the point: re-learning a map costs a few visits, re-teaching an app costs a
+person. `tests/test_map_schema_versioning.py` pins both halves for both storage backends.
+

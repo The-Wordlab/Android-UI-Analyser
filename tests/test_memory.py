@@ -614,8 +614,10 @@ def test_edge_records_structured_steps(tmp_path: Path) -> None:
     dev._xml = APPS
     eng.analyze(source="hierarchy")
 
+    from android_ui_analyser.memory import MEMORY_SCHEMA_VERSION
+
     am = AppMemoryStore(eng.config.memory).load(P)
-    assert am is not None and am.schema_version == 4
+    assert am is not None and am.schema_version == MEMORY_SCHEMA_VERSION
     edge = next(e for e in am.routes if e.to_screen == "apps")
     assert edge.action == "tap 'Apps'"  # display string unchanged from v1
     assert len(edge.steps) == 1
@@ -722,7 +724,9 @@ def test_legacy_string_pending_is_dropped_on_load(tmp_path: Path) -> None:
     assert sess.pending == [] and sess.current_screen == "home"
 
 
-def test_v1_map_loads_and_saves_as_v4(tmp_path: Path) -> None:
+def test_v1_map_loads_and_is_saved_at_the_current_schema(tmp_path: Path) -> None:
+    from android_ui_analyser.memory import MEMORY_SCHEMA_VERSION
+
     store = _store(tmp_path)
     store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
     idx = store.index_path(P)
@@ -730,9 +734,10 @@ def test_v1_map_loads_and_saves_as_v4(tmp_path: Path) -> None:
     data["schema_version"] = 1
     idx.write_text(json.dumps(data))
     am = store.load(P)
-    assert am is not None  # loads version-agnostically
+    assert am is not None  # loads version-agnostically; its learned half is retired
+    assert am.screens == {} and (store.app_dir(P) / "index.v1.json").is_file()
     store.record_screen(package=P, elements=_elements(HOME))
-    assert json.loads(idx.read_text())["schema_version"] == 4
+    assert json.loads(idx.read_text())["schema_version"] == MEMORY_SCHEMA_VERSION
 
 
 def test_generic_inbound_label_defers_to_title(tmp_path: Path) -> None:

@@ -26,6 +26,14 @@ notes, so you can check for a newer version — and read what changed — withou
   session/UI/map/flow/browser catalogue and matching agent instructions. The default `full`
   catalogue and shared engine dispatch are unchanged.
 
+### Changed
+
+- Maps learned by an older AUA (map schema below 5) retire themselves on first load, on every
+  install: screens, routes, contexts and research questions are archived beside the map as
+  `index.v4.json` and rebuilt from scratch, while taught knowledge, deeplinks, recipes, notes,
+  launch activity and vocabulary are kept. Bump `MEMORY_SCHEMA_VERSION` for any map field
+  change; raise `MEMORY_LEARNING_FLOOR` only when old learned data would mislead.
+
 ### Fixed
 
 - MCP `session_start` now describes and schema-validates artifact prerequisites: `evidence=all`

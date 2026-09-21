@@ -48,7 +48,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger("android_ui_analyser.memory")
 
-MEMORY_SCHEMA_VERSION = 4
+MEMORY_SCHEMA_VERSION = 5
+#: A map saved below this version has its *learned* half — screens, routes, contexts,
+#: research — retired on first load and rebuilt from scratch; what an agent or a person
+#: *taught* (knowledge, deeplinks, recipes, notes, launch, vocabulary) is kept. Raise it only
+#: when old learned data would mislead the new AUA: every install then starts clean on its
+#: own, with the old map archived beside the new one as ``index.v<N>.json``.
+MEMORY_LEARNING_FLOOR = 5
 LEGACY_CONTEXT_ID = "legacy-default"
 DEFAULT_CONTEXT_ID = "default"
 
@@ -2215,14 +2221,52 @@ class AppMemoryStore:
     def load(self, package: str) -> AppMap | None:
         if self._sqlite is not None:
             app = self._sqlite.load_app(package)
-            return upgrade_app_map(app) if app is not None else None
-        path = self.index_path(package)
-        if not path.is_file():
+        else:
+            path = self.index_path(package)
+            if not path.is_file():
+                return None
+            try:
+                app = AppMap.model_validate_json(path.read_text(encoding="utf-8"))
+            except Exception:  # pragma: no cover - corrupt file → treat as absent
+                return None
+        if app is None:
             return None
-        try:
-            return upgrade_app_map(AppMap.model_validate_json(path.read_text(encoding="utf-8")))
-        except Exception:  # pragma: no cover - corrupt file → treat as absent
-            return None
+        if app.schema_version < MEMORY_LEARNING_FLOOR:
+            app = self._retire_learning(app)
+        return upgrade_app_map(app)
+
+    def _retire_learning(self, old: AppMap) -> AppMap:
+        """Set an older map's learned half aside and keep only what was taught. Runs once."""
+        d = self.app_dir(old.package)
+        d.mkdir(parents=True, exist_ok=True)
+        archive = d / f"index.v{old.schema_version}.json"
+        atomic_write_text(archive, old.model_dump_json(indent=2))
+        learned = (len(old.screens), len(old.routes))
+        # Fold legacy notes/recipes/description into knowledge items before copying the taught half.
+        old = upgrade_app_map(old)
+        fresh = AppMap(
+            package=old.package,
+            label=old.label,
+            app_version=old.app_version,
+            description=old.description,
+            deeplinks=old.deeplinks,
+            recipes=old.recipes,
+            notes=old.notes,
+            vocabulary=old.vocabulary,
+            launch=old.launch,
+            launcher_activities=old.launcher_activities,
+            knowledge=old.knowledge,
+        )
+        logger.info(
+            "retired map %s for %s (%d screens, %d routes); kept %d knowledge items at %s",
+            archive.name,
+            old.package,
+            *learned,
+            len(old.knowledge),
+            archive,
+        )
+        self.save(fresh)  # stamps the current schema, so this happens exactly once
+        return fresh
 
     def save(self, app: AppMap) -> None:
         app = upgrade_app_map(app)
