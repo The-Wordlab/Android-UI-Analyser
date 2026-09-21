@@ -13,6 +13,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- The app map now remembers each screen's layout tree: what is where, top to bottom, with
+  tap/scroll/input/selected marks, repeated rows collapsed and system chrome dropped.
+  `aua map --screen <name>` prints it (and `--json` carries it as `layout`); a logical name
+  prints one tree per feature-flag context. The dashboard's App map shows the same tree per
+  screen.
 - Opt-in `connection: existing-chrome` drives one explicitly approved, already-open Chrome tab
   through AUA's semantic UI, screenshot, diagnostics, map and flow surfaces. A bundled Manifest
   V3 extension/native host detaches on disconnect and cannot read browser cookies, history, or

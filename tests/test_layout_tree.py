@@ -234,3 +234,71 @@ def test_maps_saved_before_layout_trees_still_load(tmp_path) -> None:
         }
     )
     assert rec.layout is None
+
+
+# ------------------------------------------------------------------------ aua map --screen
+
+
+def test_cli_map_screen_prints_the_layout_tree(tmp_path, monkeypatch) -> None:
+    import json
+
+    from typer.testing import CliRunner
+
+    from android_ui_analyser import engine as engine_mod
+    from android_ui_analyser.cli import app as cli_app
+    from conftest import FakeDevice
+
+    runner = CliRunner()
+    dev = FakeDevice(hierarchy_xml=ORDERS, package=P, serial="emu-tree")
+    monkeypatch.setattr(engine_mod.Engine, "_connect_target", lambda _engine, serial=None: dev)
+    assert runner.invoke(cli_app, ["analyze", "--source", "hierarchy"]).exit_code == 0
+    seen = runner.invoke(cli_app, ["--format", "compact", "analyze", "--source", "hierarchy"])
+    name = json.loads(seen.stdout)["meta"]["known_screen"]
+    assert name
+
+    shown = runner.invoke(cli_app, ["map", "--app", P, "--screen", name])
+    assert shown.exit_code == 0, shown.stderr
+    assert "## Layout" in shown.stdout
+    assert "↕ order_list" in shown.stdout and "×3 similar" in shown.stdout
+    assert "buyer@example.com" not in shown.stdout
+
+    as_json = runner.invoke(cli_app, ["map", "--app", P, "--screen", name, "--json"])
+    assert json.loads(as_json.stdout)["layout"].startswith(name)
+
+
+def test_map_screen_by_logical_name_shows_one_tree_per_flag_context() -> None:
+    from android_ui_analyser.memory import AppMap, ContextRecord, ScreenRecord, render_map
+
+    def screen(name: str, context: str, tree: str | None) -> ScreenRecord:
+        return ScreenRecord(
+            name=name,
+            logical_name="orders",
+            context_id=context,
+            signature="s",
+            first_seen="t",
+            last_seen="t",
+            last_verified="t",
+            layout=tree,
+        )
+
+    app = AppMap(
+        package=P,
+        contexts={
+            "default": ContextRecord(id="default", first_seen="t", last_seen="t"),
+            "flags-list_v2-1": ContextRecord(
+                id="flags-list_v2-1", flags={"list_v2": "on"}, first_seen="t", last_seen="t"
+            ),
+        },
+        screens={
+            "orders__a": screen(
+                "orders__a", "default", "orders__a\n└─ ↕ order_list @y440 1080×1660\n"
+            ),
+            "orders__b": screen("orders__b", "flags-list_v2-1", None),
+        },
+    )
+    text = render_map(app, screen="orders")
+    assert text.startswith("# orders  (com.example.shop, 2 variants)")
+    assert "## orders__a  (context: default)" in text
+    assert "## orders__b  (context: flags-list_v2-1 · list_v2=on)" in text
+    assert "↕ order_list" in text
+    assert "no layout recorded yet" in text

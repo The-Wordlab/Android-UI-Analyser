@@ -5537,6 +5537,12 @@ def _render_find(app: AppMap, query: str, context_id: str | None = None) -> str:
 def _render_screen_detail(app: AppMap, screen: str) -> str:
     rec = app.screens.get(screen)
     if rec is None:
+        variants = sorted(
+            (r for r in app.screens.values() if screen in (r.logical_name, r.canonical_name)),
+            key=lambda r: (r.context_id, r.name),
+        )
+        if variants:
+            return _render_screen_variants(app, screen, variants)
         avail = ", ".join(sorted(app.screens)) or "(none)"
         return f"# {screen}\n\n_(unknown screen; known: {avail})_\n"
     lines = [f"# {screen}  ({app.package})"]
@@ -5581,3 +5587,25 @@ def _render_screen_detail(app: AppMap, screen: str) -> str:
         for e in outgoing:
             lines.append(f"→ {e.to_screen} ({e.action})")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_screen_variants(app: AppMap, logical: str, variants: list[ScreenRecord]) -> str:
+    """One logical screen as it looks in each feature-flag context: a layout tree per variant."""
+    lines = [f"# {logical}  ({app.package}, {len(variants)} variants)"]
+    for rec in variants:
+        context = app.contexts.get(rec.context_id)
+        flags = ", ".join(f"{k}={v}" for k, v in sorted(context.flags.items())) if context else ""
+        meta = [f"context: {rec.context_id}"]
+        if flags:
+            meta.append(flags)
+        if rec.stale:
+            meta.append("STALE")
+        lines.append("")
+        lines.append(f"## {rec.name}  ({' · '.join(meta)})")
+        if rec.layout:
+            lines.append("```")
+            lines.append(rec.layout.rstrip())
+            lines.append("```")
+        else:
+            lines.append("_(no layout recorded yet; visit it once with `aua analyze`)_")
+    return "\n".join(lines) + "\n"
