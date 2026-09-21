@@ -136,6 +136,13 @@ def _observation(result: dict[str, Any]) -> dict[str, Any] | None:
         return nested
     if isinstance(result.get("screen"), dict) and isinstance(result.get("elements"), list):
         return result
+    # A refused action reports the screen under its error: the failure is about the action
+    # AUA did not send, not about what is on display. Skipping this read made every such
+    # step look blank, so the navigator declined it and the chat model paid for a frame it
+    # could have answered itself.
+    error = result.get("error")
+    if isinstance(error, dict) and isinstance(error.get("observation"), dict):
+        return error["observation"]
     return None
 
 
