@@ -16,12 +16,32 @@ rather than tuned:
   but acting on it is refused: the worst measured confusions were about stopping, and ending a
   run early corrupts the verdict rather than costing a step.
 
-**The gate default is not currently backed by a measurement of this code.** 0.85 came from 120
-saved steps scored against a request that no longer exists: five action options rather than
-eight, element digests as the Choice keys, a history of bare tool names, no ``what_happened``,
-and a journey that omitted every step the chat model took. Adding options redistributes
-probability mass and lowers the maximum, so the old coverage/fidelity table is not transferable
-and has been removed rather than left to be quoted. Re-measure before relying on a number.
+**The gate, measured against the request this code actually sends.** 200 steps replayed out of
+verified-pass runs of a real app, scored against what the run did next -- a floor on correctness,
+not correctness: a different tap is not a wrong tap, and the chat model itself takes recoverable
+detours. Only a tap is ever acted on in the default space, so only taps are scored:
+
+====  ==============  ===========================
+gate  steps acted on  same control the run tapped
+====  ==============  ===========================
+0.00       108 (54%)                    44 (41%)
+0.70        27 (14%)                    17 (63%)
+0.80        19 (10%)                    15 (79%)
+0.85        18  (9%)                    14 (78%)
+0.90        10  (5%)                     8 (80%)
+0.95         7  (4%)                     6 (86%)
+====  ==============  ===========================
+
+0.85 stays, but the table says plainly that the gate is not the lever: 0.80, 0.85 and 0.90 are
+one sample of each other, and above 0.90 there is no sample left to read.
+
+**The lever is the ``target`` question.** Split the two questions and they are not the same
+instrument. Asked whether a tap is the right *kind* of action, the model is right 95% of the time
+at 0.80 and up (39 of 41). Asked *which control*, its median confidence is 0.60, it is the half
+of ``min()`` that holds the gate down on 61% of taps, and every one of the four accepted misses
+at 0.85 was a step where the run did tap -- it named a different control, at 0.88 to 0.98. So the
+accuracy budget is spent on naming a control, and confidence there does not separate right from
+wrong the way it does on the action. That is where to spend effort, not on the threshold.
 
 A proposal is an opinion with no authority beyond the tools it was offered. ``shadow`` records
 what it would have done and returns ``None`` every time, which is how a run proves the gate on
@@ -37,7 +57,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 MODEL = "jev-latest"
-MIN_CONFIDENCE = 0.85  # not re-measured against the current questions; see the module docstring
+MIN_CONFIDENCE = 0.85  # measured; see the module docstring -- the threshold is not the lever
 #: A ceiling on the journey, not a documented API limit -- the SDK publishes none. It exists
 #: because this model is documented to lose accuracy as the state fills with material that is not
 #: about the decision, and a run's journey grows every step.
