@@ -170,6 +170,12 @@ OBSERVATION_META_PRESETS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "screen_moved",
             "stale_risk",
             "arrival_state",
+            # …and the one thing none of those can say either, because it is not on the screen
+            # at all: the app asked its backend for something and is still waiting. A loading
+            # screen and a finished one are the same hierarchy, so without this a caller presses
+            # the button it already pressed. Same bargain as the warnings above — absent unless
+            # it fires, and absent entirely unless `network.app_hosts` names a backend.
+            "network_in_flight",
             "lossy_text",
             "lossy_hint",
             "known_screen",

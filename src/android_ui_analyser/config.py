@@ -472,6 +472,26 @@ class CacheCfg(BaseModel):
     dir: str = "~/.cache/android-ui-analyser"
 
 
+class NetworkCfg(BaseModel):
+    """Which hosts count as the app's own backend.
+
+    Measured on a real app with the proxy running: of every call caught while it started up and
+    was driven through a login, not one belonged to the app's backend. Google push registration,
+    a Firebase remote-config stream that stayed open across three screens, RevenueCat, Facebook's
+    SDK, a `POST /a1` beacon. None of them hold a screen up, and replayed through a navigator
+    they never caused a false wait but did cost confidence on every screen that carried one --
+    enough to push two ready screens back to the expensive model for nothing.
+
+    There is no way to tell a backend from a vendor SDK by looking at it, so the caller names
+    theirs and nothing else is reported. Empty -- the default -- means silence, not everything.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    #: Host suffixes, matched on a dot boundary: `theapp.test` covers `api.staging.theapp.test`
+    #: and not `nottheapp.test`. One entry usually covers every environment.
+    app_hosts: list[str] = Field(default_factory=list)
+
+
 class CaptureCfg(BaseModel):
     """Always-on rolling screencap buffer (daemon-warm sessions)."""
 
@@ -777,6 +797,7 @@ class Config(BaseModel):
     daemon: DaemonCfg = Field(default_factory=DaemonCfg)
     cache: CacheCfg = Field(default_factory=CacheCfg)
     capture: CaptureCfg = Field(default_factory=CaptureCfg)
+    network: NetworkCfg = Field(default_factory=NetworkCfg)
     dashboard: DashboardCfg = Field(default_factory=DashboardCfg)
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
     logs: LogsCfg = Field(default_factory=LogsCfg)

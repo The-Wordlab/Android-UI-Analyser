@@ -124,10 +124,17 @@ notes, so you can check for a newer version — and read what changed — withou
   them as `["POST /v1/auth/login"]`, recent unanswered ones only. A screen mid-load and an idle
   screen are the same hierarchy, so an agent that pressed a button, got a screen back that looked
   unchanged, and had nothing else to go on pressed it again — measured on a real login. Needs
-  `aua proxy start`; the key is absent when nothing is in the air and absent when no proxy is
-  running, so a quiet response pays nothing for it. Only calls started in the last few seconds
-  count, because a chat app holds a streamed connection open by design and a signal that is
-  always on is not a signal.
+  `aua proxy start` and `network.app_hosts` naming the app's own backend; the key is absent when
+  nothing is in the air, when no backend is named, and when no proxy is running, so a quiet
+  response pays nothing for it. Only calls started in the last few seconds count, because a chat
+  app holds a streamed connection open by design and a signal that is always on is not a signal.
+
+  Naming the backend is not optional tidying. With the proxy running against a real app, every
+  call it caught belonged to a vendor SDK — push registration, a Firebase config stream that
+  stayed open across three screens, RevenueCat, Facebook, an analytics beacon — and none of them
+  hold a screen up. Replayed through a navigator they raised no false wait, but cost confidence
+  on every screen that carried one, enough to push two ready screens back to the expensive model
+  for nothing. Nothing in a URL tells a backend from a vendor, so the caller says which.
 
 ### Fixed
 

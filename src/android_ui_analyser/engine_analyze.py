@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import time
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
@@ -633,18 +634,40 @@ def _attach_visual_identity(
 
 
 
+def _is_app_host(host: str, app_hosts: Sequence[str]) -> bool:
+    """Does *host* belong to one of the named backends?
+
+    Suffix match on a dot boundary rather than a substring, so `theapp.test` covers every
+    environment the backend is reached at and does not also swallow `nottheapp.test`.
+    """
+    host = host.lower().rstrip(".")
+    return any(host == name or host.endswith(f".{name}")
+               for name in (str(h).lower().strip().rstrip(".") for h in app_hosts) if name)
+
+
 def network_in_flight(self: Engine) -> list[str] | None:
-    """Calls the app started recently that nothing has answered, as ``"POST /v1/auth/login"``.
+    """Calls the app's own backend started recently and has not answered: ``"POST /v1/login"``.
 
     ``None`` rather than ``[]`` when there is nothing to say, because `Meta` drops falsey values
     and a quiet screen must pay nothing for this field -- the key appearing *is* the signal, the
     same contract `screen_moved` and `stale_risk` follow.
+
+    Only the hosts `network.app_hosts` names, and by default it names none, so this says nothing
+    until a caller opts in. That default is measured rather than cautious: running the proxy
+    against a real app, every call it caught belonged to a vendor SDK -- push registration, a
+    Firebase config stream, RevenueCat, Facebook, an analytics beacon -- and none of them hold a
+    screen up. Replayed through a navigator they raised no false `wait`, but they cost confidence
+    on every screen that carried one, enough to push two ready screens back to the expensive
+    model. Nothing in a URL distinguishes a backend from a vendor, so the caller says which.
 
     Needs a running proxy, which most runs do not have, so every way of not having one -- no
     capability, no process, no journal -- is silence rather than an error. Named by method and
     route and never by number: jev-1.13 and its kin read semantic values better than opaque ones,
     and a duration here would invite arithmetic this class of model does not do.
     """
+    app_hosts = self.config.network.app_hosts
+    if not app_hosts:
+        return None
     try:
         proxy = self.platform.capability("proxy")
         flying = proxy.read_flows_in_flight(
@@ -653,7 +676,8 @@ def network_in_flight(self: Engine) -> list[str] | None:
     except Exception:  # no proxy capability, no proxy running, no journal yet
         return None
     named = [f"{str(e.get('method') or '').upper()} {e.get('path') or ''}".strip()
-             for e in flying if e.get("path")]
+             for e in flying
+             if e.get("path") and _is_app_host(str(e.get("host") or ""), app_hosts)]
     return named[:MAX_IN_FLIGHT] or None
 
 

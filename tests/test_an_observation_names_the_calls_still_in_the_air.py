@@ -34,8 +34,9 @@ class _Journal:
         return [e for e in self.entries if float(e.get("ts") or 0) > since_ts]
 
 
-def _engine(tmp_path: Any, journal: _Journal):  # noqa: ANN202
-    engine = make_engine(cache={"dir": str(tmp_path / "cache")})
+def _engine(tmp_path: Any, journal: _Journal, *, app_hosts: list[str] | None = None):  # noqa: ANN202
+    engine = make_engine(cache={"dir": str(tmp_path / "cache")},
+                         network={"app_hosts": app_hosts or []})
     real = engine.platform.capability
 
     def capability(name: str) -> Any:
@@ -45,12 +46,14 @@ def _engine(tmp_path: Any, journal: _Journal):  # noqa: ANN202
     return engine
 
 
-def _open(path: str, *, method: str = "POST", ago: float = 0.2) -> dict[str, Any]:
-    return {"flow": 1, "ts": time.time() - ago, "method": method, "path": path, "open": True}
+def _open(path: str, *, method: str = "POST", ago: float = 0.2,
+          host: str = "api.example.test") -> dict[str, Any]:
+    return {"flow": 1, "ts": time.time() - ago, "method": method, "path": path,
+            "host": host, "open": True}
 
 
 def test_a_call_that_has_not_answered_is_named_on_the_observation(tmp_path: Any) -> None:
-    engine = _engine(tmp_path, _Journal([_open("/v1/auth/login")]))
+    engine = _engine(tmp_path, _Journal([_open("/v1/auth/login")]), app_hosts=["example.test"])
     assert engine_analyze.network_in_flight(engine) == ["POST /v1/auth/login"]
 
 
@@ -72,7 +75,8 @@ def test_a_platform_with_no_proxy_capability_is_not_an_error(tmp_path: Any) -> N
 def test_a_connection_held_open_since_before_this_screen_is_not_reported(tmp_path: Any) -> None:
     """The streamed chat connection is open on every screen; it is not what "loading" means."""
     journal = _Journal([_open("/v1/stream", method="GET", ago=600.0), _open("/v1/auth/login")])
-    assert engine_analyze.network_in_flight(engine := _engine(tmp_path, journal)) == [
+    engine = _engine(tmp_path, journal, app_hosts=["example.test"])
+    assert engine_analyze.network_in_flight(engine) == [
         "POST /v1/auth/login"
     ]
     assert engine is not None
@@ -81,13 +85,94 @@ def test_a_connection_held_open_since_before_this_screen_is_not_reported(tmp_pat
 def test_the_window_asked_for_is_recent_not_the_whole_run(tmp_path: Any) -> None:
     journal = _Journal([])
     before = time.time()
-    engine_analyze.network_in_flight(_engine(tmp_path, journal))
+    engine_analyze.network_in_flight(_engine(tmp_path, journal, app_hosts=["theapp.test"]))
     assert journal.asked and before - journal.asked[0] <= engine_analyze.IN_FLIGHT_WINDOW_S + 1
+
+
+def test_the_journal_is_not_even_read_when_no_backend_is_named(tmp_path: Any) -> None:
+    """The default costs nothing: no file is opened on any of the runs that never configure this."""
+    journal = _Journal([_open("/api/v4.0/chat")])
+    assert engine_analyze.network_in_flight(_engine(tmp_path, journal)) is None
+    assert journal.asked == []
 
 
 def test_the_calls_are_named_semantically_and_carry_no_numbers(tmp_path: Any) -> None:
     """jev-1.13 is documented to read opaque and numeric values worse than semantic ones."""
     journal = _Journal([_open("/v1/auth/login"), _open("/v1/profile", method="GET")])
-    named = engine_analyze.network_in_flight(_engine(tmp_path, journal))
+    named = engine_analyze.network_in_flight(_engine(tmp_path, journal, app_hosts=["example.test"]))
     assert named == ["POST /v1/auth/login", "GET /v1/profile"]
     assert all(isinstance(item, str) for item in named)
+
+
+# ------------------------------------------------- only the app's own backend is worth hearing
+
+def test_nothing_is_reported_until_the_caller_names_their_backend(tmp_path: Any) -> None:
+    """Measured on a real app: every call the proxy caught was a third-party SDK.
+
+    Google push registration, a Firebase remote-config stream, RevenueCat, Facebook's SDK, a
+    `POST /a1` analytics beacon. None of them hold a screen up. Replayed through the model they
+    never produced a false `wait`, but they cost confidence on every screen that carried one --
+    1.00 to 0.74 and 0.93 to 0.69, both of which fall below the gate, so two ready screens would
+    have been handed back to the expensive model for nothing. Silence is the honest default.
+    """
+    journal = _Journal([_open("/v1/firelog/legacy/batchlog", host="crashlyticsreports-pa.googleapis.com")])
+    assert engine_analyze.network_in_flight(_engine(tmp_path, journal)) is None
+
+
+def test_only_the_named_backend_is_reported(tmp_path: Any) -> None:
+    journal = _Journal([
+        _open("/c2dm/register3", host="android.googleapis.com"),
+        _open("/api/v4.0/chat", host="api.theapp.test"),
+        _open("/v16.0/app", method="GET", host="graph.facebook.com"),
+    ])
+    named = engine_analyze.network_in_flight(_engine(tmp_path, journal, app_hosts=["api.theapp.test"]))
+    assert named == ["POST /api/v4.0/chat"]
+
+
+def test_a_named_host_covers_its_subdomains(tmp_path: Any) -> None:
+    """A backend is named once and reached at several subdomains: staging, api, eu1."""
+    journal = _Journal([_open("/api/v4.0/chat", host="api.staging.theapp.test")])
+    assert engine_analyze.network_in_flight(
+        _engine(tmp_path, journal, app_hosts=["theapp.test"])) == ["POST /api/v4.0/chat"]
+
+
+def test_a_named_host_does_not_match_a_lookalike(tmp_path: Any) -> None:
+    """`theapp.test` must not swallow `nottheapp.test`; the boundary is a dot, not a substring."""
+    journal = _Journal([_open("/api/v4.0/chat", host="nottheapp.test")])
+    assert engine_analyze.network_in_flight(
+        _engine(tmp_path, journal, app_hosts=["theapp.test"])) is None
+
+
+def test_a_call_with_no_host_is_not_guessed_at(tmp_path: Any) -> None:
+    journal = _Journal([{"flow": 1, "ts": time.time(), "method": "GET", "path": "/x", "open": True}])
+    assert engine_analyze.network_in_flight(
+        _engine(tmp_path, journal, app_hosts=["theapp.test"])) is None
+
+
+# ------------------------------------------------- it has to survive the trip to the caller
+
+
+def test_an_action_keeps_the_field_on_its_folded_observation() -> None:
+    """Every action trims `meta` to the `changed` preset, and a key not named there is gone.
+
+    Measured on a real run: AUA computed the field and returned it, and the harness's copy of the
+    very same observation -- same fingerprint -- did not have it, on every tap. The engine half of
+    this feature was working and no caller could see it, which is the same shape as the `checked`
+    flag that went missing and made a whole class of contract bullet unverifiable.
+    """
+    from android_ui_analyser.projection import OBSERVATION_META_PRESETS, Projection
+
+    assert "network_in_flight" in OBSERVATION_META_PRESETS["changed"]
+    view = Projection.for_observation(None, meta="changed")
+    assert view is not None
+    kept = view.apply({
+        "observation": {
+            "screen": {"package": "com.example.app"},
+            "elements": [{"id": "el:a", "text": "Sign in", "clickable": True,
+                          "bounds": [0, 0, 10, 10]}],
+            "meta": {"fingerprint": "abc", "duration_ms": 3,
+                     "network_in_flight": ["POST /v1/auth/login"]},
+        }
+    })
+    assert (kept["observation"]["meta"].get("network_in_flight")
+            == ["POST /v1/auth/login"]), kept["observation"]["meta"]
