@@ -22,6 +22,7 @@ from experiments.aua_controller.compaction import compact_frame  # noqa: E402
 from experiments.aua_controller.typesafe_navigator import (  # noqa: E402
     TAP_TOOL,
     TypeSafeNavigator,
+    build_questions,
     candidates,
     numbered,
     screen_for_model,
@@ -53,12 +54,12 @@ class FakeClient:
         self.calls += 1
         if self.error:
             raise self.error
+        # One question now: a press is the numbered control itself, so `kind="tap"` here means
+        # "press whichever control `target` names" and every other kind answers as itself.
+        choice = self.target if self.kind == "tap" else self.kind
+        confidence = self.target_conf if self.kind == "tap" else self.kind_conf
         return SimpleNamespace(
-            answers={
-                "action": SimpleNamespace(choice=self.kind, confidence=self.kind_conf),
-                "target": SimpleNamespace(choice=self.target, confidence=self.target_conf),
-                "settled": SimpleNamespace(noul=self.settled),
-            },
+            answers={"move": SimpleNamespace(choice=choice, confidence=confidence)},
             usage=SimpleNamespace(input_tokens=430),
         )
 
@@ -92,10 +93,11 @@ def test_a_tap_below_the_gate_is_declined() -> None:
     assert navigator.report()["declined"] == {"below_confidence": 1}
 
 
-def test_the_weaker_of_the_two_choices_is_the_one_that_gates() -> None:
-    # A certain target reached by an uncertain action is still an uncertain step.
-    action, _ = propose(FakeClient(kind_conf=0.55, target_conf=1.0))
-    assert action is None
+def test_one_answer_carries_one_confidence() -> None:
+    # There is no second question about a press to disagree with, so the press's own number is
+    # the whole gate. `min()` of an action and an operand was two numbers about different things.
+    assert propose(FakeClient(target_conf=0.55))[0] is None
+    assert propose(FakeClient(target_conf=0.99))[0] is not None
 
 
 def test_a_target_that_is_not_on_this_screen_is_refused() -> None:
@@ -326,14 +328,14 @@ def test_the_operand_questions_are_asked_in_the_same_single_request() -> None:
     client = WideClient()
     wide(client)
     assert client.calls == 1
-    assert {"action", "target", "outcome"} == set(client.questions)
+    assert {"move", "outcome"} == set(client.questions)
 
 
 def test_the_narrow_default_asks_no_operand_questions() -> None:
     client = WideClient()
     TypeSafeNavigator("g", client=client, tools=WIDE_TOOLS)
     asyncio.run(TypeSafeNavigator("g", client=client, tools=WIDE_TOOLS)(SCREEN))
-    assert set(client.questions) == {"action", "target"}
+    assert set(client.questions) == {"move"}
 
 
 def test_an_unknown_action_space_is_refused_at_construction() -> None:
@@ -376,7 +378,7 @@ def test_the_boundary_options_are_offered_in_both_action_spaces() -> None:
     from experiments.aua_controller.typesafe_navigator import ACTION_KINDS, build_questions
 
     for space in ("taps", "full"):
-        criteria = build_questions({"el:a": "A", "el:b": "B"}, action_space=space)["action"].criteria
+        criteria = build_questions({"el:a": "A", "el:b": "B"}, action_space=space)["move"].criteria
         assert {"wait", "blocked"} <= set(criteria), space
     assert {"wait", "blocked"} <= set(ACTION_KINDS)
 
@@ -396,9 +398,9 @@ def test_every_call_is_written_to_the_transcript_with_its_cost(tmp_path) -> None
     assert set(entry["request"]) == {"model", "state", "questions"}
     assert entry["request"]["state"]["this_is_the_new_screen"]["elements"]
     assert entry["verdict"]["accepted"] is True
-    assert set(entry["request"]["questions"]) == {"action", "target"}
-    assert entry["response"]["answers"]["action"]["choice"] == "tap"
-    assert entry["response"]["answers"]["target"]["confidence"] == 0.95
+    assert set(entry["request"]["questions"]) == {"move"}
+    assert entry["response"]["answers"]["move"]["choice"] == "1"
+    assert entry["response"]["answers"]["move"]["confidence"] == 0.95
     assert entry["input_tokens"] == 430
     assert entry["usd"] == pytest.approx(430 * 42 / 1e9)
     assert navigator.report()["usd"] == pytest.approx(430 * 42 / 1e9)
@@ -502,15 +504,17 @@ def test_a_frame_without_change_telemetry_falls_back_to_the_old_wording() -> Non
     assert what_happened({}, moved=True) == "the screen changed"
 
 
-def test_the_record_names_the_operand_the_gate_actually_read() -> None:
-    # A finish is gated on its outcome, not on the tap target it never used. Printing the target
-    # beside that gate made the log contradict itself: target 0.86, gate 0.51, same row.
-    action, navigator = wide(WideClient(kind="done", outcome="achieved", operand_conf=0.51))
+def test_finishing_is_still_gated_on_the_outcome_it_would_record() -> None:
+    # Merging the controls into the action list removed the *speculative* operand; it did not
+    # ban a question whose answer is used. Finishing reads `outcome` and writes it to the
+    # harness, so a shaky outcome must hold the step back however sure the move itself is.
+    action, navigator = wide(WideClient(kind="done", kind_conf=0.99,
+                                        outcome="achieved", operand_conf=0.51))
     assert action is None, "0.51 is under the default gate"
     record = navigator.proposals[0]
     assert record["operand"] == "achieved"
-    assert record["operand_confidence"] == 0.51
-    assert record["gate"] == 0.51, "the gate is the action and its own operand, nothing else"
+    assert record["outcome_confidence"] == 0.51
+    assert record["gate"] == 0.51, "the weaker of the move and the outcome it would record"
 
 
 def test_a_declined_call_says_why_in_its_transcript_entry(tmp_path) -> None:
@@ -761,3 +765,54 @@ def test_compaction_does_not_drop_the_calls_still_in_the_air() -> None:
         "elements": [{"text": "Sign in", "id": "el:abc", "clickable": True}],
     }}, keep_ids=True)
     assert compact["observation"]["meta"]["network_calls"] == ["POST /v1/auth/login"]
+
+
+# ----------------------------------------- one question, each action carrying its own operand
+
+
+def test_every_control_is_its_own_action() -> None:
+    """Splitting "what kind of move" from "which control" made the model answer both, always.
+
+    It picked `wait` and named a button in the same breath, and the harness threw the button
+    away. Nothing was wrong with the answer -- the operand was speculative, and speculation is
+    nearly free on a model that prices the state once -- but nobody reading the request should
+    have to be told to ignore half of it. The API has no question conditional on another answer,
+    so folding the controls into the action list is the only shape that removes the dependency.
+    """
+    questions = build_questions({"el:a": "Allow", "el:b": "Ask me later"})
+    assert list(questions) == ["move"]
+    criteria = questions["move"].criteria
+    assert criteria["1"] == "Press 'Allow'"
+    assert criteria["2"] == "Press 'Ask me later'"
+    for kind in ("scroll_down", "scroll_up", "back", "done", "wait", "blocked", "type"):
+        assert kind in criteria, kind
+    assert "tap" not in criteria, "a bare `tap` names no control and is not an action"
+
+
+def test_the_gate_reads_one_confidence_now() -> None:
+    """`min()` of two questions about different things was never one number about one decision."""
+    navigator = TypeSafeNavigator("open settings",
+                                  client=FakeClient(target="1", target_conf=0.9),
+                                  tools=[TAP_TOOL], min_confidence=0.85)
+    proposal = asyncio.run(navigator(SCREEN))
+    assert proposal is not None and proposal["tool"] == TAP_TOOL
+    verdict = navigator.proposals[-1]
+    assert verdict["gate"] == 0.9
+    assert "target_confidence" not in verdict
+
+
+def test_an_action_that_takes_no_operand_names_none() -> None:
+    navigator = TypeSafeNavigator("go back", client=FakeClient(kind="back", kind_conf=0.95),
+                                  tools=[TAP_TOOL, "back_gesture_and_analyze"],
+                                  min_confidence=0.85, action_space="full")
+    proposal = asyncio.run(navigator(SCREEN))
+    assert proposal is not None and proposal["tool"] == "back_gesture_and_analyze"
+    assert navigator.proposals[-1]["operand"] == "back"
+
+
+def test_a_control_that_is_not_on_this_screen_is_refused() -> None:
+    """The answer is an index into a menu built for this screen and nothing else."""
+    navigator = TypeSafeNavigator("open settings", client=FakeClient(target="99"),
+                                  tools=[TAP_TOOL], min_confidence=0.5)
+    assert asyncio.run(navigator(SCREEN)) is None
+    assert navigator.declined.get("unknown_target") == 1

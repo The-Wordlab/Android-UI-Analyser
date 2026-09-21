@@ -16,32 +16,34 @@ rather than tuned:
   but acting on it is refused: the worst measured confusions were about stopping, and ending a
   run early corrupts the verdict rather than costing a step.
 
-**The gate, measured against the request this code actually sends.** 200 steps replayed out of
-verified-pass runs of a real app, scored against what the run did next -- a floor on correctness,
-not correctness: a different tap is not a wrong tap, and the chat model itself takes recoverable
-detours. Only a tap is ever acted on in the default space, so only taps are scored:
+**One question, and the gate measured against it.** A press is not an action plus a separate
+operand -- each pressable control *is* an action, listed beside the actions that operate on
+nothing. The earlier shape asked "what kind of move" and "which control" as two independent
+questions, because the API has no question conditional on another answer, so the model named a
+control even when it chose to wait and the gate was the minimum of two confidences about
+different things. Measured over 60 real screens three times, the merged form is steadier (median
+confidence 0.54-0.55 against 0.47-0.48) and acts on the same taps at the same accuracy. It is not
+faster. It is one question with one answer and nothing discarded.
+
+200 steps replayed out of verified-pass runs of a real app, scored against what the run did next
+-- a floor on correctness, not correctness: a different tap is not a wrong tap, and the chat model
+itself takes recoverable detours. Only a tap is ever acted on in the default space:
 
 ====  ==============  ===========================
 gate  steps acted on  same control the run tapped
 ====  ==============  ===========================
-0.00       108 (54%)                    44 (41%)
-0.70        27 (14%)                    17 (63%)
-0.80        19 (10%)                    15 (79%)
-0.85        18  (9%)                    14 (78%)
-0.90        10  (5%)                     8 (80%)
-0.95         7  (4%)                     6 (86%)
+0.00       103 (52%)                    40 (39%)
+0.70        23 (12%)                    16 (70%)
+0.80        21 (10%)                    15 (71%)
+0.85        19 (10%)                    14 (74%)
+0.90        11  (6%)                     9 (82%)
+0.95         9  (4%)                     8 (89%)
 ====  ==============  ===========================
 
-0.85 stays, but the table says plainly that the gate is not the lever: 0.80, 0.85 and 0.90 are
-one sample of each other, and above 0.90 there is no sample left to read.
-
-**The lever is the ``target`` question.** Split the two questions and they are not the same
-instrument. Asked whether a tap is the right *kind* of action, the model is right 95% of the time
-at 0.80 and up (39 of 41). Asked *which control*, its median confidence is 0.60, it is the half
-of ``min()`` that holds the gate down on 61% of taps, and every one of the four accepted misses
-at 0.85 was a step where the run did tap -- it named a different control, at 0.88 to 0.98. So the
-accuracy budget is spent on naming a control, and confidence there does not separate right from
-wrong the way it does on the action. That is where to spend effort, not on the threshold.
+0.85 stays, and the table says the same thing the two-question one did: the threshold is not the
+lever. 0.80, 0.85 and 0.90 are one sample of each other, and above 0.90 there is no sample left.
+Naming a control is still where the accuracy goes -- 39% of presses match the run when nothing is
+gated at all, against 82% at 0.90 -- so that is where effort belongs, not on the number.
 
 A proposal is an opinion with no authority beyond the tools it was offered. ``shadow`` records
 what it would have done and returns ``None`` every time, which is how a run proves the gate on
@@ -295,24 +297,26 @@ def numbered(options: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]
 
 
 def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -> dict[str, Any]:
-    """The action, plus one operand question per action that takes one.
+    """One question naming every move this screen allows, plus the outcome in the full space.
 
-    Every operand is asked speculatively, on the same state, in the same request -- the operands
-    belonging to actions that lose cost nothing and are simply discarded. That is the whole
-    economy of a System One call and it is how the public browser harnesses use it.
+    A press is not an action plus a separate operand; each pressable control *is* an action.
+    `outcome` stays its own question because it is not a move -- it is what to record if the run
+    stops here, and it is the one answer besides the move that the harness actually reads.
     """
     from typesafe_sdk import Choice
 
-    questions = {
-        # Neither question may presuppose the other's answer. "the single best next action to
-        # reach the goal" is false the moment the goal is reached, and "which control should THAT
-        # ACTION operate on" is a question about another answer -- indirection this model is
-        # documented to pay for, and the reason a "no control" option was never taken.
-        "action": Choice(instructions="What should happen next on this screen?",
-                         criteria=dict(ACTION_KINDS)),
-        "target": Choice(instructions="Which control on this screen moves toward the goal?",
-                         criteria=numbered(options)[0]),
-    }
+    # Every pressable control is its own action, beside the actions that operate on nothing.
+    # The earlier shape asked "what kind of move" and "which control" as two independent
+    # questions -- the API has no question conditional on another answer -- so the model named a
+    # control even when it chose to wait, and the gate was then the minimum of two confidences
+    # about different things. Measured over 60 real screens, three times: the merged form is
+    # steadier (median confidence 0.54-0.55 against 0.47-0.48) and acts on the same taps at the
+    # same accuracy. It is not faster; it is one question with one answer and nothing discarded.
+    criteria: dict[str, str] = {index: f"Press '{label}'"
+                                for index, label in numbered(options)[0].items()}
+    criteria.update({kind: text for kind, text in ACTION_KINDS.items() if kind != "tap"})
+    questions = {"move": Choice(instructions="What should happen next on this screen?",
+                                criteria=criteria)}
     if action_space == "full":
         # Asked directly, not as "if the run stopped here...": a hypothetical is a hop of
         # indirection, and jev-1.13's documented jaggedness names indirection as a cost.
@@ -462,11 +466,13 @@ class TypeSafeNavigator:
             "response": plain(response),
             "menu": numbered(self._options)[0],
         }
-        action, target = response.answers["action"], response.answers["target"]
+        move = response.answers["move"]
+        by_index = numbered(self._options)[1]
         record = {
-            "kind": action.choice, "kind_confidence": round(action.confidence, 4),
-            "target": target.choice, "target_confidence": round(target.confidence, 4),
-            "target_id": numbered(self._options)[1].get(target.choice),
+            "kind": "tap" if move.choice in by_index else move.choice,
+            "choice": move.choice,
+            "confidence": round(move.confidence, 4),
+            "target_id": by_index.get(move.choice),
             "options": len(self._options),
         }
 
@@ -478,17 +484,19 @@ class TypeSafeNavigator:
             turn["verdict"] = dict(record)
             self._record(turn)
 
-        plan, why = self._plan(action, target, response.answers, numbered(self._options)[1])
+        plan, why = self._plan(move, response.answers, by_index)
         if plan is None:
             settle(False, why)
             return None
-        tool, arguments, operand, operand_confidence, label = plan
+        tool, arguments, operand, label, *rest = plan
         record["tool"] = tool
-        # Name the operand the gate actually read: `target_confidence` belongs to the tap question
-        # and says nothing about a scroll, a back or a finish.
         record["operand"] = operand
-        record["operand_confidence"] = round(operand_confidence, 4)
-        gate = min(action.confidence, operand_confidence)
+        # One question, one answer, one number -- `min()` of two confidences about different
+        # things was never a statement about this decision. Finishing is the exception and says
+        # so: it reads the `outcome` question, so that answer's confidence binds as well.
+        gate = min([move.confidence, *rest])
+        if rest:
+            record["outcome_confidence"] = round(float(rest[0]), 4)
         record["gate"] = round(gate, 4)
         record["gate_needed"] = self.min_confidence
         if gate < self.min_confidence:
@@ -498,8 +506,8 @@ class TypeSafeNavigator:
 
         # A waiting screen re-fingerprints on every frame it redraws, so keying a wait on the
         # fingerprint would never repeat and never escalate. The activity is what holds still.
-        screen_key = self._last_activity if action.choice == "wait" else str(fingerprint)
-        pair = (str(screen_key), f"{action.choice}:{operand}")
+        screen_key = self._last_activity if record["kind"] == "wait" else str(fingerprint)
+        pair = (str(screen_key), f'{record["kind"]}:{operand}')
         if screen_key is not None and pair in self._seen:
             self._decline("repeat_on_unchanged_screen")
             settle(False, "repeat_on_unchanged_screen")
@@ -513,28 +521,33 @@ class TypeSafeNavigator:
             self._seen.add(pair)
         self._pending["you_chose"] = f"{tool} on '{label}'"
         return {"tool": tool, "arguments": arguments,
-                "reason": f"System One {action.choice} at confidence {gate:.2f}: {label}"}
+                "reason": f'System One {record["kind"]} at confidence {gate:.2f}: {label}'}
 
-    def _plan(self, action, target, answers, by_index):
-        """Bind the chosen action to an offered tool, or say why it cannot be.
+    def _plan(self, move, answers, by_index):
+        """Bind the one chosen move to an offered tool, or say why it cannot be.
 
-        Returns ``(plan, why)``. A plan is ``(tool, arguments, operand, confidence, label)``; the
-        operand is what the gate reads and what the repeat guard keys on, so an action that takes
-        none -- going back, waiting -- is gated on the action choice alone.
+        Returns ``(plan, why)``. A plan is ``(tool, arguments, operand, label)``, optionally with
+        a fifth element: a second confidence the gate must also clear. The operand is what the
+        repeat guard keys on. Only finishing has that fifth element, because only finishing reads
+        a second question.
         """
-        kind = action.choice
+        # A numbered answer IS a press: the menu of controls and the list of actions are one
+        # list, so naming a control names the whole move.
+        handle = by_index.get(move.choice)
+        if handle is not None:
+            return (TAP_TOOL, {"id": handle}, handle, self._options[handle]), None
+        kind = move.choice
+        if kind not in ACTION_KINDS:
+            # Not a control on this screen and not an action either -- a stale index, or a raw
+            # element id the menu exists to keep out. The menu is rebuilt per screen, so there is
+            # nothing safe to press.
+            self._decline("unknown_target")
+            return None, "unknown_target"
         if kind in NON_ACTIONS:
             # Chosen on purpose, declined on purpose: acting on `blocked` ends the run, and
             # ending a run early is this model's worst measured skill.
             self._decline(f"kind:{kind}")
             return None, f"kind:{kind}"
-        if kind == "tap":
-            handle = by_index.get(target.choice)
-            if handle is None:
-                self._decline("unknown_target")
-                return None, "unknown_target"
-            return (TAP_TOOL, {"id": handle}, handle, target.confidence,
-                    self._options[handle]), None
         if kind == "type":
             # A System One model returns a choice, never a string; the public harnesses call a
             # small generative model here and so does this one, by handing the step back.
@@ -546,8 +559,7 @@ class TypeSafeNavigator:
             if WAIT_TOOL not in self.offered:
                 self._decline("wait_not_offered")
                 return None, "wait_not_offered"
-            return (WAIT_TOOL, {"idle": True}, "idle", action.confidence,
-                    "wait for the screen"), None
+            return (WAIT_TOOL, {"idle": True}, "idle", "wait for the screen"), None
         if self.action_space != "full":
             # Keeping the narrow default is what lets the two be compared on the same code.
             self._decline(f"kind:{kind}")
@@ -557,13 +569,13 @@ class TypeSafeNavigator:
                 self._decline("scroll_not_offered")
                 return None, "scroll_not_offered"
             direction = SCROLL_KINDS[kind]
-            return (SCROLL_TOOL, {"direction": direction}, direction, action.confidence,
+            return (SCROLL_TOOL, {"direction": direction}, direction,
                     f"scroll {direction}"), None
         if kind == "back":
             if BACK_TOOL not in self.offered:
                 self._decline("back_not_offered")
                 return None, "back_not_offered"
-            return (BACK_TOOL, {}, "back", action.confidence, "go back"), None
+            return (BACK_TOOL, {}, "back", "go back"), None
         if kind == "done":
             if FINISH_TOOL not in self.offered:
                 self._decline("finish_not_offered")
@@ -577,8 +589,12 @@ class TypeSafeNavigator:
                 self._decline("done_but_unfinished")
                 return None, "done_but_unfinished"
             # No note: it is free text, and a fabricated one would reach the judge as evidence.
+            # The only move that reads a second question, so the only one with a second
+            # confidence to respect. Merging the controls into the action list removed the
+            # *speculative* operand; it did not ban a question whose answer is actually used,
+            # and ending a run on a shaky outcome is this model's worst measured failure.
             return (FINISH_TOOL, {"outcome": outcome.choice}, outcome.choice,
-                    outcome.confidence, f"finish as {outcome.choice}"), None
+                    f"finish as {outcome.choice}", outcome.confidence), None
         self._decline(f"kind:{kind}")
         return None, f"kind:{kind}"
 

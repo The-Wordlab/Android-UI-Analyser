@@ -148,6 +148,14 @@ notes, so you can check for a newer version — and read what changed — withou
   what a screen shows still needs a frame that shows it. The note is attached only when some
   frame carries the field.
 
+- The System One navigator asks one question instead of two. A press is no longer an action plus
+  a separate "which control" answer — each pressable control *is* an action, listed beside the
+  actions that operate on nothing. The old shape made the model name a control even when it chose
+  to wait, and gated the step on the minimum of two confidences about different things. Measured
+  over 60 real screens three times, the merged form is steadier (median confidence 0.54–0.55
+  against 0.47–0.48) and acts on the same taps at the same accuracy; it is one question with one
+  answer and nothing discarded. Finishing still reads `outcome`, and is still held back by it.
+
 ### Fixed
 
 - MCP `session_start` now describes and schema-validates artifact prerequisites: `evidence=all`
