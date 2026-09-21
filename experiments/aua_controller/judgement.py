@@ -858,7 +858,16 @@ class Decider:
         tool = {"type": "function", "function": {"name": name, "description": f"Record the {role} decision.", "parameters": schema}}
         record: dict[str, Any] = {"role": role, "name": name, "repairs": 0, "usage": [], "cost": 0.0,
                                   "images": len(shots), "requested_model": self.model,
-                                  "escalations": 0}
+                                  "escalations": 0,
+                                  # What this verdict was actually asked, kept beside what it
+                                  # answered. Without it a criterion marked unevidenced cannot be
+                                  # told apart from a criterion whose evidence never arrived --
+                                  # and on a real run it was the second: the frame that proved
+                                  # the clause had been dropped before the judge saw it. The
+                                  # screenshots are counted, not kept: a base64 frame is
+                                  # megabytes and a reader of the log cannot check it anyway.
+                                  "request": {"instructions": instructions, "question": question,
+                                              "context": context, "schema": schema}}
         result: dict[str, Any] | None = None
         error: str | None = None
         rung = 0

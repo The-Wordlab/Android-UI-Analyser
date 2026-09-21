@@ -21,6 +21,15 @@ from experiments.aua_controller.judgement import evidence_frame, judge_outcome
 CALLS = ["PUT /v1/profile -> 200", "POST /v1/send -> no answer yet"]
 
 
+def _reply(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {"model": "fictional/model", "provider": "fictional",
+            "usage": {"cost": 0.0005, "prompt_tokens": 300, "completion_tokens": 40},
+            "choices": [{"finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"type": "function", "id": "decide-1", "function": {
+                    "name": name, "arguments": json.dumps(arguments)}}]}}]}
+
+
 def _frame(calls: list[str] | None = None) -> dict[str, Any]:
     meta: dict[str, Any] = {"fingerprint": "fp-1"}
     if calls is not None:
@@ -83,3 +92,62 @@ def test_a_quiet_run_is_not_given_the_explanation() -> None:
     asked = _asked([_frame(), _frame()])
     assert "network_evidence_note" not in asked["context"]
     assert "network_calls" not in json.dumps(asked, default=str)
+
+
+# ------------------------------------------------ the judge's own request, on the record
+
+
+def test_the_judgement_log_keeps_the_request_that_produced_it(tmp_path: Any) -> None:
+    """A verdict nobody can check the inputs of is an opinion with a number on it.
+
+    The navigator writes its state, its questions and the raw answer for every call; the judge
+    wrote only what came back. So when a judge marked a criterion unevidenced, there was no way
+    to tell a model that reasoned badly from a model that was handed the wrong frames -- and on
+    a real run it was the second: the frame that proved the clause had been dropped before the
+    judge ever saw it.
+    """
+    from experiments.aua_controller.judgement import Decider
+
+    async def send(payload: dict[str, Any]) -> dict[str, Any]:
+        return _reply("record_verdict",
+                      {"verdict": "pass", "confidence": 0.9, "reasons": [], "criteria": []})
+
+    out = tmp_path / "judge"
+    decider = Decider(send, model="m", backend="openai-compatible", output=out)
+    schema = {"type": "object", "properties": {"verdict": {"type": "string"},
+                                               "confidence": {"type": "number"},
+                                               "reasons": {"type": "array"},
+                                               "criteria": {"type": "array"}},
+              "required": ["verdict", "confidence", "reasons", "criteria"],
+              "additionalProperties": False}
+    asyncio.run(decider.decide(role="outcome judge (neutral)", instructions="judge it",
+                               question="did it work?", context={"goal": "open settings"},
+                               schema=schema, name="record_verdict"))
+
+    entry = json.loads((out / "judgements.jsonl").read_text().strip())
+    assert entry["request"]["question"] == "did it work?"
+    assert entry["request"]["context"] == {"goal": "open settings"}
+    assert "judge it" in entry["request"]["instructions"]
+    assert entry["result"]["verdict"] == "pass"
+
+
+def test_the_recorded_request_does_not_carry_the_screenshots(tmp_path: Any) -> None:
+    """A base64 frame is megabytes and proves nothing a reader of the log can check.
+
+    The count is what matters -- whether the judge was looking at pictures at all.
+    """
+    from experiments.aua_controller.judgement import Decider
+
+    async def send(payload: dict[str, Any]) -> dict[str, Any]:
+        return _reply("r", {"ok": True})
+
+    out = tmp_path / "judge"
+    decider = Decider(send, model="m", backend="openai-compatible", output=out)
+    asyncio.run(decider.decide(
+        role="r", instructions="i", question="q", context={}, name="r",
+        schema={"type": "object", "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"], "additionalProperties": False},
+        images=["data:image/jpeg;base64," + "A" * 5000]))
+    raw = (out / "judgements.jsonl").read_text()
+    assert "AAAAA" not in raw
+    assert json.loads(raw.strip())["images"] == 1

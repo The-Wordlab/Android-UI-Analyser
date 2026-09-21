@@ -166,6 +166,12 @@ notes, so you can check for a newer version — and read what changed — withou
   saved steps, three times: at the 0.85 gate this went from 19 steps at 74% fidelity to 26 at 83%,
   more coverage *and* more accuracy. It is the largest measured change to this navigator.
 
+- Every judgement now records the request that produced it — the instructions, the question, the
+  evidence and the schema — beside the verdict, in `judge/judgements.jsonl`. The log held only
+  what came back, so a criterion marked unevidenced could not be told apart from a criterion whose
+  evidence never arrived; on a real run it was the second, and the frame that proved the clause
+  had been dropped before the judge ever saw it. Screenshots are counted, not stored.
+
 ### Fixed
 
 - MCP `session_start` now describes and schema-validates artifact prerequisites: `evidence=all`
