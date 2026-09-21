@@ -120,6 +120,15 @@ notes, so you can check for a newer version — and read what changed — withou
   loop. Navigation is where a run spends its requests — tens per run against the judge's
   two — so this is the half worth making cheap.
 
+- An observation names the calls the app is still waiting on: `meta.network_in_flight` carries
+  them as `["POST /v1/auth/login"]`, recent unanswered ones only. A screen mid-load and an idle
+  screen are the same hierarchy, so an agent that pressed a button, got a screen back that looked
+  unchanged, and had nothing else to go on pressed it again — measured on a real login. Needs
+  `aua proxy start`; the key is absent when nothing is in the air and absent when no proxy is
+  running, so a quiet response pays nothing for it. Only calls started in the last few seconds
+  count, because a chat app holds a streamed connection open by design and a signal that is
+  always on is not a signal.
+
 ### Fixed
 
 - MCP `session_start` now describes and schema-validates artifact prerequisites: `evidence=all`

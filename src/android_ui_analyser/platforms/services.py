@@ -278,6 +278,10 @@ CAPABILITY_METHODS: dict[str, frozenset[str]] = {
             "proxy_health",
             "read_device_http_proxy",
             "read_flow_bodies",
+            # Both halves of the journal, because a caller asking "is anything still loading"
+            # cannot answer it from completed exchanges alone -- which is all the journal used
+            # to hold.
+            "read_flows_in_flight",
             "read_flows_since",
             "read_state",
             "record_path",
