@@ -42,6 +42,7 @@ real screens before anything depends on it.
 from __future__ import annotations
 
 import json
+import pathlib
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -50,6 +51,8 @@ MODEL = "jev-latest"
 MIN_CONFIDENCE = 0.85  # measured: 0.80 gives 77% correct, 0.85 gives 93%
 MAX_JOURNEY_CHARS = 60_000  # state and question share a 32k-token budget
 MAX_OPTIONS = 60  # a Choice takes up to 255 options; a screen offering more is not a decision
+#: $42 per billion input tokens, output free (typesafe.ai pricing, Sep 2026).
+USD_PER_INPUT_TOKEN = 42 / 1e9
 TAP_TOOL = "tap_and_analyze"
 SCROLL_TOOL = "scroll_and_analyze"
 BACK_TOOL = "back_gesture_and_analyze"
@@ -74,14 +77,22 @@ FINISH_OUTCOMES: dict[str, str] = {
 ACTION_SPACES = ("taps", "full")
 
 # Offered so the model can say "none of these", which is what a low-confidence tap looks like
-# before it is thrown away. Only `tap` is ever acted on.
+# before it is thrown away. `wait` and `blocked` are never acted on and exist only to be chosen:
+# jev-1.13 is documented as literal and answers the question as written, so a screen that is
+# still loading, or a run that is stuck, had nowhere to go but an outright wrong tap. The public
+# browser harnesses carry WAIT and BLOCKED in their action space for the same reason. Giving a
+# boundary case its own option is the doc's own advice, and it costs nothing: both decline.
 ACTION_KINDS: dict[str, str] = {
     "tap": "Press a control that is visible on this screen now",
     "type": "Type text into a field on this screen",
     "scroll": "What is needed is not on screen; scroll to reveal more",
     "back": "This screen is wrong or finished; go back",
     "done": "The goal is already satisfied; stop",
+    "wait": "This screen is still loading or mid-animation; nothing should be pressed yet",
+    "blocked": "Something outside the goal stops this run going further",
 }
+#: Chosen to be declined. They carry no tool and exist so a boundary case has a home.
+NON_ACTIONS = ("wait", "blocked")
 
 
 def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTIONS) -> dict[str, str]:
@@ -108,6 +119,26 @@ def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTION
     return options
 
 
+def plain(value: Any) -> Any:
+    """Whatever the SDK handed back, as something json.dumps will take."""
+    for attribute in ("model_dump", "dict"):
+        method = getattr(value, attribute, None)
+        if callable(method):
+            try:
+                return method()
+            except Exception:  # noqa: BLE001 - a transcript must never fail a run
+                pass
+    if isinstance(value, Mapping):
+        return {str(k): plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [plain(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return {key: plain(getattr(value, key)) for key in
+            ("choice", "confidence", "probabilities", "noul", "expectation", "legend")
+            if hasattr(value, key)} or str(value)
+
+
 def tool_names(tools: Sequence[Any]) -> set[str]:
     """Accept the offered tools however the caller holds them.
 
@@ -127,6 +158,24 @@ def tool_names(tools: Sequence[Any]) -> set[str]:
     return names
 
 
+def numbered(options: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """Present the controls as a small numbered menu, not as their internal ids.
+
+    AUA ids are 32-character hex digests. jev-1.13 is documented to do worse on numeric and
+    opaque representations than on semantic ones, and the public browser harnesses hand it an
+    indexed element table (`[1] button Settings`) rather than a DOM handle. So the Choice is
+    over "1", "2", "3" described by what a person would read, and code maps the answer back.
+
+    Returns ``(criteria, by_index)``: what the model is asked, and how to undo the numbering.
+    """
+    criteria: dict[str, str] = {}
+    by_index: dict[str, str] = {}
+    for position, (handle, label) in enumerate(options.items(), start=1):
+        criteria[str(position)] = label
+        by_index[str(position)] = handle
+    return criteria, by_index
+
+
 def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -> dict[str, Any]:
     """The action, plus one operand question per action that takes one.
 
@@ -140,7 +189,7 @@ def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -
         "action": Choice(instructions="What is the single best next action to reach the goal?",
                          criteria=dict(ACTION_KINDS)),
         "target": Choice(instructions="Which control should that action operate on?",
-                         criteria=dict(options)),
+                         criteria=numbered(options)[0]),
         "settled": Noul(instructions="Is the goal already fully satisfied on this screen, "
                                      "with nothing further to do?"),
     }
@@ -171,6 +220,7 @@ class TypeSafeNavigator:
         action_space: str = "taps",
         shadow: bool = False,
         timeout_s: float = 10.0,
+        transcript_path: Any = None,
     ) -> None:
         if not 0 < min_confidence <= 1:
             raise ValueError("min_confidence must sit in (0, 1]")
@@ -187,6 +237,12 @@ class TypeSafeNavigator:
         self.action_space = action_space
         self.shadow = shadow
         self.timeout_s = timeout_s
+        # Everything sent and everything returned, one JSON object per call. The report keeps
+        # only the decision; this keeps the evidence, which is what an audit or a write-up needs.
+        self.transcript_path = pathlib.Path(transcript_path) if transcript_path else None
+        if self.transcript_path is not None:
+            self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        self.usd = 0.0
         # A tap it was never offered is not a proposal this navigator may make.
         offered = tool_names(tools)
         self.offered = offered
@@ -266,17 +322,34 @@ class TypeSafeNavigator:
             self._decline(f"request_failed:{type(exc).__name__}")
             return None
         self.requests += 1
-        self.request_ms.append((time.perf_counter() - started) * 1000)
-        self.input_tokens += int(getattr(response.usage, "input_tokens", 0) or 0)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        self.request_ms.append(elapsed_ms)
+        tokens = int(getattr(response.usage, "input_tokens", 0) or 0)
+        self.input_tokens += tokens
+        self.usd += tokens * USD_PER_INPUT_TOKEN
 
+        self._record({
+            "call": self.requests,
+            "request_ms": round(elapsed_ms, 1),
+            "input_tokens": tokens,
+            "usd": round(tokens * USD_PER_INPUT_TOKEN, 9),
+            "model": self.model,
+            "state": state,
+            "questions": {name: plain(question)
+                          for name, question in build_questions(
+                              options, action_space=self.action_space).items()},
+            "menu": numbered(options)[0],
+            "answers": {name: plain(answer) for name, answer in response.answers.items()},
+        })
         action, target = response.answers["action"], response.answers["target"]
         record = {
             "kind": action.choice, "kind_confidence": round(action.confidence, 4),
             "target": target.choice, "target_confidence": round(target.confidence, 4),
+            "target_id": numbered(options)[1].get(target.choice),
             "settled": round(response.answers["settled"].noul, 4),
             "options": len(options),
         }
-        plan = self._plan(action, target, response.answers, options)
+        plan = self._plan(action, target, response.answers, options, numbered(options)[1])
         if plan is None:
             record["accepted"] = False
             self.proposals.append(record)
@@ -313,7 +386,7 @@ class TypeSafeNavigator:
         return {"tool": tool, "arguments": arguments,
                 "reason": f"System One {action.choice} at confidence {gate:.2f}: {label}"}
 
-    def _plan(self, action, target, answers, options):
+    def _plan(self, action, target, answers, options, by_index):
         """Bind the chosen action to an offered tool, or decline and say why.
 
         Returns ``(tool, arguments, operand, operand_confidence, label)``. The operand is what the
@@ -321,12 +394,17 @@ class TypeSafeNavigator:
         going back -- is gated on the action choice alone.
         """
         kind = action.choice
+        if kind in NON_ACTIONS:
+            # Chosen on purpose, declined on purpose: these exist so a loading screen or a stuck
+            # run has somewhere to go other than a confidently wrong tap.
+            self._decline(f"kind:{kind}")
+            return None
         if kind == "tap":
-            if target.choice not in options:
+            handle = by_index.get(target.choice)
+            if handle is None:
                 self._decline("unknown_target")
                 return None
-            return (TAP_TOOL, {"id": target.choice}, target.choice,
-                    target.confidence, options[target.choice])
+            return (TAP_TOOL, {"id": handle}, handle, target.confidence, options[handle])
         # Everything below exists only in the widened space. Keeping the narrow default is what
         # lets the two be compared on the same code.
         if self.action_space != "full":
@@ -366,13 +444,25 @@ class TypeSafeNavigator:
         self._decline(f"kind:{kind}")
         return None
 
+    def _record(self, entry: dict[str, Any]) -> None:
+        if self.transcript_path is None:
+            return
+        try:
+            with self.transcript_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        except OSError:
+            # A transcript is evidence, never a dependency: losing it costs a write-up, not a run.
+            pass
+
     def report(self) -> dict[str, Any]:
         accepted = sum(1 for item in self.proposals if item.get("accepted"))
         return {
             "engine": "typesafe_system_one", "model": self.model, "shadow": self.shadow,
             "action_space": self.action_space,
             "min_confidence": self.min_confidence, "requests": self.requests,
-            "input_tokens": self.input_tokens, "proposals": len(self.proposals),
+            "input_tokens": self.input_tokens, "usd": round(self.usd, 8),
+            "transcript": str(self.transcript_path) if self.transcript_path else None,
+            "proposals": len(self.proposals),
             "accepted": accepted, "declined": dict(self.declined),
             "mean_request_ms": (round(sum(self.request_ms) / len(self.request_ms), 1)
                                 if self.request_ms else None),
@@ -382,6 +472,7 @@ class TypeSafeNavigator:
         }
 
 
-__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "MODEL", "MIN_CONFIDENCE",
+__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered",
+           "MODEL", "MIN_CONFIDENCE",
            "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "SCROLL_DIRECTIONS",
            "FINISH_OUTCOMES", "build_questions", "candidates", "tool_names"]

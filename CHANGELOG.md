@@ -71,6 +71,12 @@ notes, so you can check for a newer version — and read what changed — withou
   shared map surface, and goal cleanup restores the browser session baseline.
 
 ## [0.29.0] - 2026-09-18
+- A System One navigator run now writes `controller/system-one-turns.jsonl` beside the chat
+  model's own `model-turns.jsonl`: one object per call holding the state sent, the questions
+  asked, the raw answers with their probability distributions, the latency, the input tokens and
+  the dollar cost. The navigator report gains `usd` alongside `input_tokens`. Without this a run
+  could be summarised but never audited.
+
 - `run_realapp.py --nav-action-space full` widens what the System One navigator may answer from
   presses alone to presses, scrolls, back and finishing with an outcome — the shape the public
   Jev browser harnesses use. One request returns the action and every operand it might need

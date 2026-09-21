@@ -1738,6 +1738,9 @@ async def run_realapp(
                 goal, tools=tools,
                 min_confidence=nav_min_confidence, shadow=nav_shadow,
                 action_space=nav_action_space,
+                # Beside the chat model's own model-turns.jsonl, and in the same shape: one
+                # object per call, holding what was sent and what came back.
+                transcript_path=output / "controller" / "system-one-turns.jsonl",
             )
         async def navigated_call(name, arguments):
             # Whoever chose the step, the navigator judges the next one against what the run

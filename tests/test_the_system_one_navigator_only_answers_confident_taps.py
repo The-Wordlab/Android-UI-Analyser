@@ -8,6 +8,7 @@ that answers nothing.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from experiments.aua_controller.typesafe_navigator import (  # noqa: E402
     TAP_TOOL,
     TypeSafeNavigator,
     candidates,
+    numbered,
 )
 
 SCREEN = {
@@ -37,7 +39,7 @@ SCREEN = {
 
 
 class FakeClient:
-    def __init__(self, kind="tap", target="el:aaa", kind_conf=0.99, target_conf=0.95,
+    def __init__(self, kind="tap", target="1", kind_conf=0.99, target_conf=0.95,
                  settled=0.02, error=None):
         self.kind, self.target = kind, target
         self.kind_conf, self.target_conf, self.settled = kind_conf, target_conf, settled
@@ -110,7 +112,8 @@ def test_shadow_mode_records_the_tap_it_would_have_taken_and_takes_nothing() -> 
     assert action is None
     report = navigator.report()
     assert report["shadow"] is True and report["accepted"] == 0
-    assert navigator.proposals[0]["target"] == "el:aaa"
+    # `target` is the menu index the model answered; `target_id` is what it means.
+    assert navigator.proposals[0]["target_id"] == "el:aaa"
 
 
 def test_a_screen_without_a_real_choice_is_not_worth_a_request() -> None:
@@ -327,3 +330,72 @@ def test_the_narrow_default_asks_no_operand_questions() -> None:
 def test_an_unknown_action_space_is_refused_at_construction() -> None:
     with pytest.raises(ValueError):
         TypeSafeNavigator("g", client=FakeClient(), action_space="everything")
+
+
+def test_the_controls_are_offered_as_a_numbered_menu_not_as_their_ids() -> None:
+    # AUA ids are 32-character hex digests, and jev-1.13 is documented to do worse on opaque and
+    # numeric representations than on semantic ones. The public browser harnesses hand it an
+    # indexed table for the same reason, so the model is asked about "1" described as what a
+    # person reads, and code maps the answer back to the id.
+    criteria, by_index = numbered(candidates(SCREEN["observation"]))
+    assert criteria == {"1": "Notifications", "2": "Privacy"}
+    assert by_index == {"1": "el:aaa", "2": "el:bbb"}
+    assert not any(key.startswith("el:") for key in criteria), "no digest reaches the model"
+
+
+def test_the_numbered_answer_is_mapped_back_to_the_real_element() -> None:
+    action, navigator = propose(FakeClient(target="2"))
+    assert action["arguments"] == {"id": "el:bbb"}, "answer 2 is the second control"
+    assert navigator.proposals[0]["target_id"] == "el:bbb", "the report names the element"
+
+
+def test_an_index_that_is_not_on_the_menu_is_refused() -> None:
+    action, navigator = propose(FakeClient(target="9"))
+    assert action is None
+    assert navigator.report()["declined"] == {"unknown_target": 1}
+
+
+@pytest.mark.parametrize("kind", ["wait", "blocked"])
+def test_waiting_and_being_blocked_are_offered_so_they_can_be_declined(kind: str) -> None:
+    # Neither carries a tool. They exist because jev-1.13 answers the question as written: with
+    # no option for "this screen is still loading", a loading screen forces an outright wrong
+    # tap. Giving the boundary case its own option is the documented fix and costs nothing.
+    action, navigator = propose(FakeClient(kind=kind, kind_conf=1.0, target_conf=1.0))
+    assert action is None
+    assert navigator.report()["declined"] == {f"kind:{kind}": 1}
+
+
+def test_the_boundary_options_are_offered_in_both_action_spaces() -> None:
+    from experiments.aua_controller.typesafe_navigator import ACTION_KINDS, build_questions
+
+    for space in ("taps", "full"):
+        criteria = build_questions({"el:a": "A", "el:b": "B"}, action_space=space)["action"].criteria
+        assert {"wait", "blocked"} <= set(criteria), space
+    assert {"wait", "blocked"} <= set(ACTION_KINDS)
+
+
+def test_every_call_is_written_to_the_transcript_with_its_cost(tmp_path) -> None:
+    # The report keeps the decision; the transcript keeps the evidence -- what was sent, what came
+    # back, and what the call cost. Without it a run can be summarised but never audited.
+    path = tmp_path / "system-one-turns.jsonl"
+    navigator = TypeSafeNavigator("Open notification settings", client=FakeClient(),
+                                  tools=[TAP_TOOL], transcript_path=path)
+    asyncio.run(navigator(SCREEN))
+
+    entry = json.loads(path.read_text().strip())
+    assert entry["call"] == 1
+    assert entry["menu"] == {"1": "Notifications", "2": "Privacy"}
+    assert entry["state"]["this_is_the_new_screen"]["elements"]
+    assert set(entry["questions"]) == {"action", "target", "settled"}
+    assert entry["answers"]["action"]["choice"] == "tap"
+    assert entry["answers"]["target"]["confidence"] == 0.95
+    assert entry["input_tokens"] == 430
+    assert entry["usd"] == pytest.approx(430 * 42 / 1e9)
+    assert navigator.report()["usd"] == pytest.approx(430 * 42 / 1e9)
+
+
+def test_a_run_without_a_transcript_path_writes_nothing_and_still_works(tmp_path) -> None:
+    navigator = TypeSafeNavigator("g", client=FakeClient(), tools=[TAP_TOOL])
+    assert asyncio.run(navigator(SCREEN)) is not None
+    assert navigator.report()["transcript"] is None
+    assert not list(tmp_path.iterdir())
