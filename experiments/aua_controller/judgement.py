@@ -483,7 +483,11 @@ def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
             for index, (family, state, selection) in enumerate(traits):
                 position = body[index].get("_judge_evidence", {})
                 progress = body[index].get("goal_progress") or {}
-                checkpoint = (progress.get("completed"), (progress.get("current") or {}).get("id"))
+                # A frame that reports no progress at all has not changed it. Reading its
+                # absence as `(None, None)` made a transitional repeat of the login screen a
+                # "checkpoint boundary" that outranked the frames proving the goal.
+                checkpoint = ((progress.get("completed"), (progress.get("current") or {}).get("id"))
+                              if progress else previous_checkpoint)
                 key = (family, state, position.get("lifecycle_epoch"))
                 if not family:
                     # Evidence of a transient state and nothing more: it takes a seat only
@@ -507,7 +511,13 @@ def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
                 # Preserve one observation per screen family when the hard budget permits it.
                 mandatory = keep | {index for rank, index in priority if rank == 0}
                 cap = min(MAX_TEXT_FRAMES, max(cap, len(mandatory)))
-            for _, index in sorted(priority):
+            # Within a rank the newest capture wins. The judge is asked whether the goal
+            # happened, and a goal that changes something proves itself in the later captures
+            # of screens already seen -- Settings again, now in the new language. Oldest-first
+            # handed those seats to a second capture of the login screen instead, and a run
+            # that achieved its goal was judged unverified for want of "the frame produced by
+            # that action".
+            for _, index in sorted(priority, key=lambda item: (item[0], -item[1])):
                 if len(keep) >= cap:
                     break
                 keep.add(index)
