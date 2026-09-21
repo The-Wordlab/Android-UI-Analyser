@@ -40,6 +40,7 @@ from urllib.parse import parse_qsl, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from .atomic import atomic_write_text
+from .layout import build_layout, render_layout
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .config import LogsCfg, MemoryCfg
@@ -301,6 +302,8 @@ class ScreenRecord(BaseModel):
     # ``_READOPT_SIGHTINGS`` and the re-anchoring branch in ``record_screen``.
     pending_anchors: list[str] = Field(default_factory=list)
     pending_anchor_hits: int = 0
+    # What is where, as a rendered text tree (``layout.render_layout``); refreshed per visit.
+    layout: str | None = None
 
 
 def screen_skips_ocr(rec: ScreenRecord, *, min_hierarchy_ok: int = 3) -> bool:
@@ -2801,6 +2804,7 @@ class AppMemoryStore:
                 tier=tier,
                 key_elements=key_elements(elements, redact=self.cfg.redact, height=screen_height),
                 dynamic=detect_dynamic(elements),
+                layout=self._layout_tree(elements, name, screen_height),
                 app_version=app_version,
                 first_seen=now,
                 last_seen=now,
@@ -2891,6 +2895,8 @@ class AppMemoryStore:
                     rec.key_elements = ke
                 if dyn := detect_dynamic(elements):
                     rec.dynamic = dyn
+                if tree := self._layout_tree(elements, rec.name, screen_height):
+                    rec.layout = tree
                 rec.state = state
             if title:
                 title_alias = _short(title)
@@ -3761,6 +3767,15 @@ class AppMemoryStore:
         ]
         self.save_session(serial, sess)
         return proof
+
+    def _layout_tree(self, elements: list[Element], name: str, height: int | None) -> str | None:
+        """The screen's what-is-where tree as text, or ``None`` when nothing app-owned is on it."""
+        nodes = build_layout(
+            elements,
+            height=height,
+            label_of=lambda el: redact_label(el, redact=self.cfg.redact),
+        )
+        return render_layout(nodes, title=name, height=height) if nodes else None
 
     def observe_screen(
         self,
@@ -5550,6 +5565,12 @@ def _render_screen_detail(app: AppMap, screen: str) -> str:
         lines.append("")
         lines.append("## Dynamic")
         lines.extend(f"- {d}" for d in rec.dynamic)
+    if rec.layout:
+        lines.append("")
+        lines.append("## Layout")
+        lines.append("```")
+        lines.append(rec.layout.rstrip())
+        lines.append("```")
     incoming = [e for e in app.routes if e.to_screen == screen]
     outgoing = [e for e in app.routes if e.from_screen == screen]
     if incoming or outgoing:

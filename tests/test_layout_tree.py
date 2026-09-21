@@ -176,3 +176,61 @@ def test_tree_is_bounded_on_a_huge_screen() -> None:
 
 def test_empty_screen_renders_just_its_title() -> None:
     assert render_layout([], title="blank") == "blank\n"
+
+
+# ------------------------------------------------------------------ stored on the app map
+
+
+def test_observe_screen_remembers_the_layout_tree_and_refreshes_it_on_revisit(tmp_path) -> None:
+    from android_ui_analyser.memory import render_map
+    from test_memory import _store
+
+    store = _store(tmp_path)
+    first = hierarchy.parse_hierarchy(ORDERS, SIZE)
+    # A first sighting returns no known name yet; the cursor tells us what it was called.
+    store.observe_screen("emulator-1", package=P, elements=first, screen_height=SIZE[1])
+    name = store.load_session("emulator-1").current_screen
+    assert name
+    rec = store.load(P).screens[name]
+    assert rec.layout and rec.layout.startswith(name)
+    assert "×3 similar" in rec.layout and "buyer@example.com" not in rec.layout
+
+    # The list grew by one row: the same screen is recognised and its tree moves with it.
+    fourth = _n(
+        "android.widget.TextView",
+        "[0,940][1080,1080]",
+        text="Order 4",
+        rid=f"{P}:id/order_row",
+        clk=True,
+    )
+    grown = ORDERS.replace(
+        '<node class="android.widget.LinearLayout"',
+        fourth + '<node class="android.widget.LinearLayout"',
+        1,
+    )
+    again = store.observe_screen(
+        "emulator-1",
+        package=P,
+        elements=hierarchy.parse_hierarchy(grown, SIZE),
+        screen_height=SIZE[1],
+    )
+    assert again == name
+    assert "×4 similar" in store.load(P).screens[name].layout
+
+    detail = render_map(store.load(P), screen=name)
+    assert "## Layout" in detail and "order_list" in detail
+
+
+def test_maps_saved_before_layout_trees_still_load(tmp_path) -> None:
+    from android_ui_analyser.memory import ScreenRecord
+
+    rec = ScreenRecord.model_validate(
+        {
+            "name": "old",
+            "signature": "abc",
+            "first_seen": "t",
+            "last_seen": "t",
+            "last_verified": "t",
+        }
+    )
+    assert rec.layout is None
