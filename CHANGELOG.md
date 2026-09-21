@@ -17,17 +17,14 @@ notes, so you can check for a newer version — and read what changed — withou
   through AUA's semantic UI, screenshot, diagnostics, map and flow surfaces. A bundled Manifest
   V3 extension/native host detaches on disconnect and cannot read browser cookies, history, or
   unapproved tabs; isolated Playwright remains the default.
+
 - Opt-in `aua mcp --tool-profile web` (or `AUA_MCP_TOOL_PROFILE=web`) exposes a focused web
   session/UI/map/flow/browser catalogue and matching agent instructions. The default `full`
   catalogue and shared engine dispatch are unchanged.
-- The experimental controller harness can judge a finished run against its authored contract
-  with a TypeSafe System One model (`jev-latest`), as an alternative to the existing
-  chat-model judge. Each contract bullet is scored on a four-level evidence ladder and two
-
-### Added
 
 - `run_realapp.py --judge-engine typesafe` judges a finished run against its authored contract
-  with a TypeSafe System One model (`jev-latest`) instead of the chat-model judge ladder. Each contract bullet is scored on a four-level evidence ladder and two
+  with a TypeSafe System One model (`jev-latest`) instead of the chat-model judge ladder.
+  Each contract bullet is scored on a four-level evidence ladder and two
   yes/no questions ask whether something outside the feature stopped the run and whether the
   run ever arrived; the five-way verdict is then composed in ordinary code from those numbers,
   against thresholds a caller can read and change. One run costs one request. Install with the
@@ -37,40 +34,6 @@ notes, so you can check for a newer version — and read what changed — withou
   per-criterion evidence names the level a criterion landed on rather than quoting a screen.
   Runs that need a written rationale still want the chat-model judge.
 
-### Fixed
-
-- MCP `session_start` now describes and schema-validates artifact prerequisites: `evidence=all`
-  and `junit=true` require a non-empty `artifacts_dir`; default/`failures` and `none` do not.
-- MCP action schemas distinguish returned element `id` values such as `el:...` from the app's
-  resource/test `rid`, preventing agents from confusing these selector fields.
-- Web actions with `until` and bounded waits now use the browser's passive read deadline
-  capability, preserving one action and its arrival check instead of failing after mutation.
-  Web support requires Playwright 1.63 or later to cancel and drain timed-out reads.
-- Session start accepts explicit `evidence: "none"` / `--evidence none` without an artifact
-  directory, matching the no-evidence intent across Engine, CLI and MCP.
-- Browser CLI controls now use the same warm browser context as semantic UI actions, so
-  storage, mocks, offline mode, logs, pages and traces persist across commands. Unavailable
-  daemons fail explicitly instead of changing a disposable context.
-- Goal-session start and finish keep the browser baseline in that same warm context so
-  finishing a CLI session restores the storage and browser controls it started with.
-- Long web target URLs use short deterministic daemon socket names within macOS limits,
-  retaining per-target isolation and daemon discovery.
-- Closing the active popup restores its live opener or another remaining page; closing the
-  last page recovers a page on the next operation.
-
-## [0.30.0] - 2026-09-19
-
-### Added
-
-- A built-in Playwright-backed `web` platform reuses AUA's semantic `analyze`, stable selectors,
-  actions, screenshots, waits, flows, maps and sessions for HTTP(S) pages. DOM test ids and HTML
-  ids become `resource_id`; only viewport-intersecting nodes satisfy presence checks.
-- `aua browser` and matching MCP tools add browser diagnostics, cookies/web storage and cache
-  controls, offline/throttling, scoped CORS, context proxy, HAR record/replay, request mocks,
-  session reset, popup/tab/frame inspection, and Playwright traces. URL path/query is now the
-  shared map surface, and goal cleanup restores the browser session baseline.
-
-## [0.29.0] - 2026-09-18
 - The System One navigator's journey now records every step the run took, not only the steps the
   navigator itself won. In the default configuration it wins a minority of them, so the model was
   being told it was on step 6 of a run that was on step 12 — and the measurement that justified
@@ -147,6 +110,64 @@ notes, so you can check for a newer version — and read what changed — withou
   Finishing carries the outcome only and never a note: the note is free text, and a fabricated
   one would reach the judge as evidence of something no screen showed.
 
+- `run_realapp.py --nav-engine typesafe` lets a TypeSafe System One model answer the narrow
+  "which control moves toward the goal" steps while the controller model keeps the rest. It is
+  gated on the model's own confidence (`--nav-min-confidence`, default 0.80) and proposes taps
+  only: stopping, going back, scrolling and typing all stay with the controller model, because
+  a wrong stop corrupts a verdict where a wrong tap costs a step. `--nav-shadow` records what it
+  would have chosen without letting it act. It also never repeats a tap on a screen that has
+  not changed, because a System One model reads each screen from scratch and would otherwise
+  loop. Navigation is where a run spends its requests — tens per run against the judge's
+  two — so this is the half worth making cheap.
+
+### Fixed
+
+- MCP `session_start` now describes and schema-validates artifact prerequisites: `evidence=all`
+  and `junit=true` require a non-empty `artifacts_dir`; default/`failures` and `none` do not.
+
+- MCP action schemas distinguish returned element `id` values such as `el:...` from the app's
+  resource/test `rid`, preventing agents from confusing these selector fields.
+
+- Web actions with `until` and bounded waits now use the browser's passive read deadline
+  capability, preserving one action and its arrival check instead of failing after mutation.
+  Web support requires Playwright 1.63 or later to cancel and drain timed-out reads.
+
+- Session start accepts explicit `evidence: "none"` / `--evidence none` without an artifact
+  directory, matching the no-evidence intent across Engine, CLI and MCP.
+
+- Browser CLI controls now use the same warm browser context as semantic UI actions, so
+  storage, mocks, offline mode, logs, pages and traces persist across commands. Unavailable
+  daemons fail explicitly instead of changing a disposable context.
+
+- Goal-session start and finish keep the browser baseline in that same warm context so
+  finishing a CLI session restores the storage and browser controls it started with.
+
+- Long web target URLs use short deterministic daemon socket names within macOS limits,
+  retaining per-target isolation and daemon discovery.
+
+- Closing the active popup restores its live opener or another remaining page; closing the
+  last page recovers a page on the next operation.
+
+- The controller harness no longer hides an off switch from the model. Frame compaction drops
+  flags whose false is merely a default, and `checked` had been swept up with them, so a
+  switch that was off looked identical to an element that was no switch at all and a contract
+  bullet like "the X switch is off" could never be verified. A `checked` of false is now kept
+  (a `checked` of null, meaning no switch, is still dropped), matching what `aua` itself
+  reports. Everything else the projection trims is unchanged.
+
+## [0.30.0] - 2026-09-19
+
+### Added
+
+- A built-in Playwright-backed `web` platform reuses AUA's semantic `analyze`, stable selectors,
+  actions, screenshots, waits, flows, maps and sessions for HTTP(S) pages. DOM test ids and HTML
+  ids become `resource_id`; only viewport-intersecting nodes satisfy presence checks.
+- `aua browser` and matching MCP tools add browser diagnostics, cookies/web storage and cache
+  controls, offline/throttling, scoped CORS, context proxy, HAR record/replay, request mocks,
+  session reset, popup/tab/frame inspection, and Playwright traces. URL path/query is now the
+  shared map surface, and goal cleanup restores the browser session baseline.
+
+## [0.29.0] - 2026-09-18
 
 ### Added
 
@@ -166,25 +187,6 @@ notes, so you can check for a newer version — and read what changed — withou
   "found nothing to terminate" response.
 - Automatic cleanup no longer warns about a different platform on every command or reports
   failed cleanup as a successful reset. Pending cleanup remains visible in `teardown status`.
-
-- `run_realapp.py --nav-engine typesafe` lets a TypeSafe System One model answer the narrow
-  "which control moves toward the goal" steps while the controller model keeps the rest. It is
-  gated on the model's own confidence (`--nav-min-confidence`, default 0.80) and proposes taps
-  only: stopping, going back, scrolling and typing all stay with the controller model, because
-  a wrong stop corrupts a verdict where a wrong tap costs a step. `--nav-shadow` records what it
-  would have chosen without letting it act. It also never repeats a tap on a screen that has
-  not changed, because a System One model reads each screen from scratch and would otherwise
-  loop. Navigation is where a run spends its requests — tens per run against the judge's
-  two — so this is the half worth making cheap.
-
-### Fixed
-
-- The controller harness no longer hides an off switch from the model. Frame compaction drops
-  flags whose false is merely a default, and `checked` had been swept up with them, so a
-  switch that was off looked identical to an element that was no switch at all and a contract
-  bullet like "the X switch is off" could never be verified. A `checked` of false is now kept
-  (a `checked` of null, meaning no switch, is still dropped), matching what `aua` itself
-  reports. Everything else the projection trims is unchanged.
 
 ## [0.28.0] - 2026-09-17
 
