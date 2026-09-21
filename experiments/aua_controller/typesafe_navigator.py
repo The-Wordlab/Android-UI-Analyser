@@ -64,10 +64,6 @@ FINISH_TOOL = "session_finish"
 # same state for free, because a System One request prices the state once and the answers in
 # parallel. `type` is still refused here for the same reason their harness hands it to a small
 # LLM: a non-generative model cannot write the string.
-SCROLL_DIRECTIONS: dict[str, str] = {
-    "down": "Move further down this screen to reveal what is below",
-    "up": "Move back up this screen to reveal what is above",
-}
 #: `in_progress` is not one of the harness's finish outcomes and is never passed to one. It is
 #: here because the other four describe a *finished* run, and on a step in the middle of one none
 #: of them is true -- so the model had to answer something anyway. Measured over 10 saved screens
@@ -94,12 +90,22 @@ ACTION_SPACES = ("taps", "full")
 ACTION_KINDS: dict[str, str] = {
     "tap": "Press a control that is visible on this screen now",
     "type": "Type text into a field on this screen",
-    "scroll": "What is needed is not on screen; scroll to reveal more",
+    "scroll_down": "What is needed is below; scroll down to reveal it",
+    "scroll_up": "What is needed is above; scroll up to reveal it",
     "back": "This screen is wrong or finished; go back",
     "done": "The goal is already satisfied; stop",
     "wait": "This screen is still loading or mid-animation; nothing should be pressed yet",
     "blocked": "Something outside the goal stops this run going further",
 }
+#: Scroll is two actions rather than one action plus a direction question. The public browser
+#: harnesses carry SCROLL_UP and SCROLL_DOWN as operations for the same reason it is right here:
+#: "which way should this screen be scrolled" is a hop of indirection jev-1.13's own notes warn
+#: about, and gating on min(action, direction) mixed the confidences of two separate questions,
+#: which those notes also warn about. Replayed over 11 saved screens the merged form chose the
+#: same action 11 times out of 11 and asked 2% fewer tokens, so the extra question was buying
+#: nothing. What it picks when a scroll is genuinely needed is untested either way.
+SCROLL_KINDS = {"scroll_down": "down", "scroll_up": "up"}
+
 #: Chosen to be declined. They carry no tool and exist so a boundary case has a home.
 NON_ACTIONS = ("wait", "blocked")
 #: The outcome that means "do not finish". Never a `session_finish` argument.
@@ -236,12 +242,8 @@ def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -
                                      "with nothing further to do?"),
     }
     if action_space == "full":
-        # Asked directly, not as "if it were scrolled..." / "if the run stopped here...".
-        # A hypothetical is a hop of indirection, and jev-1.13's documented jaggedness names
-        # indirection as a cost: "write your instructions as directly as possible".
-        questions["direction"] = Choice(
-            instructions="Which way should this screen be scrolled to bring the goal closer?",
-            criteria=dict(SCROLL_DIRECTIONS))
+        # Asked directly, not as "if the run stopped here...": a hypothetical is a hop of
+        # indirection, and jev-1.13's documented jaggedness names indirection as a cost.
         questions["outcome"] = Choice(
             instructions="What has become of the goal on this screen?",
             criteria=dict(FINISH_OUTCOMES))
@@ -307,11 +309,15 @@ class TypeSafeNavigator:
         self.proposals: list[dict[str, Any]] = []
         self.declined: dict[str, int] = {}
         self.requests = 0
+        self._why: str | None = None
         self.input_tokens = 0
         self.request_ms: list[float] = []
 
     def _decline(self, why: str) -> None:
         self.declined[why] = self.declined.get(why, 0) + 1
+        # The last reason given, so the proposal and the transcript can both name it. A run that
+        # hands a step to the chat model without saying why is unreadable afterwards.
+        self._why = why
 
     def observed(self, tool: str) -> None:
         """Record what the run actually did, whoever chose it."""
@@ -325,6 +331,7 @@ class TypeSafeNavigator:
         if not self.can_tap:
             self._decline("tap_not_offered")
             return None
+        self._why = None
         compact = compact_frame(result, keep_ids=True)
         observation = compact.get("observation") if isinstance(compact, Mapping) else None
         meta = observation.get("meta") if isinstance(observation, Mapping) else None
@@ -369,7 +376,9 @@ class TypeSafeNavigator:
         self.input_tokens += tokens
         self.usd += tokens * USD_PER_INPUT_TOKEN
 
-        self._record({
+        # Held, not written: the useful half of a turn is what the harness decided to do with the
+        # answer, and that has not happened yet. It is written once, below, verdict included.
+        turn = {
             "call": self.requests,
             "request_ms": round(elapsed_ms, 1),
             "input_tokens": tokens,
@@ -386,7 +395,7 @@ class TypeSafeNavigator:
             },
             "response": plain(response),
             "menu": numbered(options)[0],
-        })
+        }
         action, target = response.answers["action"], response.answers["target"]
         record = {
             "kind": action.choice, "kind_confidence": round(action.confidence, 4),
@@ -395,20 +404,32 @@ class TypeSafeNavigator:
             "settled": round(response.answers["settled"].noul, 4),
             "options": len(options),
         }
+        def settle(accepted: bool) -> None:
+            record["accepted"] = accepted
+            if not accepted:
+                record["declined_because"] = self._why
+            self.proposals.append(record)
+            turn["verdict"] = dict(record)
+            self._record(turn)
+
         plan = self._plan(action, target, response.answers, options, numbered(options)[1])
         if plan is None:
-            record["accepted"] = False
-            self.proposals.append(record)
+            settle(False)
             return None
         tool, arguments, operand, operand_confidence, label = plan
         record["tool"] = tool
+        # Name the operand the gate actually read. `target_confidence` belongs to the tap
+        # question and says nothing about a scroll, a back or a finish -- printing it beside a
+        # gate computed from a different answer made the log contradict itself.
+        record["operand"] = operand
+        record["operand_confidence"] = round(operand_confidence, 4)
 
         gate = min(action.confidence, operand_confidence)
         record["gate"] = round(gate, 4)
+        record["gate_needed"] = self.min_confidence
         if gate < self.min_confidence:
             self._decline("below_confidence")
-            record["accepted"] = False
-            self.proposals.append(record)
+            settle(False)
             return None
 
         # Repeating an action on a screen that action already failed to move is the one loop a
@@ -416,11 +437,11 @@ class TypeSafeNavigator:
         pair = (str(fingerprint), f"{action.choice}:{operand}")
         if fingerprint is not None and pair in self._seen:
             self._decline("repeat_on_unchanged_screen")
-            record["accepted"] = False
-            self.proposals.append(record)
+            settle(False)
             return None
-        record["accepted"] = not self.shadow
-        self.proposals.append(record)
+        if self.shadow:
+            self._decline("shadow")
+        settle(not self.shadow)
         if fingerprint is not None:
             self._seen.add(pair)
         self._pending = {"n": len(self._journey) + 1,
@@ -461,16 +482,14 @@ class TypeSafeNavigator:
             # small generative model here and so does this one, by handing the step back.
             self._decline("kind:type")
             return None
-        if kind == "scroll":
+        if kind in SCROLL_KINDS:
             if SCROLL_TOOL not in self.offered:
                 self._decline("scroll_not_offered")
                 return None
-            direction = answers.get("direction")
-            if direction is None:
-                self._decline("no_direction")
-                return None
-            return (SCROLL_TOOL, {"direction": direction.choice}, direction.choice,
-                    direction.confidence, f"scroll {direction.choice}")
+            direction = SCROLL_KINDS[kind]
+            # The direction is the action, so there is no second answer to gate on.
+            return (SCROLL_TOOL, {"direction": direction}, direction,
+                    action.confidence, f"scroll {direction}")
         if kind == "back":
             if BACK_TOOL not in self.offered:
                 self._decline("back_not_offered")
@@ -525,5 +544,5 @@ class TypeSafeNavigator:
 
 __all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered",
            "MODEL", "MIN_CONFIDENCE",
-           "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "SCROLL_DIRECTIONS",
+           "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "SCROLL_KINDS",
            "FINISH_OUTCOMES", "UNFINISHED", "build_questions", "what_happened", "candidates", "tool_names"]

@@ -260,10 +260,15 @@ def wide(client, **kwargs):
     return asyncio.run(navigator(SCREEN)), navigator
 
 
-def test_the_widened_space_scrolls_with_the_direction_it_chose() -> None:
-    action, _ = wide(WideClient(kind="scroll", direction="up"))
+def test_scrolling_is_two_actions_and_carries_its_own_direction() -> None:
+    # The direction is the action, not a second question about it: "which way should this be
+    # scrolled" is a hop of indirection, and gating on min(action, direction) mixed two separate
+    # questions. Replayed over 11 saved screens the merged form picked the same action 11/11.
+    action, _ = wide(WideClient(kind="scroll_up"))
     assert action["tool"] == "scroll_and_analyze"
     assert action["arguments"] == {"direction": "up"}
+    action, _ = wide(WideClient(kind="scroll_down"))
+    assert action["arguments"] == {"direction": "down"}
 
 
 def test_the_widened_space_goes_back_with_no_operand() -> None:
@@ -289,22 +294,23 @@ def test_typing_is_refused_even_in_the_widened_space() -> None:
 
 
 def test_a_widened_action_whose_tool_was_not_offered_is_refused() -> None:
-    navigator = TypeSafeNavigator("g", client=WideClient(kind="scroll"), tools=[TAP_TOOL],
+    navigator = TypeSafeNavigator("g", client=WideClient(kind="scroll_down"), tools=[TAP_TOOL],
                                   action_space="full")
     assert asyncio.run(navigator(SCREEN)) is None
     assert navigator.report()["declined"] == {"scroll_not_offered": 1}
 
 
-def test_the_operand_gates_the_step_not_the_target_of_an_action_without_one() -> None:
-    # A scroll is gated on its direction; an uncertain direction is an uncertain scroll even
-    # when the tap target it did not choose came back certain.
-    action, navigator = wide(WideClient(kind="scroll", operand_conf=0.40))
+def test_an_action_without_an_operand_is_gated_on_itself_alone() -> None:
+    # A scroll carries its own direction and a back takes nothing, so there is no second answer
+    # to gate on -- a certain tap target says nothing about either.
+    action, navigator = wide(WideClient(kind="scroll_down", kind_conf=0.40, target_conf=1.0))
     assert action is None
     assert navigator.report()["declined"] == {"below_confidence": 1}
+    assert navigator.proposals[0]["gate"] == 0.40
 
 
 def test_the_same_scroll_is_not_repeated_on_a_screen_it_did_not_move() -> None:
-    client = WideClient(kind="scroll")
+    client = WideClient(kind="scroll_down")
     navigator = TypeSafeNavigator("g", client=client, tools=WIDE_TOOLS, action_space="full")
     assert asyncio.run(navigator(SCREEN)) is not None
     assert asyncio.run(navigator(SCREEN)) is None
@@ -317,7 +323,7 @@ def test_the_operand_questions_are_asked_in_the_same_single_request() -> None:
     client = WideClient()
     wide(client)
     assert client.calls == 1
-    assert {"action", "target", "settled", "direction", "outcome"} == set(client.questions)
+    assert {"action", "target", "settled", "outcome"} == set(client.questions)
 
 
 def test_the_narrow_default_asks_no_operand_questions() -> None:
@@ -461,3 +467,48 @@ def test_a_frame_without_change_telemetry_falls_back_to_the_old_wording() -> Non
     from experiments.aua_controller.typesafe_navigator import what_happened
 
     assert what_happened({}, moved=True) == "screen changed"
+
+
+def test_the_record_names_the_operand_the_gate_actually_read() -> None:
+    # A finish is gated on its outcome, not on the tap target it never used. Printing the target
+    # beside that gate made the log contradict itself: target 0.86, gate 0.51, same row.
+    action, navigator = wide(WideClient(kind="done", outcome="achieved", operand_conf=0.51))
+    assert action is None, "0.51 is under the default gate"
+    record = navigator.proposals[0]
+    assert record["operand"] == "achieved"
+    assert record["operand_confidence"] == 0.51
+    assert record["gate"] == 0.51, "the gate is the action and its own operand, nothing else"
+
+
+def test_a_declined_call_says_why_in_its_transcript_entry(tmp_path) -> None:
+    # A step handed to the chat model without a recorded reason is unreadable afterwards: the
+    # log shows DeepSeek acting and nothing about the refusal that put it there.
+    path = tmp_path / "turns.jsonl"
+    navigator = TypeSafeNavigator("g", client=FakeClient(target_conf=0.42), tools=[TAP_TOOL],
+                                  transcript_path=path)
+    assert asyncio.run(navigator(SCREEN)) is None
+
+    entry = json.loads(path.read_text().strip())
+    verdict = entry["verdict"]
+    assert verdict["accepted"] is False
+    assert verdict["declined_because"] == "below_confidence"
+    assert verdict["gate"] == 0.42 and verdict["gate_needed"] == 0.85
+
+
+def test_an_accepted_call_records_its_verdict_too(tmp_path) -> None:
+    path = tmp_path / "turns.jsonl"
+    navigator = TypeSafeNavigator("g", client=FakeClient(), tools=[TAP_TOOL], transcript_path=path)
+    assert asyncio.run(navigator(SCREEN)) is not None
+
+    verdict = json.loads(path.read_text().strip())["verdict"]
+    assert verdict["accepted"] is True and verdict.get("declined_because") is None
+
+
+def test_exactly_one_transcript_line_is_written_per_call(tmp_path) -> None:
+    path = tmp_path / "turns.jsonl"
+    navigator = TypeSafeNavigator("g", client=FakeClient(), tools=[TAP_TOOL], transcript_path=path)
+    asyncio.run(navigator(SCREEN))
+    navigator.observed(TAP_TOOL)
+    moved = {"ok": True, "observation": {**SCREEN["observation"], "meta": {"fingerprint": "fp-9"}}}
+    asyncio.run(navigator(moved))
+    assert len(path.read_text().strip().splitlines()) == 2

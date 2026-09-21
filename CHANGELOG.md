@@ -71,6 +71,18 @@ notes, so you can check for a newer version — and read what changed — withou
   shared map surface, and goal cleanup restores the browser session baseline.
 
 ## [0.29.0] - 2026-09-18
+- Scrolling is now two actions, `scroll_down` and `scroll_up`, instead of one `scroll` action
+  plus a separate direction question — the shape the public Jev browser harnesses use. "Which way
+  should this screen be scrolled" was a hop of indirection, and gating on the minimum of two
+  separate questions' confidences is exactly what jev-1.13's notes warn against. Replayed over 11
+  saved screens the merged form chose the same action 11 times out of 11 and asked 2% fewer
+  tokens, so the extra question was buying nothing.
+
+- Every System One call's transcript entry now carries the harness's verdict on it: whether the
+  proposal was taken, and when it was not, which rule refused it and what the gate needed. A step
+  handed to the controller model used to appear in the log as the controller model simply acting,
+  with no trace of the refusal that put it there.
+
 - The System One navigator's journey now says what an action actually did instead of whether the
   screen fingerprint moved. "screen changed" was a boolean, so a button losing its label while a
   login was in flight read exactly like arriving somewhere new — and the navigator, told only
