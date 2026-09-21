@@ -71,6 +71,19 @@ notes, so you can check for a newer version — and read what changed — withou
   shared map surface, and goal cleanup restores the browser session baseline.
 
 ## [0.29.0] - 2026-09-18
+- `wait` is now an action the System One navigator can actually take, mapped to
+  `wait_and_analyze`. It was offered as an answer and never honoured: choosing it handed the step
+  to the controller model, which was then paid to answer the same question about the same screen.
+  The repeat guard bounds it without a counter — a wait that leaves the screen identical is the
+  same (fingerprint, action) pair, so the second one escalates. `blocked` stays refused, because
+  acting on it means ending the run.
+
+- Controls the app never named are described by where they sit ("unlabelled control, top right of
+  the screen") instead of falling back to their own 32-character id. Measured over two recorded
+  runs, 19 of 176 options handed over — 11% — were raw digests, the exact opaque value the
+  numbered menu exists to keep out of the request. Dropping them is not safe: this class of app
+  leaves many genuinely pressable controls unnamed.
+
 - Scrolling is now two actions, `scroll_down` and `scroll_up`, instead of one `scroll` action
   plus a separate direction question — the shape the public Jev browser harnesses use. "Which way
   should this screen be scrolled" was a hop of indirection, and gating on the minimum of two

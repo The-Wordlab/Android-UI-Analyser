@@ -74,7 +74,7 @@ def test_a_confident_tap_is_proposed_as_a_bound_tool_call() -> None:
     assert navigator.report()["accepted"] == 1
 
 
-@pytest.mark.parametrize("kind", ["done", "back", "scroll", "type"])
+@pytest.mark.parametrize("kind", ["done", "back", "scroll_down", "type", "wait"])
 def test_every_action_that_is_not_a_tap_goes_back_to_the_chat_model(kind: str) -> None:
     # Ending, rewinding, scrolling and typing were the measured weak spots; none of them is
     # this navigator's to decide, however sure it sounds.
@@ -251,7 +251,8 @@ class WideClient(FakeClient):
         return response
 
 
-WIDE_TOOLS = [TAP_TOOL, "scroll_and_analyze", "back_gesture_and_analyze", "session_finish"]
+WIDE_TOOLS = [TAP_TOOL, "scroll_and_analyze", "back_gesture_and_analyze", "session_finish",
+              "wait_and_analyze"]
 
 
 def wide(client, **kwargs):
@@ -361,14 +362,12 @@ def test_an_index_that_is_not_on_the_menu_is_refused() -> None:
     assert navigator.report()["declined"] == {"unknown_target": 1}
 
 
-@pytest.mark.parametrize("kind", ["wait", "blocked"])
-def test_waiting_and_being_blocked_are_offered_so_they_can_be_declined(kind: str) -> None:
-    # Neither carries a tool. They exist because jev-1.13 answers the question as written: with
-    # no option for "this screen is still loading", a loading screen forces an outright wrong
-    # tap. Giving the boundary case its own option is the documented fix and costs nothing.
-    action, navigator = propose(FakeClient(kind=kind, kind_conf=1.0, target_conf=1.0))
+def test_being_blocked_is_offered_so_it_can_be_declined() -> None:
+    # `blocked` exists so a stuck run has somewhere to put the truth, but acting on it means
+    # ending the run, and ending a run early is this model's worst measured skill.
+    action, navigator = propose(FakeClient(kind="blocked", kind_conf=1.0, target_conf=1.0))
     assert action is None
-    assert navigator.report()["declined"] == {f"kind:{kind}": 1}
+    assert navigator.report()["declined"] == {"kind:blocked": 1}
 
 
 def test_the_boundary_options_are_offered_in_both_action_spaces() -> None:
@@ -512,3 +511,55 @@ def test_exactly_one_transcript_line_is_written_per_call(tmp_path) -> None:
     moved = {"ok": True, "observation": {**SCREEN["observation"], "meta": {"fingerprint": "fp-9"}}}
     asyncio.run(navigator(moved))
     assert len(path.read_text().strip().splitlines()) == 2
+
+
+def test_a_control_the_app_never_named_is_placed_not_hashed() -> None:
+    # 11% of real options carried no text, desc or resource id, so the label fell back to the
+    # element's own digest -- the opaque value the numbering exists to keep out of the request.
+    options = candidates({
+        "screen": {"width": 1000, "height": 2000},
+        "elements": [{"id": "el:deadbeefdeadbeefdeadbeef", "clickable": True,
+                      "bounds": [800, 100, 960, 220]},
+                     {"id": "el:aaa", "text": "Settings", "clickable": True}],
+    })
+    assert options["el:deadbeefdeadbeefdeadbeef"] == "unlabelled control, top right of the screen"
+    assert not any("deadbeef" in label for label in options.values())
+
+
+def test_an_unnamed_control_with_no_bounds_still_reads_as_a_control() -> None:
+    options = candidates({"elements": [{"id": "el:x", "clickable": True},
+                                       {"id": "el:y", "clickable": True}]})
+    assert options["el:x"] == "unlabelled control"
+
+
+def test_a_named_control_is_untouched_by_the_fallback() -> None:
+    options = candidates({"screen": {"width": 1000, "height": 2000},
+                          "elements": [{"id": "el:a", "text": "Continue", "clickable": True,
+                                        "bounds": [0, 0, 10, 10]},
+                                       {"id": "el:b", "text": "Back", "clickable": True}]})
+    assert options["el:a"] == "Continue"
+
+
+def test_waiting_is_an_action_the_navigator_can_actually_take() -> None:
+    # Asking "is this screen still loading?" and then paying a chat model to answer the same
+    # question was an option that cost a round trip to say nothing. The tool already existed.
+    action, _ = wide(WideClient(kind="wait"))
+    assert action["tool"] == "wait_and_analyze"
+    assert action["arguments"] == {"idle": True}
+
+
+def test_a_second_wait_on_a_screen_that_never_moved_escalates() -> None:
+    # No counter needed: waiting twice on an identical screen is the same (fingerprint, action)
+    # pair the repeat guard already refuses, so one wait per screen and then the chat model.
+    client = WideClient(kind="wait")
+    navigator = TypeSafeNavigator("g", client=client, tools=WIDE_TOOLS, action_space="full")
+    assert asyncio.run(navigator(SCREEN)) is not None
+    assert asyncio.run(navigator(SCREEN)) is None
+    assert navigator.report()["declined"] == {"repeat_on_unchanged_screen": 1}
+
+
+def test_waiting_is_refused_when_the_run_was_never_offered_the_tool() -> None:
+    navigator = TypeSafeNavigator("g", client=WideClient(kind="wait"), tools=[TAP_TOOL],
+                                  action_space="full")
+    assert asyncio.run(navigator(SCREEN)) is None
+    assert navigator.report()["declined"] == {"wait_not_offered": 1}

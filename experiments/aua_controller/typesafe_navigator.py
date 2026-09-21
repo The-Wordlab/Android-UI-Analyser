@@ -57,6 +57,7 @@ TAP_TOOL = "tap_and_analyze"
 SCROLL_TOOL = "scroll_and_analyze"
 BACK_TOOL = "back_gesture_and_analyze"
 FINISH_TOOL = "session_finish"
+WAIT_TOOL = "wait_and_analyze"
 
 # Widened action space, after reading how public Jev browser agents are built
 # (browser-use/jev-ultrafast): one call returns the operation and every operand it might need, and
@@ -106,10 +107,36 @@ ACTION_KINDS: dict[str, str] = {
 #: nothing. What it picks when a scroll is genuinely needed is untested either way.
 SCROLL_KINDS = {"scroll_down": "down", "scroll_up": "up"}
 
-#: Chosen to be declined. They carry no tool and exist so a boundary case has a home.
-NON_ACTIONS = ("wait", "blocked")
+#: `blocked` is chosen to be declined: acting on it means ending the run, and ending a run early
+#: is this model's worst measured skill. `wait` is not in here because waiting is a real tool the
+#: harness already offers -- asking "is this screen still loading?" and then paying a chat model
+#: to answer the same question was the option costing a round trip to say nothing.
+NON_ACTIONS = ("blocked",)
 #: The outcome that means "do not finish". Never a `session_finish` argument.
 UNFINISHED = "in_progress"
+
+
+def where(element: Mapping[str, Any], screen: Mapping[str, Any] | None) -> str:
+    """Roughly where a control sits, for the ones the app never named.
+
+    Around 11% of the options handed over carried no text, desc or resource id at all, so the
+    label fell back to the element's own 32-character digest -- exactly the opaque value the
+    numbering was introduced to keep out of the request. Dropping them is not safe: this class of
+    app leaves many genuinely pressable controls unnamed, including the one the run needs. A
+    position is something a reader of the screen can actually use.
+    """
+    bounds = element.get("bounds")
+    if not (isinstance(bounds, (list, tuple)) and len(bounds) == 4):
+        return "unlabelled control"
+    width = (screen or {}).get("width") or 0
+    height = (screen or {}).get("height") or 0
+    if not (width and height):
+        return "unlabelled control"
+    x = (float(bounds[0]) + float(bounds[2])) / 2 / width
+    y = (float(bounds[1]) + float(bounds[3])) / 2 / height
+    down = "top" if y < 0.33 else ("bottom" if y > 0.66 else "middle")
+    across = "left" if x < 0.33 else ("right" if x > 0.66 else "centre")
+    return f"unlabelled control, {down} {across} of the screen"
 
 
 def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTIONS) -> dict[str, str]:
@@ -127,7 +154,10 @@ def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTION
                 or "checked" in element):
             continue
         label = next((element[key] for key in ("text", "desc", "content_desc", "resource_id", "rid")
-                      if isinstance(element.get(key), str) and element[key].strip()), handle)
+                      if isinstance(element.get(key), str) and element[key].strip()),
+                     None)
+        if label is None:
+            label = where(element, observation.get("screen") if isinstance(observation, Mapping) else None)
         if "checked" in element:
             label = f"{label} [switch is {'ON' if element['checked'] else 'OFF'}]"
         options[handle] = label[:90]
@@ -490,6 +520,14 @@ class TypeSafeNavigator:
             # The direction is the action, so there is no second answer to gate on.
             return (SCROLL_TOOL, {"direction": direction}, direction,
                     action.confidence, f"scroll {direction}")
+        if kind == "wait":
+            if WAIT_TOOL not in self.offered:
+                self._decline("wait_not_offered")
+                return None
+            # The repeat guard bounds this without a counter: a wait that leaves the screen
+            # identical is the same (fingerprint, action) pair, so the second one is refused and
+            # the step goes to the chat model. One wait per screen, then escalate.
+            return (WAIT_TOOL, {"idle": True}, "idle", action.confidence, "wait for the screen")
         if kind == "back":
             if BACK_TOOL not in self.offered:
                 self._decline("back_not_offered")
@@ -544,5 +582,5 @@ class TypeSafeNavigator:
 
 __all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered",
            "MODEL", "MIN_CONFIDENCE",
-           "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "SCROLL_KINDS",
+           "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "WAIT_TOOL", "SCROLL_KINDS",
            "FINISH_OUTCOMES", "UNFINISHED", "build_questions", "what_happened", "candidates", "tool_names"]
