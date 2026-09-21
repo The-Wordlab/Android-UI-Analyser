@@ -463,7 +463,8 @@ def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
     The final observation is judged separately, so the last element is left out here.
     *limit* is the preferred compact-text count, with a hard cap of 32. Observed screen
     families, selection changes and lifecycle/checkpoint boundaries take priority over repeated
-    states. Legacy frames without hierarchy metadata retain the evenly spread fallback.
+    states, which in turn outrank blank captures; nothing is dropped while seats are free.
+    Legacy frames without hierarchy metadata retain the evenly spread fallback.
     """
     limit = min(limit if limit > 0 else MAX_TEXT_FRAMES, MAX_TEXT_FRAMES)
     body = list(frames[:-1])
@@ -491,9 +492,9 @@ def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
                 key = (family, state, position.get("lifecycle_epoch"))
                 if not family:
                     # Evidence of a transient state and nothing more: it takes a seat only
-                    # after every frame that shows a screen has had its turn.
+                    # after every frame that shows a screen, repeats included, has had its turn.
                     if key not in seen_states:
-                        priority.append((3, index))
+                        priority.append((4, index))
                 elif family not in seen_families:
                     priority.append((0, index))
                     seen_families.add(family)
@@ -503,6 +504,11 @@ def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
                     priority.append((1, index))
                 elif key not in seen_states:
                     priority.append((2, index))
+                else:
+                    # A state already shown. Dropping it outright hid the one proof a
+                    # "Cancel keeps it" step has -- the screen after Cancel is the screen
+                    # before the dialog -- on a run shorter than the seat budget.
+                    priority.append((3, index))
                 seen_states.add(key)
                 if selection:
                     family_selections[family] = selection
