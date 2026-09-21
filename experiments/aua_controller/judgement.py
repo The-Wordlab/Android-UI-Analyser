@@ -400,7 +400,11 @@ def _frame_traits(frame: Any) -> tuple[str, str, str]:
     meta = observation.get("meta", {})
     title = next((str(item.get("text") or item.get("desc")) for item in elements
                   if not item.get("clickable") and len(str(item.get("text") or item.get("desc") or "")) > 1), "")
-    family = str(meta.get("known_screen") or title or meta.get("screen") or screen.get("activity") or "")
+    # A capture with nothing on it names no screen, whatever its activity is called: it is a
+    # transition or a screen not yet drawn, and letting its activity stand for a family gave it
+    # a seat reserved for a screen the judge could actually read.
+    family = str(meta.get("known_screen") or title or meta.get("screen") or screen.get("activity") or "") \
+        if elements else ""
     selection = [item for item in elements if item.get("selected") or item.get("checked")
                  or re.search(r"\bselected\b", str(item.get("text", "")), re.IGNORECASE)]
     state = json.dumps({"elements": elements, "fingerprint": frame_fingerprint(frame)}, sort_keys=True)
@@ -481,7 +485,12 @@ def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
                 progress = body[index].get("goal_progress") or {}
                 checkpoint = (progress.get("completed"), (progress.get("current") or {}).get("id"))
                 key = (family, state, position.get("lifecycle_epoch"))
-                if family not in seen_families:
+                if not family:
+                    # Evidence of a transient state and nothing more: it takes a seat only
+                    # after every frame that shows a screen has had its turn.
+                    if key not in seen_states:
+                        priority.append((3, index))
+                elif family not in seen_families:
                     priority.append((0, index))
                     seen_families.add(family)
                 elif (position.get("after_tool") in {"app_relaunch_and_analyze", "app_launch_and_analyze"}
