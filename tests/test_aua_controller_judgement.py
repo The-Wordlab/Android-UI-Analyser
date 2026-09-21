@@ -97,11 +97,11 @@ def test_judge_keeps_requested_text_checkpoints_beyond_eight_and_image_positions
     asyncio.run(judge_outcome_votes(decider(sender), votes=1, goal="audit", final_frame=frame(),
                                    frames=frames, image_evidence=[image_position]))
     context = json.loads(sender.payloads[0]["messages"][1]["content"].split("Evidence:\n", 1)[1])
-    assert len(context["intermediate_frames"]) == 13
+    assert len(context["journey"]) == 13
     assert context["image_evidence"] == [image_position]
-    assert "fresh observation after that numbered action" in context["evidence_selection_note"]
+    assert "after that numbered action" in context["evidence_selection_note"]
     assert "not a controller claim" in context["evidence_selection_note"]
-    assert context["intermediate_frames"][-1]["observation"]["elements"][0]["text"] == "Checkpoint 12"
+    assert "Checkpoint 12" in context["journey"][-1]["screen"]
 
 
 def test_disabled_reasoning_stays_disabled_under_the_unchanged_vote_deadline():
@@ -674,8 +674,9 @@ def test_judges_receive_resolved_target_names_in_order_without_handles_or_claims
     asyncio.run(judge_outcome_votes(decider(sender), votes=1, goal="Review menu states",
                                     final_frame=frame(), actions=actions))
     evidence = sender.payloads[0]["messages"][1]["content"]
-    assert evidence.index('"text": "Pin"') < evidence.index('"text": "Unpin"') < evidence.index('"text": "Save"')
-    assert "E0000" in evidence and "E0002" in evidence
+    # No screen was shown for these steps, so they appear as attempted actions, in order and
+    # by the name AUA resolved, never by handle -- and never with the controller's reasoning.
+    assert evidence.index("press 'Pin'") < evidence.index("press 'Unpin'") < evidence.index("press 'Save'")
     assert "el:opaque" not in evidence and "untrusted controller narrative" not in evidence
 
 
@@ -713,7 +714,7 @@ def test_judge_relative_positions_prove_order_changes_without_pixel_bounds():
     context = json.loads(content[0]["text"].split("Evidence:\n", 1)[1].split("\n\nThe attached", 1)[0])
     assert len(context["image_evidence"]) == 5
     checkpoints = context["observed_order_transitions"][0]["checkpoints"]
-    assert [item["evidence_position"]["ref"] for item in checkpoints] == ["E20", "E22", "E24"]
+    assert [item["at"]["ref"] for item in checkpoints] == ["E20", "E22", "E24"]
     assert [item["rows"][0]["text"] for item in checkpoints] == ["First item", "Named item", "First item"]
     assert "chronological host-captured post-action observations" in (
         context["observed_order_transitions"][0]["note"]

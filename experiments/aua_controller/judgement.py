@@ -281,21 +281,21 @@ DECIDER_SYSTEM = (
 )
 JUDGE_INSTRUCTIONS = {
     "neutral": (
-        "Decide whether the goal was achieved as observed. 'pass' needs an observed frame, final or "
-        "intermediate, to show the requested end state, with no later frame contradicting it; a run "
-        "often returns to a home screen after the change, so the final frame need not display the "
+        "Decide whether the goal was achieved as observed. 'pass' needs an observed screen, in the journey or "
+        "final, to show the requested end state, with no later entry contradicting it; a run "
+        "often returns to a home screen after the change, so `final` need not display the "
         "state itself. Use 'pass_with_warning' when the outcome holds but the route or state carries "
         "a minor deviation. Use 'blocked' when an external condition (login, permission, network, "
         "quota, missing precondition) prevented the goal, not the app. Use 'fail' when the app did "
         "not reach or hold the requested state. Use 'unverified' when no frame can show the answer."
     ),
     "skeptical": (
-        "Try to refute the claim that the goal was achieved. Proof is an observed frame, final or "
-        "intermediate, that shows the requested end state; the action log and the controller's "
+        "Try to refute the claim that the goal was achieved. Proof is an observed screen, in the journey or "
+        "final, that shows the requested end state; the actions and the controller's "
         "claim are never proof. A run often returns to a home screen after the change, so do not "
-        "demand the state in the final frame when an earlier frame shows it and nothing later "
-        "contradicts it. Default to 'fail' or 'unverified' when no frame shows the end state. "
-        "Prefer 'blocked' over 'fail' only when an external condition is visible in the frames."
+        "demand the state in `final` when an earlier entry shows it and nothing later "
+        "contradicts it. Default to 'fail' or 'unverified' when no entry shows the end state. "
+        "Prefer 'blocked' over 'fail' only when an external condition is visible in the journey."
     ),
 }
 NAMER_INSTRUCTIONS = (
@@ -316,7 +316,7 @@ CLAIM_NOTE = (
     "route warning, not evidence against a criterion scoped to the requested end screen; only "
     "wording such as 'never', 'throughout', or 'at any time' extends a criterion across the whole "
     "journey. When screenshots are attached, they can prove conventional unlabeled controls and "
-    "empty layout regions that element text cannot name."
+    "empty layout regions that a screen's labels cannot name."
 )
 ROUTE_INSTRUCTIONS = (
     "Summarise this route for a durable map and memory entry: how a tester gets from the first "
@@ -1105,6 +1105,158 @@ class Decider:
                 "spend_guard": self.guard.report() if self.guard is not None else None}
 
 
+# What a tool call reads as, in the words a person would use. Anything not listed is spelled
+# out from its name, so a new tool degrades to "long press" rather than to a KeyError.
+_STORY_VERBS = {
+    "tap_and_analyze": "press", "long_press_and_analyze": "long-press",
+    "double_tap_and_analyze": "double-tap", "click_and_analyze": "press",
+    "scroll_and_analyze": "scroll", "a11y_scroll_and_analyze": "scroll", "swipe_and_analyze": "swipe",
+    "back_gesture_and_analyze": "back", "back_until_and_analyze": "back until",
+    "key_and_analyze": "press key", "wait_and_analyze": "wait", "wait_changed_and_analyze": "wait",
+    "wait_stable_and_analyze": "wait", "await_and_analyze": "wait", "analyze_screen": "look again",
+    "app_launch_and_analyze": "open the app", "app_relaunch_and_analyze": "relaunch the app",
+    "app_restart_and_analyze": "restart the app", "hide_keyboard_and_analyze": "hide the keyboard",
+}
+MAX_STORY_LABEL = 100
+
+
+def _story_elements(frame: Any) -> list[dict[str, Any]]:
+    """The readable elements of a raw or compacted frame, wherever the observation sits."""
+    if not isinstance(frame, dict):
+        return []
+    observation = frame.get("observation")
+    if not isinstance(observation, dict):
+        error = frame.get("error")
+        observation = error.get("observation") if isinstance(error, dict) else None
+    if not isinstance(observation, dict):
+        observation = frame
+    return [item for item in observation.get("elements") or [] if isinstance(item, dict)]
+
+
+def _label_of(element: dict[str, Any]) -> str:
+    for key in ("text", "desc", "content_desc"):
+        value = element.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:MAX_STORY_LABEL]
+    return ""
+
+
+def _target_label(action: dict[str, Any], chosen_on: Any) -> str:
+    """What the controller aimed at, in the screen's own words."""
+    arguments = action.get("arguments") or {}
+    typed = action.get("tool") == "input_and_analyze"
+    for key in (("desc", "rid") if typed else ("text", "desc", "rid")):
+        if arguments.get(key):
+            return str(arguments[key])
+    handle = arguments.get("id")
+    if handle:
+        for element in _story_elements(chosen_on):
+            if element.get("id") == handle:
+                return _label_of(element) or str(element.get("resource_id") or "a control")
+    resolved = action.get("resolved_target") or {}
+    for key in ("text", "desc", "content_desc", "resource_id"):
+        if resolved.get(key):
+            return str(resolved[key])
+    return "a control"
+
+
+def _story_action(action: dict[str, Any] | None, tool: str | None, chosen_on: Any) -> str:
+    if action is None:
+        return _STORY_VERBS.get(str(tool), "open the app") if tool else "open the app"
+    name = str(action.get("tool") or tool or "")
+    arguments = action.get("arguments") or {}
+    if name == "session_finish":
+        claim = arguments.get("controller_claim_untrusted")
+        return f"controller_claim_untrusted: {claim}" if claim else "controller finished"
+    verb = _STORY_VERBS.get(name, name.replace("_and_analyze", "").replace("_", " "))
+    if name == "input_and_analyze":
+        return f"type {json.dumps(str(arguments.get('text', '')), ensure_ascii=False)} into '{_target_label(action, chosen_on)}'"
+    if verb in ("press", "long-press", "double-tap"):
+        return f"{verb} '{_target_label(action, chosen_on)}'"
+    if verb in ("scroll", "swipe") and arguments.get("direction"):
+        return f"{verb} {arguments['direction']}"
+    if verb == "press key" and arguments.get("key"):
+        return f"press key {arguments['key']}"
+    if verb == "back until" and (arguments.get("until") or arguments.get("screen")):
+        return f"back until '{arguments.get('until') or arguments.get('screen')}'"
+    return verb
+
+
+def _screen_line(frame: Any) -> str:
+    """The screen as one line of its own labels: ``Settings · [Theme] · [App language en] ✓``."""
+    compact = compact_frame(frame, max_elements=40, max_text=MAX_STORY_LABEL, keep_ids=False)
+    observation = compact.get("observation") if isinstance(compact, dict) else None
+    if not isinstance(observation, dict):
+        return "(nothing readable on screen)"
+    parts = []
+    for element in observation.get("elements") or []:
+        label = _label_of(element) if isinstance(element, dict) else ""
+        if not label:
+            continue
+        if element.get("clickable"):
+            label = f"[{label}]"
+        if element.get("selected") or element.get("checked"):
+            label = f"{label} ✓"
+        parts.append(label)
+    elided = observation.get("elided_elements")
+    if isinstance(elided, int) and elided > 0:
+        parts.append(f"…+{elided} more")
+    return " · ".join(parts) if parts else "(nothing readable on screen)"
+
+
+def judge_story(frames: Sequence[Any], actions: Sequence[dict[str, Any]] = ()) -> list[dict[str, Any]]:
+    """The run as a reader would tell it: one entry per shown observation -- what was done,
+    what was then on screen -- with only the extra facts that apply to that entry.
+
+    The judge used to get an ``action_log`` and a list of raw frames, joined by step number in
+    its head. Here the join is done, ids and pixels are gone, and a step whose screen the
+    sampler left out is named in ``steps_not_shown`` so nothing is assumed about it.
+    """
+    by_step = {action.get("step"): action for action in actions if isinstance(action, dict)}
+    steps = sorted(step for step in by_step if isinstance(step, int))
+    story: list[dict[str, Any]] = []
+    previous: Any = None
+    previous_step = -1
+    previous_epoch = None
+    for index, frame in enumerate(frames):
+        evidence = frame.get("_judge_evidence", {}) if isinstance(frame, dict) else {}
+        step = evidence.get("after_step")
+        action = by_step.get(step)
+        entry: dict[str, Any] = {
+            "ref": evidence.get("ref"), "step": step,
+            "action": _story_action(action, evidence.get("after_tool"), previous)
+            if (action is not None or previous is None) else "final observation",
+            "screen": _screen_line(frame),
+        }
+        # A step-less entry is the final observation when it closes the story and the launch
+        # screen otherwise: every action precedes the last entry, none precedes the launch.
+        closes = index == len(frames) - 1
+        upper = step if isinstance(step, int) else (steps[-1] + 1 if closes and steps else -1)
+        # An action whose screen was left out is still named, so the judge knows what was
+        # attempted and that no screen for it is in evidence. Its label resolves against the
+        # last shown screen when the id came from there, else against what AUA resolved.
+        missing = [{"step": item, "action": _story_action(by_step[item], None, previous)}
+                   for item in steps if previous_step < item < upper]
+        if missing:
+            entry["steps_not_shown"] = missing
+        fingerprint = frame_fingerprint(frame)
+        if previous is not None and fingerprint and fingerprint == frame_fingerprint(previous):
+            entry["changed"] = False
+        if observation_frame(frame) is None and judgement_observation_frame(frame) is not None:
+            entry["loading"] = True
+        calls = _frame_network_calls(evidence_frame(frame))
+        if calls:
+            entry["network"] = calls
+        epoch = evidence.get("lifecycle_epoch")
+        if previous_epoch is not None and epoch is not None and epoch != previous_epoch:
+            entry["app_restarted"] = True
+        story.append(entry)
+        previous, previous_epoch = frame, epoch
+        if isinstance(step, int):
+            previous_step = step
+    return story
+
+
 async def judge_outcome(
     decider: Decider,
     *,
@@ -1125,20 +1277,21 @@ async def judge_outcome(
     """
     if stance not in JUDGE_INSTRUCTIONS:
         raise RunError("unknown judge stance")
-    context = {
+    story = judge_story([*list(frames)[:MAX_TEXT_FRAMES], final_frame], actions)
+    context: dict[str, Any] = {
         "goal": goal,
-        # Judges never act, so element handles are removed from the action log as well.
-        "action_log": [_strip_ids({key: value for key, value in action.items()
-                                   if key in ("step", "tool", "arguments", "resolved_target")})
-                       for action in list(actions)[-30:]],
-        # The rendered-image cap is not a text-evidence cap. A long route may need more compact
-        # hierarchy frames to prove distinct screens while still sending only four screenshots.
-        "intermediate_frames": [evidence_frame(frame) for frame in list(frames)[:MAX_TEXT_FRAMES]],
-        "final_frame": evidence_frame(final_frame),
-        "layout_evidence_note": (
-            "center_pct is the host-observed control center as [horizontal, vertical] percentages "
-            "of its screen; lower vertical values are higher on screen. It proves relative layout, "
-            "not enabled/disabled appearance or whether an action succeeded."
+        "journey": story[:-1],
+        "final": story[-1],
+        "journey_note": (
+            "Each entry is one observation, in the order it happened. `action` is what was done "
+            "just before it; `screen` is everything readable that was then visible, in order, "
+            "with [brackets] around a control that can be pressed and ✓ after one the app reports as "
+            "selected -- many apps report no selection state at all, so a missing ✓ is not evidence "
+            "of anything; "
+            "`step` numbers the action that produced it. `changed: false` means the screen was "
+            "identical to the previous entry. `loading: true` means it was captured mid-transition. "
+            "`steps_not_shown` names actions whose resulting screens were captured but are not in "
+            "this story, so nothing about them is in evidence. `final` is the current screen."
         ),
     }
     transitions = order_transition_checkpoints(frames, actions)
@@ -1146,89 +1299,94 @@ async def judge_outcome(
         context["observed_order_transitions"] = [
             {"labels": group["labels"], "actions_between": group["actions_between"],
              "checkpoints": [{
-                 "evidence_position": frames[item].get("_judge_evidence", {}),
+                 "at": {key: frames[item].get("_judge_evidence", {}).get(source)
+                        for key, source in (("ref", "ref"), ("step", "after_step"))},
                  "rows": [element for element in evidence_frame(frames[item])["observation"]["elements"]
                           if (element.get("text") or element.get("desc")) in group["labels"]],
              } for item in group["frame_indexes"]],
              "note": "These are chronological host-captured post-action observations: vertical "
                      "order changed, then returned to its prior order. actions_between identifies "
-                     "the fresh semantic action between adjacent checkpoints. Correlate the exact "
-                     "steps and screenshots; this grouping supplies evidence, not a verdict."}
+                     "the fresh semantic action between adjacent checkpoints; center_pct is the "
+                     "control's centre as [horizontal, vertical] percentages of the screen, lower "
+                     "vertical being higher up. Correlate with the journey entries by ref and step; "
+                     "this grouping supplies evidence, not a verdict."}
             for group in transitions
         ]
-    # A frame's `network_calls` is the only evidence here that did not come off the screen, and
-    # unlabelled it reads as a stray string. On the run that prompted this, a contract clause about
-    # a saved language change came back `not_verified` -- "no frame captures the Settings screen
-    # after the change" -- while the window between two observations held
-    # `PUT /v1/profile -> 200`. The note is attached only when some frame carries the
-    # field, because a sentence about evidence a run does not have is paid for on every run.
-    if any(_frame_network_calls(frame) for frame in context["intermediate_frames"]) or \
-            _frame_network_calls(context["final_frame"]):
+    # `network` is the only evidence here that did not come off the screen, and unlabelled it
+    # reads as a stray string. On the run that prompted this, a contract clause about a saved
+    # language change came back `not_verified` -- "no frame captures the Settings screen after
+    # the change" -- while the window between two observations held `PUT /v1/profile -> 200`.
+    # The note is attached only when some entry carries the field, because a sentence about
+    # evidence a run does not have is paid for on every run.
+    if any(entry.get("network") for entry in story):
         context["network_evidence_note"] = (
-            "meta.network_calls lists what the app asked its own backend between the previous "
-            "observation and this one, with what came back: `PUT /v1/profile -> 200`, "
-            "or `-> no answer yet` for a call still open at capture. It is host-observed at the "
-            "proxy, not read off the screen, and it is scoped to the app's backend only -- vendor "
-            "and analytics traffic is excluded. A status proves the app sent that request and the "
-            "server answered it; it never proves anything was rendered, drawn or visible, so a "
-            "criterion about what a screen SHOWS still needs a frame that shows it. A frame with "
-            "no such key means the app asked its backend for nothing in that window, which is "
-            "evidence that an action had no server effect, not evidence that it failed."
+            "`network` lists what the app asked its own backend between the previous observation "
+            "and this one, with what came back: `PUT /v1/profile -> 200`, or `-> no answer yet` "
+            "for a call still open at capture. It is host-observed at the proxy, not read off the "
+            "screen, and it is scoped to the app's backend only -- vendor and analytics traffic is "
+            "excluded. A status proves the app sent that request and the server answered it; it "
+            "never proves anything was rendered, drawn or visible, so a criterion about what a "
+            "screen SHOWS still needs an entry that shows it. An entry with no `network` means the "
+            "app asked its backend for nothing in that window, which is evidence that an action "
+            "had no server effect, not evidence that it failed."
         )
     if image_evidence:
         context["image_evidence"] = list(image_evidence)[:MAX_IMAGE_CHECKPOINTS]
         context["evidence_selection_note"] = (
-            "Images are selected rendered checkpoints, not every recorded frame. "
-            "image_evidence.after_step means that image and its semantic frame were captured from "
-            "the tool's fresh observation after that numbered action; it is not a controller claim. "
-            "Use evidence_position and image_evidence to correlate observations with action steps "
-            "and restarts. A post-action image that still shows the same dialog directly proves "
-            "that the dialog remained visible at that checkpoint. Text-only observations cannot "
-            "prove unseen rendering or independent system facts."
+            "Images are selected rendered checkpoints, not every recorded observation. An image's "
+            "`ref` and `after_step` match a journey entry's `ref` and `step`: it is the screenshot "
+            "AUA captured with that entry's observation, after that numbered action; it is not a "
+            "controller claim. A post-action image that still shows the same dialog directly "
+            "proves that the dialog remained visible at that checkpoint. Text-only observations "
+            "cannot prove unseen rendering or independent system facts."
         )
     if progress is not None:
         context["aua_goal_progress"] = progress
     if contract:
         context["authored_contract"] = str(contract)[:12000]
-    question = ("Was this goal achieved, as shown by the frames? The final frame is the current screen.")
+    question = "Was this goal achieved, as shown by the journey? `final` is the current screen."
     if contract:
         question = ("Judge the run against `authored_contract`, which is the authority here. Every "
                     "criterion it states must hold. Return one compact `criteria` entry per "
                     "markdown bullet, identified ONLY by `criterion_index`: zero-based source order "
                     "(first bullet is 0). Never repeat the criterion text. Include each index exactly "
-                    "once, in source order, with a result and concise observed evidence. A negative criterion "
-                    "is verified by evidence that the forbidden state is absent throughout its "
-                    "relevant journey; do not mark it not_applicable merely because the forbidden "
-                    "state did not occur. Reserve not_applicable for a genuinely conditional clause "
-                    "whose trigger did not occur. If a criterion cannot be checked from this evidence, "
-                    "do not assume it passed: mark it not_verified and return 'unverified' unless "
-                    "another criterion is outright broken, which is 'fail'.")
-    question += (" Frames labeled observed_transient_state=loading prove only what was visible at "
-                 "that capture, including a pending indicator. They do not prove a settled destination, "
-                 "completion or reusable action selectors; use later evidence for those claims.")
-    # A criterion of the form "doing X leaves you at Y" is verified by the frame X produced, and by
-    # no other. On 2026-09-17 a run where back from a deeplinked screen went to Home was passed 8/8
-    # because the controller then tapped the Tools tab to recover, and that tap's frame showed the
-    # grid the criterion described; both judges cited it. The controller's recovery from a defect
-    # had manufactured the evidence that hid the defect, and the better the recovery the more
-    # convincing the false pass. Every frame already carries evidence_position.after_step, so the
+                    "once, in source order, with a result and concise observed evidence that names "
+                    "the journey entry (its ref) showing it. A negative criterion is verified by "
+                    "evidence that the forbidden state is absent throughout its relevant journey; do "
+                    "not mark it not_applicable merely because the forbidden state did not occur. "
+                    "Reserve not_applicable for a genuinely conditional clause whose trigger did not "
+                    "occur. A criterion with several parts is verified only when every part is "
+                    "shown; it failed only when an entry shows a part to be false; a part that is "
+                    "merely absent from the evidence makes it not_verified, never failed. Decide "
+                    "each criterion once by that rule. If a criterion cannot be checked from this "
+                    "evidence, do not assume it passed: mark it not_verified and return 'unverified' "
+                    "unless another criterion is outright broken, which is 'fail'.")
+    question += (" An entry marked loading proves only what was visible at that capture, including "
+                 "a pending indicator; it does not prove a settled destination or completion -- use "
+                 "later entries for those.")
+    # A criterion of the form "doing X leaves you at Y" is verified by the screen X produced, and
+    # by no other. On 2026-09-17 a run where back from a deeplinked screen went to Home was passed
+    # 8/8 because the controller then tapped the Tools tab to recover, and that tap's screen showed
+    # the grid the criterion described; both judges cited it. The controller's recovery from a
+    # defect had manufactured the evidence that hid the defect, and the better the recovery the
+    # more convincing the false pass. Every entry carries the step that produced it, so the
     # attribution is checkable -- it was simply not required.
     question += (" When a criterion says that a particular action produces or leads to some state, "
-                 "verify it ONLY from the frame that action produced: the one whose "
-                 "evidence_position.after_step is that action's step. A later frame showing the "
-                 "asserted state does not verify it if a different action produced that frame -- "
-                 "a controller that recovers from a failure by navigating to the expected place "
-                 "itself creates such a frame, and crediting it to the original action reports a "
-                 "broken contract as met. If the frame produced by the action does not show the "
-                 "asserted state, the criterion failed, whatever later frames show. If no frame is "
-                 "attributable to that action, mark it not_verified rather than assuming."
-                 " This binds a criterion to the action that COMPLETES it, which is not always the "
-                 "one that starts it. When the criterion itself describes an outcome that arrives "
-                 "later -- work continuing in the background, a result that is there 'on return', a "
-                 "state checked after re-entering a screen -- the completing action is that return, "
-                 "re-entry or wait, and the frame IT produced is the evidence. Do not fail such a "
-                 "criterion because the frame from the starting action shows work still in progress; "
-                 "that is what the contract says should happen. The rule above exists to stop a "
+                 "verify it ONLY from the journey entry whose `step` is that action's: the screen "
+                 "that action produced. A later entry showing the asserted state does not verify it "
+                 "if a different action produced that entry -- a controller that recovers from a "
+                 "failure by navigating to the expected place itself creates such an entry, and "
+                 "crediting it to the original action reports a broken contract as met. If the entry "
+                 "that action produced does not show the asserted state, the criterion failed, "
+                 "whatever later entries show. If that step appears in some entry's steps_not_shown, "
+                 "no screen for it is in evidence: mark the criterion not_verified rather than "
+                 "assuming. This binds a criterion to the action that COMPLETES it, which is not "
+                 "always the one that starts it. When the criterion describes an outcome that "
+                 "arrives later -- work continuing in the background, a result that is there 'on "
+                 "return', a state checked after re-entering a screen -- the completing action is "
+                 "that return, re-entry or wait, and the entry IT produced is the evidence. Do not "
+                 "fail such a criterion because the starting action's entry shows work still in "
+                 "progress; that is what the contract says should happen. The rule exists to stop a "
                  "later UNRELATED action supplying the proof, not to require an outcome before the "
                  "contract says it arrives.")
     criteria = contract_criteria(contract)

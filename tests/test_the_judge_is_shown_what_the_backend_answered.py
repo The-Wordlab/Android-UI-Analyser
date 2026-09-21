@@ -76,7 +76,7 @@ def _asked(frames: list[dict[str, Any]]) -> dict[str, Any]:
 def test_the_judge_is_told_what_those_lines_are() -> None:
     """Unlabelled, `PUT /v1/profile -> 200` is a string the judge may simply skip."""
     asked = _asked([_frame(CALLS), _frame(CALLS)])
-    assert "network_calls" in json.dumps(asked, default=str)
+    assert any(entry.get("network") == CALLS for entry in asked["context"]["journey"])
     note = asked["context"].get("network_evidence_note")
     assert note and "backend" in note.lower()
 
