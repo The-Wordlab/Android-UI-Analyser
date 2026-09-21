@@ -1004,10 +1004,11 @@ def env_overrides(env: dict[str, str]) -> dict[str, Any]:
             path = tuple(p for p in parts if p)
         else:
             continue
-        if path[-1] in {"chain", "destructive_labels"}:
+        if path[-1] in {"chain", "destructive_labels", "app_hosts"}:
             # These settings are lists even when they contain one value. Treating a one-item
             # value as a scalar breaks detached-daemon transport for both the default policy
-            # chain and a caller's narrow destructive-action safety lexicon.
+            # chain and a caller's narrow destructive-action safety lexicon -- and naming one
+            # backend host, which is the ordinary case, failed validation outright.
             value: Any = [_coerce_scalar(p) for p in raw_val.split(",") if p.strip()]
         elif "," in raw_val:
             value = [_coerce_scalar(p) for p in raw_val.split(",")]

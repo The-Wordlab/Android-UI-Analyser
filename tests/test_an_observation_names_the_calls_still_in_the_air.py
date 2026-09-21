@@ -176,3 +176,18 @@ def test_an_action_keeps_the_field_on_its_folded_observation() -> None:
     })
     assert (kept["observation"]["meta"].get("network_in_flight")
             == ["POST /v1/auth/login"]), kept["observation"]["meta"]
+
+
+def test_one_backend_can_be_named_from_the_environment(monkeypatch: Any) -> None:
+    """Naming one host is the normal case, and a bare value must not arrive as a string.
+
+    The env reader splits on commas, so a single host would be a scalar and fail the list
+    validator outright -- `AUA_NETWORK__APP_HOSTS=theapp.test` raised rather than configuring
+    anything, which is the whole feature refusing to turn on for its most ordinary caller.
+    """
+    from android_ui_analyser.config import load_config
+
+    monkeypatch.setenv("AUA_NETWORK__APP_HOSTS", "theapp.test")
+    assert load_config().network.app_hosts == ["theapp.test"]
+    monkeypatch.setenv("AUA_NETWORK__APP_HOSTS", "theapp.test,other.test")
+    assert load_config().network.app_hosts == ["theapp.test", "other.test"]
