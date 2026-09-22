@@ -814,6 +814,12 @@ class Engine:
             from . import leases
 
             boot_owner = leases.resolve_owner(getattr(self, "_lease_owner", None))
+            # Which serials had a live device before this boot: a record on one of those is a
+            # real holder even if it predates the boot (adb blinked, the port looked free).
+            online_before = {
+                info.serial for info in self._list_targets() if info.state == "device" and info.serial
+            }
+            booted_at = time.time()
             boot = self.virtual_target_provision(
                 requested_definition,
                 needs=list(self._lease_needs or []),
@@ -824,6 +830,12 @@ class Engine:
                 parallel=True,
             )
             serial = str(boot["target_id"])
+            if serial not in online_before:
+                # This serial had no live device a moment ago, so a lease record older than
+                # the boot is a dead run's leftover, not a holder; one acquired since is real.
+                leases.forget_predating(
+                    self._lease_registry_dir, serial, booted_at=booted_at, platform=self.platform.name
+                )
             self.config.device.serial = serial
             self._lease_serial = None
             self._leased_serial_resolved = None

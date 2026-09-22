@@ -1241,6 +1241,36 @@ def _renew_unlocked(
     return True
 
 
+def forget_predating(
+    cache_dir: str | Path,
+    serial: TargetLike,
+    *,
+    booted_at: float,
+    platform: str = LEGACY_PLATFORM,
+) -> bool:
+    """Drop a lease record for *serial* acquired before the caller booted that serial.
+
+    A serial the caller has just booted had no live device a moment ago, so a record acquired
+    before the boot is about a device that is gone: a run whose emulator was stopped while its
+    owner -- an IDE, an agent harness, a CI worker -- lived on, keeping the record "live". Seen
+    on a fresh boot refused as leased by a holder last active 23 hours earlier. A record
+    acquired after the boot is another agent claiming the new device and is left alone, as is
+    a pending transfer. True when a record was dropped.
+    """
+    ref = target_ref(serial, platform=platform)
+    with _device_guard(cache_dir, ref), _lease_guard(cache_dir, ref):
+        current = read_lease(cache_dir, ref)
+        if current is None or pending_handoff(current):
+            return False
+        if float(current.get("acquired") or 0) >= float(booted_at):
+            return False
+        try:
+            _lease_path(cache_dir, ref).unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
+
 def release(
     cache_dir: str | Path,
     serial: TargetLike,

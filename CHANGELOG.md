@@ -240,6 +240,14 @@ notes, so you can check for a newer version — and read what changed — withou
 - The judge's frame sampler keeps a screen that appeared twice when seats are free, ranking
   repeats above blank frames, so a criterion proven on a repeated screen is not left unevidenced.
 
+- A fresh emulator that session start booted itself is no longer refused because of a lease
+  record left by a dead run on the same serial. Process-bound leases do not age out while their
+  owner lives, and an agent process outlives every emulator it starts, so a record from a run
+  whose emulator was stopped 23 hours earlier still read as live; the new boot was refused as
+  "leased by <owner>", rolled back, and the caller fell back to waiting. A record acquired
+  before a boot on a serial that had no live device is dropped before the claim; one acquired
+  after the boot, or on a serial that was online, is still a real holder.
+
 ## [0.30.0] - 2026-09-19
 
 ### Added
