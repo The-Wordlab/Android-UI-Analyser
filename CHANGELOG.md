@@ -199,6 +199,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- OCR readings that are not text no longer join a hierarchy observation: a single glyph read
+  off an icon ("+", "2", ">"), pixels inside the status bar or the keyboard ("| g",
+  "ASDFGH"), and a misread of a label the tree already has with an icon glued to its front
+  or a moved space ("if. Plana trip" for "Plan a trip"). Measured on one real session,
+  every landing screen carried three or four of these and a keyboard screen ten. Text the
+  tree cannot see still comes through; that is what the OCR pass is for.
 - MCP `session_start` now describes and schema-validates artifact prerequisites: `evidence=all`
   and `junit=true` require a non-empty `artifacts_dir`; default/`failures` and `none` do not.
 

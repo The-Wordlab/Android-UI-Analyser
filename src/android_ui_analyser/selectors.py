@@ -355,11 +355,21 @@ def _strip_glyph_tokens(text: str) -> str:
     survives, because "all" and "changes" are words.
     """
     parts = text.split()
-    while parts and len(parts[0]) <= _GLYPH_MAX_LEN:
+    while parts and _word_len(parts[0]) <= _GLYPH_MAX_LEN:
         parts.pop(0)
-    while parts and len(parts[-1]) <= _GLYPH_MAX_LEN:
+    while parts and _word_len(parts[-1]) <= _GLYPH_MAX_LEN:
         parts.pop()
     return " ".join(parts)
+
+
+def _word_len(text: str) -> int:
+    """How much of *text* is letters and digits: "if." is two characters of word, "%." none.
+
+    OCR glues the punctuation of a neighbouring icon onto its reading, so measuring raw
+    length let "if." pass as a three-character word and kept "if. Plana trip" as a label
+    of its own.
+    """
+    return sum(ch.isalnum() for ch in text)
 
 
 def _near_contained(needle: str, haystack: str) -> bool:
@@ -445,13 +455,56 @@ def drop_redundant_ocr(elements: Sequence[Element]) -> list[Element]:
             known = f"{h.text or ''} {h.content_desc or ''}"
             if "�" in known:
                 continue  # the tree lost characters here; OCR is the repair, not a copy
-            known = known.casefold()
+            # Spaces are the one thing OCR gets wrong without misreading a character:
+            # "Plan a trip" comes back as "Plana trip". Compare without them.
+            known = known.casefold().replace(" ", "")
             for candidate in (seen, _strip_glyph_tokens(seen)):
-                if candidate and (candidate in known or _near_contained(candidate, known)):
+                flat = candidate.replace(" ", "")
+                if flat and (flat in known or _near_contained(flat, known)):
                     return True
         return False
 
     return [el for el in elements if el.source != "ocr" or not redundant(el)]
+
+
+_CHROME_WINDOWS = frozenset({"system", "ime", "overlay"})
+
+
+def drop_ocr_noise(elements: Sequence[Element]) -> list[Element]:
+    """*elements* without OCR readings that cannot be text the app shows.
+
+    Two kinds, both measured on one real session of 16 observations:
+
+    * **One recognised glyph.** OCR reads an icon as the character it most resembles: a
+      logo as "2", an add button as "+", a chevron as ">". Every landing screen carried two
+      or three of these. A single letter or digit is never evidence of text; two or more
+      may be a real label ("OK") and stay.
+    * **Pixels inside system chrome or the keyboard.** The status-bar clock and signal icons
+      read as "| g" on every screen, and an open keyboard contributes its key rows
+      ("ASDFGH"). The tree already describes those windows and they are never the app's
+      text, so a reading whose centre lies inside a ``system``/``ime``/``overlay`` node is
+      dropped.
+
+    Everything else stays. OCR runs precisely for text the tree cannot see, and a reading in
+    app territory that matches no node is the case it exists for.
+    """
+    from .projection import is_system_rid
+
+    chrome = [
+        el
+        for el in elements
+        if el.source != "ocr" and (el.window in _CHROME_WINDOWS or is_system_rid(el.resource_id))
+    ]
+
+    def noise(el: Element) -> bool:
+        if _word_len(el.text or "") < 2:
+            return True
+        cx, cy = el.center
+        return any(
+            c.bounds[0] <= cx <= c.bounds[2] and c.bounds[1] <= cy <= c.bounds[3] for c in chrome
+        )
+
+    return [el for el in elements if el.source != "ocr" or not noise(el)]
 
 
 def ocr_added_app_content(elements: Sequence[Element]) -> bool:

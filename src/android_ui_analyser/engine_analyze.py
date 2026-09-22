@@ -40,7 +40,7 @@ from .schema import (
     Tier,
     center_of,
 )
-from .selectors import drop_redundant_ocr, ocr_added_app_content
+from .selectors import drop_ocr_noise, drop_redundant_ocr, ocr_added_app_content
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -309,8 +309,10 @@ def _fuse_hierarchy_ocr(
             # readings were pure duplication, and one of the remaining two was a misread
             # ("Al" for "AI") that survived only because it differed from the truth.
             # Those cost tokens on every observation and let a wrong label be quoted as
-            # fact. See selectors.drop_redundant_ocr for what counts as redundant.
-            keep = {id(el) for el in drop_redundant_ocr([*elements, *ocr_elements])}
+            # fact. See selectors.drop_redundant_ocr for what counts as redundant, and
+            # selectors.drop_ocr_noise for what is not text at all: one glyph read off an
+            # icon, or pixels inside the status bar or the keyboard.
+            keep = {id(el) for el in drop_ocr_noise(drop_redundant_ocr([*elements, *ocr_elements]))}
             ocr_elements = [el for el in ocr_elements if id(el) in keep]
     return _HierarchyObservation(
         elements,
