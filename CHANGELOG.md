@@ -83,15 +83,11 @@ notes, so you can check for a newer version — and read what changed — withou
   gate, so the step goes to the controller model — while the steps that were genuine progress
   stayed at 0.96 and 0.99.
 
-- The System One navigator's `outcome` question gains an `in_progress` option. The other four
-  outcomes all describe a run that has *stopped*, so on any step in the middle of one none of
-  them was true and the model had to answer something regardless. Measured on ten saved screens
-  from a real run it answered `blocked` on six, with blocked probability between 0.41 and 0.81
-  while nothing was blocking the run — and on the step that chose to finish, `blocked` was
-  outscoring `achieved` 0.41 to 0.35. Offering the true option drained it: `in_progress` on nine
-  of ten at 0.78–1.00 confidence, blocked down to 0.00–0.05. `in_progress` is never passed to
-  `session_finish`; asking to stop while reporting the goal unfinished is a contradiction and the
-  step goes back to the controller model.
+- Finishing is one of the System One navigator's moves (`achieved`, `already_satisfied`)
+  beside the presses, scrolls and `wait`, instead of a separate `outcome` question answered on
+  every step. The separate question had no true answer mid-run, so the model was made to pick one
+  regardless and its `in_progress` veto then blocked correct finishes; one question, one answer,
+  and a finish carries its own outcome and is gated on its own confidence.
 
 - A System One navigator run now writes `controller/system-one-turns.jsonl` beside the chat
   model's own `model-turns.jsonl`: one object per call holding the state sent, the questions
@@ -172,6 +168,23 @@ notes, so you can check for a newer version — and read what changed — withou
   evidence never arrived; on a real run it was the second, and the frame that proved the clause
   had been dropped before the judge ever saw it. Screenshots are counted, not stored.
 
+- The System One navigator takes one more look before handing a near miss to the chat model: a
+  move scored between 0.60 and the gate waits for the screen once and asks again. The same
+  request replayed eight times scored 0.66–0.78 and never crossed 0.80; read again after a wait
+  it scored 0.85 every time, because the first frame was a login page still finishing.
+
+- A host action AUA refuses as stale (the screen moved between the read and the press, so
+  nothing was sent) is marked `ignored` instead of counted as a tool error and a step: the
+  navigator forgets it, the screen is read again, and the same navigator is asked about the
+  screen as it is now. The run summary reports `host_ignored_actions`.
+
+### Changed
+
+- `run_realapp.py` judges with one neutral vote by default; `--judge-votes 2` still asks the
+  neutral and skeptical stances to agree. Over 44 judged rows the second vote agreed 34 times,
+  turned two confident fails into `unverified`, and caught one made-up proof frame, for 5–7
+  seconds and double the judge cost per row.
+
 ### Fixed
 
 - MCP `session_start` now describes and schema-validates artifact prerequisites: `evidence=all`
@@ -206,6 +219,14 @@ notes, so you can check for a newer version — and read what changed — withou
   bullet like "the X switch is off" could never be verified. A `checked` of false is now kept
   (a `checked` of null, meaning no switch, is still dropped), matching what `aua` itself
   reports. Everything else the projection trims is unchanged.
+
+- Frame compaction no longer reads a raw hierarchy dump's `checked: false` on every node as a
+  switch, and drops Android's own status bar (`com.android.systemui`) from the model's view of a
+  screen. On a real first frame 22 status-bar nodes had become thirteen junk options such as
+  "Press '11:28 [switch is OFF]'" beside the one real control.
+
+- The judge's frame sampler keeps a screen that appeared twice when seats are free, ranking
+  repeats above blank frames, so a criterion proven on a repeated screen is not left unevidenced.
 
 ## [0.30.0] - 2026-09-19
 
