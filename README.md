@@ -1021,6 +1021,18 @@ aua config exec --require OPEN_ROUTER_API_KEY -- python runner.py  # Save then l
 | `anthropic` | Commercial | `anthropic` | Claude vision; key via `ANTHROPIC_API_KEY` |
 | `gemini` | Commercial | `gemini` | Gemini vision; key via `GEMINI_API_KEY` |
 
+### Icon names (opt-in, `icon_names.enabled: false` by default)
+
+A clickable control the app never named (no text, content description or resource id) is
+cropped and named from its pixels, once per distinct icon. The name lands in `content_desc`
+with `named_by` set, so a reader sees "hamburger menu button, opens the side drawer" instead
+of "unlabelled control, top left". Names are cached under `cache.dir/icon-names` by a
+perceptual key: the same icon on another screen, or another run, costs nothing.
+
+| Provider | License | Config key | Notes |
+|---|---|---|---|
+| `hosted_vision` | Commercial | `hosted_vision` | OpenRouter + `deepseek/deepseek-v4.1-flash` by default (about $0.00005 and 1-3 s an icon, right 3/3 on a hamburger); key via `OPEN_ROUTER_API_KEY`. Any OpenAI-compatible vision endpoint works: set `model` and `base_url`. |
+
 ### Planner (opt-in, `planner.enabled: false` by default)
 
 The fast LLM behind `--assist` and `aua navigate` (see [Optional: LLM assist](#optional-llm-assist-off-by-default)). Text-first (the element list rides in the prompt; a screenshot is attached only on unlabeled screens).

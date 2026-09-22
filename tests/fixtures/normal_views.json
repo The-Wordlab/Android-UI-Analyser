@@ -5,6 +5,7 @@
     "text": "Sign in to your account",
     "resource_id": "com.example.shop:id/title",
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       48,
       180,
@@ -40,6 +41,7 @@
     "text": null,
     "resource_id": "com.example.shop:id/email",
     "content_desc": "Email address",
+    "named_by": null,
     "bounds": [
       48,
       340,
@@ -75,6 +77,7 @@
     "text": null,
     "resource_id": "com.example.shop:id/password",
     "content_desc": "Password",
+    "named_by": null,
     "bounds": [
       48,
       520,
@@ -110,6 +113,7 @@
     "text": "Remember me",
     "resource_id": "com.example.shop:id/remember",
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       48,
       700,
@@ -145,6 +149,7 @@
     "text": "Log in",
     "resource_id": "com.example.shop:id/login_btn",
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       48,
       840,
@@ -180,6 +185,7 @@
     "text": "Forgot password?",
     "resource_id": "com.example.shop:id/forgot",
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       48,
       1020,

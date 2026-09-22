@@ -5,6 +5,7 @@
     "text": null,
     "resource_id": "com.example.game:id/surface",
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       0,
       0,

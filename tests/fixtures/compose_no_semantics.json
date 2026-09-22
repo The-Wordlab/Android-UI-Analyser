@@ -5,6 +5,7 @@
     "text": null,
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       0,
       84,
@@ -40,6 +41,7 @@
     "text": null,
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       48,
       160,
@@ -75,6 +77,7 @@
     "text": null,
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       48,
       460,
@@ -110,6 +113,7 @@
     "text": null,
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       560,
       460,
@@ -145,6 +149,7 @@
     "text": null,
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       48,
       760,

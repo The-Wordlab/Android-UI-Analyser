@@ -187,6 +187,9 @@ class Element(BaseModel):
     text: str | None = None
     resource_id: str | None = None
     content_desc: str | None = None
+    # Set when `content_desc` was read off the control's pixels rather than given by the app:
+    # the icon namer's provider name. A reader can then tell a label from a description.
+    named_by: str | None = None
     bounds: Bounds
     center: Center
     clickable: bool = False
@@ -275,6 +278,8 @@ class Element(BaseModel):
             out["selector"] = self.selector
         if self.window is not None:
             out["window"] = self.window
+        if self.named_by is not None:
+            out["named_by"] = self.named_by
         if self.parent is not None:
             out["parent"] = self.parent
         if self.cost is not None:

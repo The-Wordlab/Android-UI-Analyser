@@ -5,6 +5,7 @@
     "text": null,
     "resource_id": "com.android.chrome:id/close_button",
     "content_desc": "Close tab",
+    "named_by": null,
     "bounds": [
       0,
       84,
@@ -40,6 +41,7 @@
     "text": "accounts.google.com",
     "resource_id": "com.android.chrome:id/title_url_bar",
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       148,
       110,
@@ -75,6 +77,7 @@
     "text": null,
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       0,
       216,
@@ -110,6 +113,7 @@
     "text": "Choose an account",
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       80,
       420,
@@ -145,6 +149,7 @@
     "text": "to continue to Example App",
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       80,
       530,
@@ -180,6 +185,7 @@
     "text": "Engineering Team engineering-ci@example.com",
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       80,
       700,
@@ -215,6 +221,7 @@
     "text": "Use another account",
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       80,
       880,
@@ -250,6 +257,7 @@
     "text": "To continue, Google will share your name, email address, and profile picture with Example App.",
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       80,
       1080,
@@ -285,6 +293,7 @@
     "text": "English (United States)",
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       80,
       2200,
@@ -320,6 +329,7 @@
     "text": "Help",
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       600,
       2200,
@@ -355,6 +365,7 @@
     "text": "Privacy",
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       740,
       2200,
@@ -390,6 +401,7 @@
     "text": "Terms",
     "resource_id": null,
     "content_desc": null,
+    "named_by": null,
     "bounds": [
       920,
       2200,

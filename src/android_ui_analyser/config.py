@@ -386,6 +386,27 @@ class _ChainCfg(BaseModel):
     chain: list[str] = Field(default_factory=list)
 
 
+class IconNamesCfg(_ChainCfg):
+    """Name clickable controls the app never named, once, from their pixels.
+
+    Off by default: it is a paid vision call and needs the provider's key (see
+    ``models.hosted_vision``). On, each distinct icon is named once and kept under
+    ``cache.dir/icon-names``; every later sight of the same pixels is free. Only controls
+    that could carry an icon are sent: clickable, in the app's window, with no text, content
+    description or resource id, between ``min_side_px`` and ``max_side_px`` on both sides,
+    and with something drawn in them.
+    """
+
+    enabled: bool = False
+    chain: list[str] = Field(default_factory=lambda: ["hosted_vision"])
+    # Paid calls per screen read at most; the rest wait for a later screen.
+    max_per_screen: int = 4
+    min_side_px: int = 24
+    max_side_px: int = 320
+    # Wall clock for the whole batch on one screen; misses past it are simply not named yet.
+    timeout_s: float = 8.0
+
+
 class OcrCfg(_ChainCfg):
     enabled: bool = True
     chain: list[str] = Field(default_factory=lambda: ["apple_vision", "rapidocr"])
@@ -625,6 +646,16 @@ def _default_models() -> dict[str, dict[str, Any]]:
         "paddleocr": {"lang": "en"},
         "tesseract": {"lang": "eng"},
         "easyocr": {"lang": ["en"]},
+        # icon names (referenced only if icon_names.enabled). Measured on a hamburger icon:
+        # right three times out of three, 0.6-2.6 s, $0.00004-0.00008 a call; reasoning off,
+        # or the model thinks for 30 s about a 96 px crop.
+        "hosted_vision": {
+            "model": "deepseek/deepseek-v4.1-flash",
+            "api_key_env": "OPEN_ROUTER_API_KEY",
+            "base_url": "https://openrouter.ai/api/v1",
+            "timeout_s": 8,
+            "reasoning": {"enabled": False},
+        },
         # grounding (referenced only if grounding.enabled)
         "local_vllm": {"base_url": "http://localhost:8000/v1", "model": "Hcompany/Holo1.5-7B"},
         "openai": {
@@ -786,6 +817,7 @@ class Config(BaseModel):
     routing: RoutingCfg = Field(default_factory=RoutingCfg)
     output: OutputCfg = Field(default_factory=OutputCfg)
     ocr: OcrCfg = Field(default_factory=OcrCfg)
+    icon_names: IconNamesCfg = Field(default_factory=IconNamesCfg)
     detection: DetectionCfg = Field(default_factory=DetectionCfg)
     grounding: GroundingCfg = Field(default_factory=GroundingCfg)
     planner: PlannerCfg = Field(default_factory=PlannerCfg)
@@ -1151,6 +1183,11 @@ ocr:
   chain: [apple_vision, rapidocr]     # apple_vision is macOS-only; rapidocr is the fallback
   augment_hierarchy: true             # run Apple OCR alongside every hierarchy observation
 
+icon_names:
+  enabled: false                      # paid: names unnamed clickable icons from their pixels, once each
+  chain: [hosted_vision]              # models.hosted_vision: OpenRouter + a vision model; needs OPEN_ROUTER_API_KEY
+  max_per_screen: 4                   # paid calls per screen read; the cache answers every later sight
+
 detection:
   enabled: true
   chain: [yolo, omniparser]           # yolo (license-clean) first if weights present
@@ -1186,6 +1223,9 @@ models:
   anthropic:    { model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
   gemini:       { model: gemini-2.5-flash, api_key_env: GEMINI_API_KEY }
   gemini_flash: { model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY }
+  # icon_names: any OpenAI-compatible vision endpoint; reasoning off or it thinks for 30 s about a 96 px crop
+  hosted_vision: { model: deepseek/deepseek-v4.1-flash, api_key_env: OPEN_ROUTER_API_KEY,
+                   base_url: "https://openrouter.ai/api/v1", timeout_s: 8, reasoning: { enabled: false } }
   # Base model is local/external. null (or "bundled") uses AUA's small packaged LoRA adapter.
   functiongemma: { model_path: null, adapter_path: null, max_tokens: 24,
                    model_sha256: null, adapter_sha256: null, manifest_sha256: null }

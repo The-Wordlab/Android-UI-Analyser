@@ -334,6 +334,53 @@ def _capture_hierarchy_with_ocr(
     *,
     with_ocr: bool | None,
 ) -> _HierarchyObservation:
+    """Capture hierarchy, optionally fused with Apple OCR, then name what the app did not."""
+    observation = self._capture_hierarchy_observation(device, w, h, with_ocr=with_ocr)
+    return self._name_unlabelled_icons(observation)
+
+
+def _name_unlabelled_icons(self: Engine, observation: _HierarchyObservation) -> _HierarchyObservation:
+    """Give unnamed clickable controls a name read off their pixels (`icon_names.enabled`).
+
+    Cache first, then at most a few paid calls; a provider failure costs the name, never the
+    observation. The screenshot the OCR pass already took is reused when there is one.
+    """
+    cfg = self.config.icon_names
+    if not cfg.enabled or not observation.elements:
+        return observation
+    image = observation.image
+    if image is None:
+        try:
+            image = self._screenshot(max_reuse_ms=250.0)
+        except Exception as exc:
+            logger.info("icon naming skipped, no screenshot: %s", exc)
+            return observation
+    from . import icon_names
+
+    try:
+        icon_names.name_unlabelled(
+            observation.elements,
+            image,
+            self.factory.build_chain("icon_names").providers,
+            icon_names.IconNameCache(self.config.cache.dir),
+            max_per_screen=cfg.max_per_screen,
+            min_side=cfg.min_side_px,
+            max_side=cfg.max_side_px,
+            timeout_s=cfg.timeout_s,
+        )
+    except Exception as exc:
+        logger.info("icon naming skipped: %s", exc)
+    return observation._replace(image=image)
+
+
+def _capture_hierarchy_observation(
+    self: Engine,
+    device: Device,
+    w: int,
+    h: int,
+    *,
+    with_ocr: bool | None,
+) -> _HierarchyObservation:
     """Capture hierarchy, optionally fused with Apple OCR.
 
     ``with_ocr=True`` keeps the parallel overlap (OCR starts before hierarchy).

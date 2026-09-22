@@ -2342,6 +2342,8 @@ class Engine:
     _finish_hierarchy_ocr = engine_analyze._finish_hierarchy_ocr
     _fuse_hierarchy_ocr = engine_analyze._fuse_hierarchy_ocr
     _capture_hierarchy_with_ocr = engine_analyze._capture_hierarchy_with_ocr
+    _capture_hierarchy_observation = engine_analyze._capture_hierarchy_observation
+    _name_unlabelled_icons = engine_analyze._name_unlabelled_icons
     _map_skips_ocr = engine_analyze._map_skips_ocr
     _run_vision = engine_analyze._run_vision
     _repair_lossy_text = engine_analyze._repair_lossy_text

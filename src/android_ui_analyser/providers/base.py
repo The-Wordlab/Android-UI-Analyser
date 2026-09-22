@@ -241,6 +241,17 @@ class DetectionProvider(Provider):
         raise NotImplementedError
 
 
+class IconNamerProvider(Provider):
+    """Name one cropped control that the app never named (see `icon_names.py`)."""
+
+    kind: ClassVar[str] = "icon_names"
+
+    @abstractmethod
+    def name_icon(self, image: ScreenImage) -> str | None:
+        """A short name for the control in *image*, or ``None`` when nothing is drawn."""
+        raise NotImplementedError
+
+
 class GroundingProvider(Provider):
     kind: ClassVar[str] = "grounding"
 
