@@ -1207,3 +1207,16 @@ def test_the_last_phase_done_finishes_the_run() -> None:
     assert client.calls == 4
     assert action["tool"] == "session_finish" and action["arguments"] == {"outcome": "achieved"}
     assert navigator.report()["phase"] == {"current": 4, "of": 4}
+
+
+def test_every_ask_in_the_transcript_names_the_screen_it_was_about(tmp_path: Path) -> None:
+    """A step may cost several asks (a step declared done is re-asked on the same screen), and a
+    reader pairing the transcript with the run's steps has to know which asks belong together."""
+    client = ScriptedClient([("achieved", 0.95), ("back", 0.93), ("1", 0.95)])
+    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full",
+                                  transcript_path=tmp_path / "jev.jsonl")
+    asyncio.run(navigator(FIELD_SCREEN))
+    asyncio.run(navigator(SCREEN))
+    turns = [json.loads(line) for line in (tmp_path / "jev.jsonl").read_text().splitlines()]
+    assert [t["call"] for t in turns] == [1, 2, 3]
+    assert [t["screen_seq"] for t in turns] == [1, 1, 2], "two asks about the first screen, one about the second"

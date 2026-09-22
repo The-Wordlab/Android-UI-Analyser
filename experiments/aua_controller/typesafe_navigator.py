@@ -519,6 +519,9 @@ class TypeSafeNavigator:
         # keyed on the activity instead, or waiting would never be bounded at all.
         self._seen: set[tuple[str, str]] = set()
         self._second_looks: set[str] = set()
+        # One number per screen this navigator was shown; every ask about that screen carries it,
+        # so a reader can pair a step's several asks (a step declared done is re-asked) with the step.
+        self._screen_seq = 0
         self._last_fingerprint: str | None = None
         self._last_activity: str | None = None
         self.proposals: list[dict[str, Any]] = []
@@ -578,6 +581,7 @@ class TypeSafeNavigator:
         self._last_activity = activity if isinstance(activity, str) else self._last_activity
         # Opened for every step. Whoever acts, `observed` fills it in.
         self._pending = {"n": len(self._journey) + 1, "you_chose": "(nothing yet)"}
+        self._screen_seq += 1
 
         if not self.can_tap:
             self._decline("tap_not_offered")
@@ -738,6 +742,7 @@ class TypeSafeNavigator:
         self.usd += tokens * USD_PER_INPUT_TOKEN
         turn = {
             "call": self.requests,
+            "screen_seq": self._screen_seq,
             "request_ms": round(elapsed_ms, 1),
             "input_tokens": tokens,
             "usd": round(tokens * USD_PER_INPUT_TOKEN, 9),
