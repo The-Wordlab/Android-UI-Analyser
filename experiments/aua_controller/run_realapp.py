@@ -1407,6 +1407,24 @@ async def run_realapp(
                         "forbidden package status could not be verified: "
                         + json.dumps(package_status)[:400]
                     )
+                if installed and (start.get("virtual_target_started") or start.get("emulator_started")):
+                    # A device this run booted for itself is its own to clean. The rule guards a
+                    # shared device against a stray sibling app; here the app is a leftover on a
+                    # spare AVD, and stopping the row would waste the emulator just brought up.
+                    removed = await call(
+                        "app", {"action": "uninstall", "package": str(forbidden_package), "confirmed": True}, "setup"
+                    )
+                    if removed.get("ok") is not True:
+                        raise RunError(
+                            f"forbidden package {forbidden_package} could not be removed from the "
+                            "provisioned target: " + json.dumps(removed)[:400]
+                        )
+                    result["setup"][-1]["removed_from_provisioned_target"] = True
+                    setup_facts.append(
+                        f"AUA removed forbidden package {forbidden_package} from the target it "
+                        "provisioned for this run."
+                    )
+                    continue
                 if installed:
                     raise RunError(
                         f"forbidden package is installed on the leased target: {forbidden_package}"
