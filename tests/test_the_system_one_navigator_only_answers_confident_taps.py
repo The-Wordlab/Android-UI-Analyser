@@ -1257,3 +1257,22 @@ def test_each_journey_turn_names_the_step_it_was_taken_on() -> None:
                           "you_chose": "press 'hamburger menu button, opens the side drawer'"}
     assert journey[1] == {"n": 2, "step": "Tap the top-left menu and look at it", "you_chose": "said this step was done"}
     assert client.states[-1]["goal"] == "close it"
+
+
+def test_a_step_that_names_a_tool_the_navigator_cannot_call_goes_to_the_chat_model() -> None:
+    """Live, "press the system Back key with key_and_analyze BACK" was answered by pressing the
+    screen's own back arrow at 0.86: the navigator has no key press, only taps and the back
+    gesture, so every answer it could give was the wrong action for that step."""
+    client = ScriptedClient([("1", 0.95)])
+    navigator = TypeSafeNavigator("Open the menu. Then press the system Back key with key_and_analyze BACK. "
+                                  "Then open the menu again.", client=client, tools=WIDE_TOOLS,
+                                  action_space="full")
+    navigator.step_index = 1
+    assert asyncio.run(navigator(FIELD_SCREEN)) is None
+    assert client.calls == 0, "not worth a request"
+    assert navigator.report()["declined"] == {"step_names_another_tool": 1}
+    # A step naming a tool it can call is still its own to answer.
+    client = ScriptedClient([("achieved", 0.95), ("1", 0.95)])
+    navigator = TypeSafeNavigator("Do the back gesture with back_gesture_and_analyze. Then open the menu.",
+                                  client=client, tools=WIDE_TOOLS, action_space="full")
+    assert asyncio.run(navigator(FIELD_SCREEN)) is not None

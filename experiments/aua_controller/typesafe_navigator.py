@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -91,6 +92,9 @@ SCROLL_TOOL = "scroll_and_analyze"
 BACK_TOOL = "back_gesture_and_analyze"
 FINISH_TOOL = "session_finish"
 WAIT_TOOL = "wait_and_analyze"
+#: Every tool a navigator answer can become. A step that names any other tool asks for an action
+#: this navigator has no way to take.
+NAVIGATOR_TOOLS = frozenset({TAP_TOOL, SCROLL_TOOL, BACK_TOOL, FINISH_TOOL, WAIT_TOOL})
 
 # Widened action space, after reading how public Jev browser agents are built
 # (browser-use/jev-ultrafast): one call returns the operation and every operand it might need, and
@@ -592,6 +596,12 @@ class TypeSafeNavigator:
 
         if not self.can_tap:
             self._decline("tap_not_offered")
+            return None
+        current_step = self.steps[self.step_index] if self.steps else self.goal
+        if set(re.findall(r"\b[a-z_]+_and_analyze\b", current_step)) - NAVIGATOR_TOOLS:
+            # Live, "press the system Back key with key_and_analyze" came back as a tap on the
+            # screen's own back arrow: with no key press to give, every answer was wrong.
+            self._decline("step_names_another_tool")
             return None
         self._options = candidates(observation)
         if len(self._options) < 2:
