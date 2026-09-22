@@ -387,11 +387,40 @@ def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -
     # about different things. Measured over 60 real screens, three times: the merged form is
     # steadier (median confidence 0.54-0.55 against 0.47-0.48) and acts on the same taps at the
     # same accuracy. It is not faster; it is one question with one answer and nothing discarded.
+    # One text field made two menu lines, "tap the field so text can be typed" and "type", and
+    # the vote split between them (0.54 / 0.46 on a real chat screen) although both meant the
+    # same thing. The harness built both from the same element, so it also knows they are one:
+    # with a single field on the screen, `type` names that field and the tap line is not offered.
+    # Typing hands the step to the chat model, which focuses the field and types in one call.
+    fields = [label for label in options.values() if label.endswith(FIELD_SUFFIX)]
+    lone = fields[0][: -len(FIELD_SUFFIX)] if len(fields) == 1 else None
     criteria: dict[str, str] = {index: move_phrase(label)
-                                for index, label in numbered(options)[0].items()}
-    criteria.update({kind: text for kind, text in ACTION_KINDS.items() if kind != "tap"})
+                                for index, label in numbered(options)[0].items()
+                                if lone is None or not label.endswith(FIELD_SUFFIX)}
+    actions = dict(ACTION_KINDS)
+    if lone is not None:
+        actions["type"] = f"Type text into the text field '{lone}'"
+    criteria.update({kind: text for kind, text in actions.items() if kind != "tap"})
     return {"move": Choice(instructions="What should happen next on this screen?",
                            criteria=criteria)}
+
+
+def goal_steps(goal: str) -> list[str]:
+    """The goal's own ordered steps, cut only where the prose says so; a one-step goal is [].
+
+    A human-written brief is a short script: "open the menu and look, then close it. Send a
+    message and wait for the reply, then open the menu again." Sent whole on every turn, the
+    model has to work out from the journey how far the script has run -- and a System One model
+    is bad at counting. Measured on one row: the two picks that opened the menu were 0.96 and
+    0.85; the picks that had to know *which* phase the run was in were 0.21 to 0.51, every one
+    of them declined and paid for twice. AUA's own `goal_phases` already cuts a goal at its
+    sequence words (then, next, after that, a full stop) and never invents a step, so the
+    author keeps writing prose and the navigator hands the model one step at a time.
+    """
+    from android_ui_analyser.session import goal_phases
+
+    steps = [phase.objective for phase in goal_phases(goal) if phase.kind == "verify"]
+    return steps if len(steps) > 1 else []
 
 
 class TypeSafeNavigator:
@@ -426,6 +455,10 @@ class TypeSafeNavigator:
             client = AsyncTypeSafeClient()
         self.client = client
         self.goal = goal
+        # The script's steps and where the run is in it. A finish answered while steps remain is
+        # "this step is done", moves the pointer and is asked again on the same screen.
+        self.steps = goal_steps(goal)
+        self.step_index = 0
         self.model = model
         self.min_confidence = min_confidence
         self.second_look_floor = second_look_floor
@@ -524,60 +557,49 @@ class TypeSafeNavigator:
             self._decline("too_few_controls")
             return None
 
-        journey = list(self._journey)
-        # The state is what the model reads; every token in it that is not about this decision is
-        # documented to cost accuracy. Oldest turns go first -- a loop is made of the recent ones.
-        while len(json.dumps(journey, default=str)) > MAX_JOURNEY_CHARS and journey:
-            journey.pop(0)
-        state = {"goal": self.goal, "journey_so_far": journey,
-                 "this_is_the_new_screen": screen_for_model(compact)}
         questions = build_questions(self._options, action_space=self.action_space)
-        started = time.perf_counter()
-        try:
-            response = await self.client.system_one(
-                state=state, questions=questions, model=self.model, timeout=self.timeout_s,
-            )
-        except Exception as exc:
-            # The chat model is the fallback for every step, so a navigator failure costs a
-            # round trip and never a run.
-            self._decline(f"request_failed:{type(exc).__name__}")
-            return None
-        self.requests += 1
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        self.request_ms.append(elapsed_ms)
-        tokens = int(getattr(response.usage, "input_tokens", 0) or 0)
-        self.input_tokens += tokens
-        self.usd += tokens * USD_PER_INPUT_TOKEN
-
-        turn = {
-            "call": self.requests,
-            "request_ms": round(elapsed_ms, 1),
-            "input_tokens": tokens,
-            "usd": round(tokens * USD_PER_INPUT_TOKEN, 9),
-            # The request body verbatim, in the shape the SDK puts on the wire. Anything trimmed
-            # or prettified here is a step a reader cannot check.
-            "request": {"model": self.model, "state": state,
-                        "questions": {n: plain(q) for n, q in questions.items()}},
-            "response": plain(response),
-            "menu": numbered(self._options)[0],
-        }
-        move = response.answers["move"]
         by_index = numbered(self._options)[1]
-        record = {
-            "kind": "tap" if move.choice in by_index else move.choice,
-            "choice": move.choice,
-            "confidence": round(move.confidence, 4),
-            "target_id": by_index.get(move.choice),
-            "options": len(self._options),
-        }
+        # One ask per step the model may declare done on this screen, plus the move itself. A
+        # step declared done costs a second question, never a device step, and the pointer only
+        # ever moves forward, so this is bounded by the script's length.
+        for _ in range(len(self.steps) + 1):
+            asked = await self._ask(compact, questions)
+            if asked is None:
+                return None
+            turn, move = asked
+            record = {
+                "kind": "tap" if move.choice in by_index else move.choice,
+                "choice": move.choice,
+                "confidence": round(move.confidence, 4),
+                "target_id": by_index.get(move.choice),
+                "options": len(self._options),
+            }
 
-        def settle(accepted: bool, why: str | None = None) -> None:
-            record["accepted"] = accepted
-            if not accepted:
-                record["declined_because"] = why
-            self.proposals.append(record)
-            turn["verdict"] = dict(record)
-            self._record(turn)
+            def settle(accepted: bool, why: str | None = None, *, record=record, turn=turn) -> None:
+                record["accepted"] = accepted
+                if not accepted:
+                    record["declined_because"] = why
+                self.proposals.append(record)
+                turn["verdict"] = dict(record)
+                self._record(turn)
+
+            if (self.steps and move.choice in FINISH_KINDS
+                    and self.step_index < len(self.steps) - 1):
+                # "Done" with steps still to go is a claim about the current step, not the run.
+                record["kind"] = "phase_done"
+                record["step"] = self.step_index + 1
+                if not self._gate(move, record):
+                    self._decline("below_confidence")
+                    settle(False, "below_confidence")
+                    return None
+                settle(True)
+                done, self.step_index = self.steps[self.step_index], self.step_index + 1
+                self._journey.append({"n": len(self._journey) + 1,
+                                      "you_chose": f"said the step '{done}' was done",
+                                      "what_happened": f"the next step is '{self.steps[self.step_index]}'"})
+                self._pending["n"] = len(self._journey) + 1
+                continue
+            break
 
         plan, why = self._plan(move, by_index)
         if plan is None:
@@ -586,18 +608,9 @@ class TypeSafeNavigator:
         tool, arguments, operand, label = plan
         record["tool"] = tool
         record["operand"] = operand
-        # One question, one answer, one number -- `min()` of two confidences about different
-        # things was never a statement about this decision.
-        gate = move.confidence
-        probability = float((getattr(move, "probabilities", None) or {}).get(str(move.choice), 0.0) or 0.0)
-        record["gate"] = round(gate, 4)
-        record["gate_needed"] = self.min_confidence
-        record["probability"] = round(probability, 4)
-        by_probability = (PROBABILITY_GATE_FLOOR <= gate < self.min_confidence
-                          and probability >= self.min_confidence)
-        if by_probability:
-            record["accepted_by"] = "probability"
-        if gate < self.min_confidence and not by_probability:
+        passes = self._gate(move, record)
+        gate, probability = record["gate"], record["probability"]
+        if not passes:
             look_key = self._last_activity or str(fingerprint)
             if (gate >= self.second_look_floor and WAIT_TOOL in self.offered
                     and look_key not in self._second_looks):
@@ -631,9 +644,77 @@ class TypeSafeNavigator:
         if screen_key is not None:
             self._seen.add(pair)
         self._pending["you_chose"] = f"{tool} on '{label}'"
-        voice = f" (probability {probability:.2f})" if by_probability else ""
+        voice = f" (probability {probability:.2f})" if record.get("accepted_by") == "probability" else ""
         return {"tool": tool, "arguments": arguments,
                 "reason": f'System One {record["kind"]} at confidence {gate:.2f}{voice}: {label}'}
+
+    def _state(self, compact: Mapping[str, Any]) -> dict[str, Any]:
+        """What the model reads: the current step, the script around it, the journey, the screen."""
+        journey = list(self._journey)
+        # Every token in the state that is not about this decision is documented to cost
+        # accuracy. Oldest turns go first -- a loop is made of the recent ones.
+        while len(json.dumps(journey, default=str)) > MAX_JOURNEY_CHARS and journey:
+            journey.pop(0)
+        state: dict[str, Any] = {"goal": self.goal}
+        if self.steps:
+            state["goal"] = self.steps[self.step_index]
+            state["done_before_this"] = self.steps[: self.step_index]
+            state["still_to_do_after_this"] = self.steps[self.step_index + 1:]
+        state["journey_so_far"] = journey
+        state["this_is_the_new_screen"] = screen_for_model(compact)
+        return state
+
+    async def _ask(self, compact: Mapping[str, Any], questions: Mapping[str, Any]):
+        """One request; ``None`` when it failed, else the transcript turn and the move."""
+        state = self._state(compact)
+        started = time.perf_counter()
+        try:
+            response = await self.client.system_one(
+                state=state, questions=questions, model=self.model, timeout=self.timeout_s,
+            )
+        except Exception as exc:
+            # The chat model is the fallback for every step, so a navigator failure costs a
+            # round trip and never a run.
+            self._decline(f"request_failed:{type(exc).__name__}")
+            return None
+        self.requests += 1
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        self.request_ms.append(elapsed_ms)
+        tokens = int(getattr(response.usage, "input_tokens", 0) or 0)
+        self.input_tokens += tokens
+        self.usd += tokens * USD_PER_INPUT_TOKEN
+        turn = {
+            "call": self.requests,
+            "request_ms": round(elapsed_ms, 1),
+            "input_tokens": tokens,
+            "usd": round(tokens * USD_PER_INPUT_TOKEN, 9),
+            # The request body verbatim, in the shape the SDK puts on the wire. Anything trimmed
+            # or prettified here is a step a reader cannot check.
+            "request": {"model": self.model, "state": state,
+                        "questions": {n: plain(q) for n, q in questions.items()}},
+            "response": plain(response),
+            "menu": numbered(self._options)[0],
+        }
+        return turn, response.answers["move"]
+
+    def _gate(self, move, record: dict[str, Any]) -> bool:
+        """Does this one answer clear the gate? Writes the numbers it judged into the record.
+
+        One question, one answer, one number -- `min()` of two confidences about different
+        things was never a statement about this decision. A pick under the gate still passes
+        when its own probability clears it (see PROBABILITY_GATE_FLOOR).
+        """
+        gate = move.confidence
+        probability = float((getattr(move, "probabilities", None) or {}).get(str(move.choice), 0.0) or 0.0)
+        record["gate"] = round(gate, 4)
+        record["gate_needed"] = self.min_confidence
+        record["probability"] = round(probability, 4)
+        if gate >= self.min_confidence:
+            return True
+        if gate >= PROBABILITY_GATE_FLOOR and probability >= self.min_confidence:
+            record["accepted_by"] = "probability"
+            return True
+        return False
 
     def _plan(self, move, by_index):
         """Bind the one chosen move to an offered tool, or say why it cannot be.
@@ -717,6 +798,7 @@ class TypeSafeNavigator:
             "input_tokens": self.input_tokens, "usd": round(self.usd, 8),
             "transcript": str(self.transcript_path) if self.transcript_path else None,
             "proposals": len(self.proposals),
+            "phase": ({"current": self.step_index + 1, "of": len(self.steps)} if self.steps else None),
             "accepted": accepted, "declined": dict(self.declined),
             "mean_request_ms": (round(sum(self.request_ms) / len(self.request_ms), 1)
                                 if self.request_ms else None),
@@ -726,7 +808,7 @@ class TypeSafeNavigator:
         }
 
 
-__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered",
+__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered", "goal_steps",
            "MODEL", "MIN_CONFIDENCE",
            "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "WAIT_TOOL", "SCROLL_KINDS",
            "FINISH_OUTCOMES", "FINISH_KINDS", "build_questions", "what_happened", "candidates", "tool_names"]

@@ -1007,9 +1007,11 @@ def test_a_text_field_is_named_as_one_in_the_menu_and_in_the_state() -> None:
     state = screen_for_model({"observation": observation})
     assert {"text": "Ask me anything", "editable": True} in state["elements"]
     assert {"text": "Ask me anything"} in state["elements"], "plain text stays plain"
-    # The menu line is a move, and a field's move is not a press: you tap it to type into it.
+    # The menu line is a move, and a field's move is not a press. The only field on this screen
+    # is reached through the one `type` line, which names it; the button beside it is pressed.
     criteria = build_questions(options)["move"].criteria
-    assert criteria["1"] == "Tap the text field 'Ask me anything' so text can be typed into it"
+    assert "1" not in criteria, "one field, one door: the tap line would only split the vote"
+    assert criteria["type"] == "Type text into the text field 'Ask me anything'"
     assert criteria["2"] == "Press 'buttonOpenComposerAttachments'"
 
 
@@ -1037,3 +1039,121 @@ def test_a_probability_under_the_gate_does_not_rescue_a_near_miss() -> None:
     action, navigator = propose(FakeClient(target_conf=0.79, probability=0.79), min_confidence=0.80)
     assert action is None
     assert navigator.report()["declined"] == {"below_confidence": 1}
+
+
+# ---------------------------------------------------------------- phases: one step of the script at a time
+
+FIELD_SCREEN = {
+    "ok": True,
+    "observation": {
+        "screen": {"package": "com.example.demo", "activity": ".Chat"},
+        "meta": {"fingerprint": "fp-chat"},
+        "elements": [
+            {"id": "el:menu", "desc": "hamburger menu button, opens the side drawer", "clickable": True, "bounds": [0, 0, 7, 7]},
+            {"id": "el:field", "text": "Ask me anything", "editable": True, "clickable": True, "bounds": [0, 8, 7, 15]},
+            {"id": "el:send", "text": "Send", "clickable": True, "bounds": [8, 8, 15, 15]},
+        ],
+    },
+}
+TWO_FIELDS_SCREEN = {
+    "ok": True,
+    "observation": {
+        "screen": {"package": "com.example.demo", "activity": ".Login"},
+        "meta": {"fingerprint": "fp-login"},
+        "elements": [
+            {"id": "el:user", "text": "Email", "editable": True, "clickable": True, "bounds": [0, 0, 7, 7]},
+            {"id": "el:pass", "text": "Password", "editable": True, "clickable": True, "bounds": [0, 8, 7, 15]},
+            {"id": "el:go", "text": "Sign in", "clickable": True, "bounds": [8, 8, 15, 15]},
+        ],
+    },
+}
+SCRIPT = ("Tap the top-left menu and look at it, then close it. "
+          "Send one short message and wait for the reply, then open the menu and look again.")
+
+
+class ScriptedClient(FakeClient):
+    """Answers a fixed list of (choice, confidence) in order and keeps every state it was sent."""
+
+    def __init__(self, answers):
+        super().__init__()
+        self.answers = list(answers)
+        self.states: list[dict] = []
+        self.questions: list[dict] = []
+
+    async def system_one(self, *, state, questions, model, timeout=None):
+        self.calls += 1
+        self.states.append(state)
+        self.questions.append(questions)
+        choice, confidence = self.answers.pop(0)
+        move = SimpleNamespace(choice=choice, confidence=confidence, probabilities={choice: confidence})
+        return SimpleNamespace(answers={"move": move}, usage=SimpleNamespace(input_tokens=430))
+
+
+def test_a_lone_text_field_is_offered_once_as_typing_not_twice() -> None:
+    """One field made two menu lines, "tap the field" and "type"; the vote split 0.54/0.46."""
+    options = candidates(FIELD_SCREEN["observation"])
+    criteria = build_questions(options, action_space="full")["move"].criteria
+    assert not any(text.startswith("Tap the text field") for text in criteria.values())
+    assert criteria["type"] == "Type text into the text field 'Ask me anything'"
+    # Two fields are two different places to type; each keeps its own line.
+    two = build_questions(candidates(TWO_FIELDS_SCREEN["observation"]), action_space="full")["move"].criteria
+    assert sum(text.startswith("Tap the text field") for text in two.values()) == 2
+    assert two["type"] == "Type text into a text field on this screen"
+
+
+def test_jev_is_asked_about_the_current_phase_not_the_whole_script() -> None:
+    client = ScriptedClient([("1", 0.95)])
+    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    asyncio.run(navigator(FIELD_SCREEN))
+    state = client.states[0]
+    assert state["goal"] == "Tap the top-left menu and look at it"
+    assert state["done_before_this"] == []
+    assert state["still_to_do_after_this"] == ["close it", "Send one short message and wait for the reply",
+                                               "open the menu and look again"]
+
+
+def test_a_goal_without_sequence_words_is_sent_whole() -> None:
+    client = ScriptedClient([("1", 0.95)])
+    navigator = TypeSafeNavigator("Open notification settings", client=client, tools=WIDE_TOOLS,
+                                  action_space="full")
+    asyncio.run(navigator(SCREEN))
+    state = client.states[0]
+    assert state["goal"] == "Open notification settings"
+    assert "done_before_this" not in state and "still_to_do_after_this" not in state
+
+
+def test_saying_a_phase_is_done_moves_on_and_asks_again_about_the_same_screen() -> None:
+    client = ScriptedClient([("achieved", 0.95), ("back", 0.93)])
+    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    action = asyncio.run(navigator(FIELD_SCREEN))
+
+    assert client.calls == 2, "the done phase costs a second ask, never a device step"
+    assert client.states[1]["goal"] == "close it"
+    assert client.states[1]["done_before_this"] == ["Tap the top-left menu and look at it"]
+    assert action["tool"] == "back_gesture_and_analyze"
+    report = navigator.report()
+    assert report["phase"] == {"current": 2, "of": 4}
+    kinds = [p["kind"] for p in report["proposals_detail"]]
+    assert kinds == ["phase_done", "back"]
+    # The next screen's journey remembers the declaration, so it is not asked twice.
+    asyncio.run(navigator(SCREEN))
+    journey = client.states[2]["journey_so_far"]
+    assert any("was done" in str(turn.get("you_chose")) for turn in journey)
+
+
+def test_an_unsure_phase_done_is_declined_and_the_pointer_stays() -> None:
+    client = ScriptedClient([("achieved", 0.50)])
+    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full",
+                                  min_confidence=0.80)
+    assert asyncio.run(navigator(FIELD_SCREEN)) is None
+    assert navigator.report()["phase"] == {"current": 1, "of": 4}
+    assert navigator.report()["declined"] == {"below_confidence": 1}
+
+
+def test_the_last_phase_done_finishes_the_run() -> None:
+    client = ScriptedClient([("achieved", 0.95)] * 4)
+    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    action = asyncio.run(navigator(FIELD_SCREEN))
+    assert client.calls == 4
+    assert action["tool"] == "session_finish" and action["arguments"] == {"outcome": "achieved"}
+    assert navigator.report()["phase"] == {"current": 4, "of": 4}

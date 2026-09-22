@@ -195,6 +195,15 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Changed
 
+- The System One navigator reads a scripted goal one step at a time. A brief like "open the
+  menu and look, then close it. Send a message and wait for the reply, then open the menu
+  again" is cut at its own sequence words with AUA's `goal_phases`; the model is asked about
+  the current step, told what is done and what comes after, and a finish answered while steps
+  remain means "this step is done" and moves the pointer (one extra question, never a device
+  step). Measured on one row: the picks that had to know which phase the run was in sat at
+  0.21-0.51 and were all declined; the two that did not were 0.96 and 0.85. A screen with one
+  text field now offers one typing line naming that field instead of a tap line and a type
+  line that split the vote 0.54/0.46 between two doors to the same room.
 - The System One gate now also takes a pick whose own probability clears the gate while its
   confidence sits between 0.60 and the gate. Jev reports both numbers and the confidence runs a
   median 0.03 under the top probability (never more than 0.07 over 399 saved answers); measured
