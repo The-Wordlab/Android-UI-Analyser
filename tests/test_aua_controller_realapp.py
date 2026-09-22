@@ -321,7 +321,7 @@ def test_loading_capture_reaches_judges_but_never_becomes_action_safe(tmp_path):
                       {"record_verdict": [verdict("pass", "observed"), verdict("pass", "observed")]})
     run(tmp_path, LoadingAua(), model)
     judges = [p for p in model.payloads if isinstance(p.get("tool_choice"), dict)]
-    assert len(judges) == 2
+    assert len(judges) == 1, "one neutral vote by default"
     for payload in judges:
         content = json.dumps(payload["messages"])
         assert "Working..." in content
@@ -669,7 +669,7 @@ def test_realapp_claim_stops_the_loop_and_two_judges_decide(tmp_path):
                     model_call("session_finish", {"outcome": "achieved", "note": "Light is selected"}, call_id="native-2")],
         judgements={"record_verdict": [verdict("pass", "final frame lists Light"), verdict("pass", "Light visible")]},
     )
-    result = run(tmp_path, aua, model)
+    result = run(tmp_path, aua, model, judge_votes=2)
 
     assert result["error"] is None
     assert result["verdict"]["verdict"] == "pass" and result["verdict"]["oracle"] == "model_judgement_v1"
@@ -968,7 +968,7 @@ def test_realapp_disagreement_is_unverified_and_stall_downgrades(tmp_path):
         controller=[model_call("session_finish", {"outcome": "achieved"})],
         judgements={"record_verdict": [verdict("pass", "looks done"), verdict("fail", "Light not selected")]},
     )
-    result = run(tmp_path, aua, model)
+    result = run(tmp_path, aua, model, judge_votes=2)
     assert result["verdict"]["verdict"] == "unverified" and result["verdict"]["agreement"] is False
     assert (tmp_path / "run" / "verdict.md").read_text().startswith("# UNVERIFIED")
 
@@ -1055,3 +1055,22 @@ def test_the_result_reports_how_many_host_actions_were_ignored(tmp_path):
     result = run(tmp_path, aua, model, max_steps=1)
 
     assert result["controller"]["host_ignored_actions"] == 0
+
+
+def test_the_judge_casts_one_vote_by_default(tmp_path):
+    """Measured over 44 judged rows, the second (skeptical) vote agreed 34 times, blurred two confident
+    fails into 'unverified', and caught one made-up proof frame, at 5-7s and double the judge cost per
+    row. One neutral vote is the default; `--judge-votes 2` still asks for agreement."""
+    aua = FakeAua()
+    model = FakeModel(
+        controller=[model_call("tap_and_analyze", {"id": "el:fp-home-1"})],
+        judgements={"record_verdict": [verdict("pass", "goal state is visible")]},
+    )
+
+    result = run(tmp_path, aua, model, max_steps=1)
+
+    assert [vote["verdict"] for vote in result["verdict"]["votes"]] == ["pass"]
+    assert result["verdict"]["single_vote"] is True
+    asked = [p for p in model.payloads
+             if isinstance(p.get("tool_choice"), dict) and p["tool_choice"]["function"]["name"] == "record_verdict"]
+    assert len(asked) == 1

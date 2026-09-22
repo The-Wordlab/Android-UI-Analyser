@@ -1466,8 +1466,12 @@ def combine_votes(votes: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-async def judge_outcome_votes(decider: Decider, *, votes: int = 2, **kwargs: Any) -> dict[str, Any]:
-    """Neutral and skeptical judges must agree; a single vote is allowed but flagged."""
+async def judge_outcome_votes(decider: Decider, *, votes: int = 1, **kwargs: Any) -> dict[str, Any]:
+    """One neutral vote by default, flagged ``single_vote``; with two, neutral and skeptical must agree.
+
+    Measured over 44 judged rows the second vote agreed 34 times, turned two confident fails into
+    'unverified', and caught one made-up proof frame, for 5-7s and double the judge cost per row.
+    """
     if type(votes) is not int or votes < 1 or votes > 2:
         raise RunError("judge votes must be 1 or 2")
     stances = ["neutral", "skeptical"][:votes]

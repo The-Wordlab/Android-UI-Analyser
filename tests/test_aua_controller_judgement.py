@@ -649,6 +649,7 @@ def test_two_stances_must_agree_and_never_see_element_ids():
                      tool_reply("record_verdict", verdict("pass", 0.7, ["Light row is selected"]))])
     result = asyncio.run(judge_outcome_votes(
         decider(sender), goal="Switch the theme to Light", final_frame=frame("fp-final"),
+        votes=2,
         frames=[frame("fp-1"), frame("fp-2")],
         actions=[{"step": 0, "tool": "tap_and_analyze", "arguments": {"id": "el:1"}, "reason": "secret controller thoughts"}]))
     assert result["verdict"] == "pass" and result["agreement"] is True
@@ -797,6 +798,7 @@ def test_contract_votes_report_each_exact_criterion_with_evidence():
 
     result = asyncio.run(judge_outcome_votes(
         decider(sender),
+        votes=2,
         goal="Switch the theme to Light",
         final_frame=frame("fp-final"),
         contract=contract,

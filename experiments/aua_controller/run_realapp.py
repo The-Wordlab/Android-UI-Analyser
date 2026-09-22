@@ -1150,7 +1150,7 @@ async def run_realapp(
     judge_request_config: dict[str, Any] | None = None,
     judge_fallbacks: Sequence[tuple[str, dict[str, Any] | None]] = (),
     judge: bool = True,
-    judge_votes: int = 2,
+    judge_votes: int = 1,
     judge_engine: str = "chat",
     nav_engine: str = "chat",
     nav_shadow: bool = False,
@@ -2266,7 +2266,7 @@ def main() -> int:
                              "contract bullet on an evidence ladder. Needs an authored contract, "
                              "TYPESAFE_API_KEY and the `typesafe` extra; returns no written "
                              "rationale and reads no screenshots.")
-    parser.add_argument("--judge-votes", type=int, default=2, choices=[1, 2])
+    parser.add_argument("--judge-votes", type=int, default=1, choices=[1, 2])
     parser.add_argument("--judge-frames", type=int, default=8,
                         help="How many observations to show the judge, spread across the whole "
                              "journey. A contract bullet about the route is unverifiable from "
