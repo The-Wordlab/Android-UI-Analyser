@@ -79,7 +79,7 @@ def test_a_confident_tap_is_proposed_as_a_bound_tool_call() -> None:
     assert navigator.report()["accepted"] == 1
 
 
-@pytest.mark.parametrize("kind", ["done", "back", "scroll_down", "type"])
+@pytest.mark.parametrize("kind", ["achieved", "back", "scroll_down", "type"])
 def test_every_action_that_is_not_a_tap_goes_back_to_the_chat_model(kind: str) -> None:
     # Ending, rewinding, scrolling and typing were the measured weak spots; none of them is
     # this navigator's to decide, however sure it sounds.
@@ -243,17 +243,15 @@ def test_a_screen_that_did_not_move_is_said_so_in_the_journey() -> None:
 
 
 class WideClient(FakeClient):
-    """Answers the operand questions the widened space adds."""
+    """Remembers the questions the widened space asked."""
 
-    def __init__(self, *args, direction="down", outcome="achieved", operand_conf=0.95, **kwargs):
+    def __init__(self, *args, direction="down", **kwargs):
         super().__init__(*args, **kwargs)
-        self.direction, self.outcome, self.operand_conf = direction, outcome, operand_conf
+        self.direction = direction
 
     async def system_one(self, *, state, questions, model, timeout=None):
         response = await super().system_one(state=state, questions=questions, model=model,
                                             timeout=timeout)
-        response.answers["outcome"] = SimpleNamespace(choice=self.outcome,
-                                                      confidence=self.operand_conf)
         self.questions = questions
         return response
 
@@ -288,9 +286,9 @@ def test_the_widened_space_goes_back_with_no_operand() -> None:
 def test_the_widened_space_finishes_with_an_outcome_and_never_a_note() -> None:
     # The note is free text and would reach the judge as evidence, so a non-generative model
     # must not supply one. The enum it can answer is the whole claim.
-    action, _ = wide(WideClient(kind="done", outcome="blocked"))
+    action, _ = wide(WideClient(kind="already_satisfied"))
     assert action["tool"] == "session_finish"
-    assert action["arguments"] == {"outcome": "blocked"}, "no fabricated note"
+    assert action["arguments"] == {"outcome": "already_satisfied"}, "no fabricated note"
 
 
 def test_typing_is_refused_even_in_the_widened_space() -> None:
@@ -325,13 +323,20 @@ def test_the_same_scroll_is_not_repeated_on_a_screen_it_did_not_move() -> None:
     assert navigator.report()["declined"] == {"repeat_on_unchanged_screen": 1}
 
 
-def test_the_operand_questions_are_asked_in_the_same_single_request() -> None:
-    # One request prices the state once and answers in parallel, so the operands for actions
-    # that lose are free. Asking them in a second call would give the saving away.
+def test_the_widened_space_is_still_one_question() -> None:
+    # Finishing is a move like any other, so it sits in the same list as the presses and the
+    # scrolls. The separate `outcome` question is gone: on a mid-run step none of the finished
+    # outcomes was true, so a second question had to offer `in_progress` -- and that answer then
+    # vetoed a confident `done` on the one row where nothing needed to change (measured: 17
+    # vetoes on a 27-row run, all 10 premature ones already under the gate, the 2 right ones
+    # above it and lost).
     client = WideClient()
     wide(client)
     assert client.calls == 1
-    assert {"move", "outcome"} == set(client.questions)
+    assert {"move"} == set(client.questions)
+    offered = set(client.questions["move"].criteria)
+    assert {"achieved", "already_satisfied"} <= offered
+    assert "in_progress" not in offered and "done" not in offered
 
 
 def test_the_narrow_default_asks_no_operand_questions() -> None:
@@ -420,23 +425,33 @@ def test_a_run_without_a_transcript_path_writes_nothing_and_still_works(tmp_path
     assert written, "the turn is still assembled; only the file is absent"
 
 
-def test_finishing_while_the_goal_is_unfinished_is_refused() -> None:
-    # The four finish outcomes all describe a run that has stopped, so on a step in the middle of
-    # one none of them is true and the model answered `blocked` on 6 of 10 real screens with
-    # nothing blocking anything. `in_progress` gives the truth somewhere to go -- and asking to
-    # stop while reporting the goal unfinished is a contradiction, not a decision to act on.
-    action, navigator = wide(WideClient(kind="done", outcome="in_progress"))
-    assert action is None
-    assert navigator.report()["declined"] == {"done_but_unfinished": 1}
+def test_a_mid_run_screen_is_never_forced_to_name_a_finish() -> None:
+    # With finishing folded into the move list, a step in the middle of a run simply picks a
+    # press or a scroll; nothing asks it to describe a run that has not stopped.
+    from experiments.aua_controller.typesafe_navigator import build_questions
+
+    questions = build_questions({"h1": "Settings"}, action_space="full")
+    assert set(questions) == {"move"}
+    assert "in_progress" not in questions["move"].criteria
 
 
-def test_in_progress_is_offered_but_is_never_a_finish_argument() -> None:
-    from experiments.aua_controller.typesafe_navigator import FINISH_OUTCOMES, UNFINISHED
+@pytest.mark.parametrize("outcome", ["achieved", "already_satisfied"])
+def test_finishing_is_a_move_that_carries_its_own_outcome(outcome: str) -> None:
+    # The row that found this: an observe-only goal, screen already right, Jev sure it was done
+    # at 0.84 -- and declined, because a second question said "in progress". One answer now.
+    action, navigator = wide(WideClient(kind=outcome, kind_conf=0.84), min_confidence=0.80)
+    assert action == {"tool": "session_finish", "arguments": {"outcome": outcome},
+                      "reason": f"System One {outcome} at confidence 0.84: finish as {outcome}"}
+    assert navigator.report()["declined"] == {}
 
-    assert UNFINISHED in FINISH_OUTCOMES, "the model must be able to say it is mid-run"
-    action, _ = wide(WideClient(kind="done", outcome="achieved"))
-    assert action["arguments"]["outcome"] != UNFINISHED
-    assert action["arguments"] == {"outcome": "achieved"}
+
+def test_ending_a_run_as_hopeless_is_still_the_chat_models_call() -> None:
+    # `blocked` and `not_achievable` are offered so the truth has somewhere to go, and refused
+    # so a System One hunch never ends a run on a verdict the judge cannot check.
+    for kind in ("blocked", "not_achievable"):
+        action, navigator = wide(WideClient(kind=kind))
+        assert action is None
+        assert navigator.report()["declined"] == {f"kind:{kind}": 1}
 
 
 def test_a_screen_with_no_readable_labels_still_says_it_moved() -> None:
@@ -506,17 +521,15 @@ def test_a_frame_without_change_telemetry_falls_back_to_the_old_wording() -> Non
     assert what_happened({}, moved=True) == "the screen changed"
 
 
-def test_finishing_is_still_gated_on_the_outcome_it_would_record() -> None:
-    # Merging the controls into the action list removed the *speculative* operand; it did not
-    # ban a question whose answer is used. Finishing reads `outcome` and writes it to the
-    # harness, so a shaky outcome must hold the step back however sure the move itself is.
-    action, navigator = wide(WideClient(kind="done", kind_conf=0.99,
-                                        outcome="achieved", operand_conf=0.51))
+def test_finishing_is_gated_on_its_one_confidence() -> None:
+    # One question, one answer, one number. Ending a run early is this model's worst measured
+    # skill, so the gate applies to finishing exactly as it does to a press.
+    action, navigator = wide(WideClient(kind="achieved", kind_conf=0.51))
     assert action is None, "0.51 is under the default gate"
     record = navigator.proposals[0]
     assert record["operand"] == "achieved"
-    assert record["outcome_confidence"] == 0.51
-    assert record["gate"] == 0.51, "the weaker of the move and the outcome it would record"
+    assert record["gate"] == 0.51
+    assert "outcome_confidence" not in record
 
 
 def test_a_declined_call_says_why_in_its_transcript_entry(tmp_path) -> None:
@@ -718,13 +731,12 @@ def test_an_unnamed_control_is_placed_on_the_right_third(bounds, expected) -> No
 
 
 def test_the_finish_outcomes_still_match_the_harness_they_are_sent_to() -> None:
-    # This enum is a copy of the harness's, plus `in_progress`, which is never passed on. A
-    # harness change would not propagate, and the mismatch would only show as a rejected call.
+    # This enum is a copy of the harness's. A harness change would not propagate, and the
+    # mismatch would only show as a rejected call.
     from experiments.aua_controller.run_realapp import FINISH_OUTCOMES as HARNESS
-    from experiments.aua_controller.typesafe_navigator import FINISH_OUTCOMES, UNFINISHED
+    from experiments.aua_controller.typesafe_navigator import FINISH_OUTCOMES
 
-    assert set(FINISH_OUTCOMES) - {UNFINISHED} == set(HARNESS)
-    assert UNFINISHED not in HARNESS, "it is not a verdict the harness can record"
+    assert set(FINISH_OUTCOMES) == set(HARNESS)
 
 
 # --------------------------------------------------- what the app is still waiting on
@@ -785,7 +797,8 @@ def test_every_control_is_its_own_action() -> None:
     criteria = questions["move"].criteria
     assert criteria["1"] == "Press 'Allow'"
     assert criteria["2"] == "Press 'Ask me later'"
-    for kind in ("scroll_down", "scroll_up", "back", "done", "wait", "blocked", "type"):
+    for kind in ("scroll_down", "scroll_up", "back", "achieved", "already_satisfied", "wait",
+                 "blocked", "not_achievable", "type"):
         assert kind in criteria, kind
     assert "tap" not in criteria, "a bare `tap` names no control and is not an action"
 

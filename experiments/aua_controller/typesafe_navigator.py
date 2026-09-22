@@ -84,16 +84,14 @@ WAIT_TOOL = "wait_and_analyze"
 # same state for free, because a System One request prices the state once and the answers in
 # parallel. `type` is still refused here for the same reason their harness hands it to a small
 # LLM: a non-generative model cannot write the string.
-#: `in_progress` is not one of the harness's finish outcomes and is never passed to one. It is
-#: here because the other four describe a *finished* run, and on a step in the middle of one none
-#: of them is true -- so the model had to answer something anyway. Measured over 10 saved screens
-#: from a real run, it answered `blocked` on 6 of them, with blocked probability between 0.41 and
-#: 0.81 while nothing whatsoever was blocking the run. Worse, on the step that finally chose
-#: `done`, `blocked` was outscoring `achieved` 0.41 to 0.35 -- one coin flip from recording a
-#: working run as blocked. Adding the true option drained it: `in_progress` on 9 of 10 at 0.78 to
-#: 1.00, and blocked fell to 0.00-0.05 everywhere.
+#: The harness's finish outcomes, word for word what `session_finish` accepts. They used to be a
+#: second question beside the move, and on a step in the middle of a run none of them is true,
+#: so that question had to offer `in_progress` -- which then vetoed a confident `done`. Over a
+#: 27-row run it vetoed 17 times: the 10 premature ones were already under the gate, and the 2
+#: right ones above it were lost (an observe-only row, 13s of chat-model time to say nothing).
+#: Finishing is now a move like any other, so a mid-run step simply picks a press or a scroll and
+#: nothing is asked about a run that has not stopped.
 FINISH_OUTCOMES: dict[str, str] = {
-    "in_progress": "The run is still working toward the goal; it is neither finished nor stopped",
     "achieved": "The goal was carried out during this run",
     "already_satisfied": "No step was ever needed; it was true before the run began",
     "blocked": "Something outside the goal stops it being carried out",
@@ -113,9 +111,11 @@ ACTION_KINDS: dict[str, str] = {
     "scroll_down": "What is needed is below; scroll down to reveal it",
     "scroll_up": "What is needed is above; scroll up to reveal it",
     "back": "This is not the screen the goal needs; the previous screen was closer",
-    "done": "The goal has been reached; nothing further is needed",
+    "achieved": "The goal was carried out during this run; nothing further is needed",
+    "already_satisfied": "Nothing was ever needed; the goal was already true before the run began",
     "wait": "This screen is still loading or mid-animation; nothing should be pressed yet",
     "blocked": "Something outside the goal stops this run going further",
+    "not_achievable": "This app cannot do what the goal asks",
 }
 #: Scroll is two actions rather than one action plus a direction question. The public browser
 #: harnesses carry SCROLL_UP and SCROLL_DOWN as operations for the same reason it is right here:
@@ -142,9 +142,9 @@ TOOL_WORDS = {
 #: is this model's worst measured skill. `wait` is not in here because waiting is a real tool the
 #: harness already offers -- asking "is this screen still loading?" and then paying a chat model
 #: to answer the same question was the option costing a round trip to say nothing.
-NON_ACTIONS = ("blocked",)
-#: The outcome that means "do not finish". Never a `session_finish` argument.
-UNFINISHED = "in_progress"
+NON_ACTIONS = ("blocked", "not_achievable")
+#: The two finish moves a System One answer may act on; each is its own `session_finish` outcome.
+FINISH_KINDS = ("achieved", "already_satisfied")
 
 
 def where(element: Mapping[str, Any], screen: Mapping[str, Any] | None) -> str:
@@ -329,11 +329,10 @@ def numbered(options: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]
 
 
 def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -> dict[str, Any]:
-    """One question naming every move this screen allows, plus the outcome in the full space.
+    """One question naming every move this screen allows, finishing included.
 
-    A press is not an action plus a separate operand; each pressable control *is* an action.
-    `outcome` stays its own question because it is not a move -- it is what to record if the run
-    stops here, and it is the one answer besides the move that the harness actually reads.
+    A press is not an action plus a separate operand; each pressable control *is* an action, and
+    so is each way of finishing: the outcome `session_finish` records is the move itself.
     """
     from typesafe_sdk import Choice
 
@@ -347,15 +346,8 @@ def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -
     criteria: dict[str, str] = {index: f"Press '{label}'"
                                 for index, label in numbered(options)[0].items()}
     criteria.update({kind: text for kind, text in ACTION_KINDS.items() if kind != "tap"})
-    questions = {"move": Choice(instructions="What should happen next on this screen?",
-                                criteria=criteria)}
-    if action_space == "full":
-        # Asked directly, not as "if the run stopped here...": a hypothetical is a hop of
-        # indirection, and jev-1.13's documented jaggedness names indirection as a cost.
-        questions["outcome"] = Choice(
-            instructions="What has become of the goal on this screen?",
-            criteria=dict(FINISH_OUTCOMES))
-    return questions
+    return {"move": Choice(instructions="What should happen next on this screen?",
+                           criteria=criteria)}
 
 
 class TypeSafeNavigator:
@@ -525,19 +517,16 @@ class TypeSafeNavigator:
             turn["verdict"] = dict(record)
             self._record(turn)
 
-        plan, why = self._plan(move, response.answers, by_index)
+        plan, why = self._plan(move, by_index)
         if plan is None:
             settle(False, why)
             return None
-        tool, arguments, operand, label, *rest = plan
+        tool, arguments, operand, label = plan
         record["tool"] = tool
         record["operand"] = operand
         # One question, one answer, one number -- `min()` of two confidences about different
-        # things was never a statement about this decision. Finishing is the exception and says
-        # so: it reads the `outcome` question, so that answer's confidence binds as well.
-        gate = min([move.confidence, *rest])
-        if rest:
-            record["outcome_confidence"] = round(float(rest[0]), 4)
+        # things was never a statement about this decision.
+        gate = move.confidence
         record["gate"] = round(gate, 4)
         record["gate_needed"] = self.min_confidence
         if gate < self.min_confidence:
@@ -564,13 +553,11 @@ class TypeSafeNavigator:
         return {"tool": tool, "arguments": arguments,
                 "reason": f'System One {record["kind"]} at confidence {gate:.2f}: {label}'}
 
-    def _plan(self, move, answers, by_index):
+    def _plan(self, move, by_index):
         """Bind the one chosen move to an offered tool, or say why it cannot be.
 
-        Returns ``(plan, why)``. A plan is ``(tool, arguments, operand, label)``, optionally with
-        a fifth element: a second confidence the gate must also clear. The operand is what the
-        repeat guard keys on. Only finishing has that fifth element, because only finishing reads
-        a second question.
+        Returns ``(plan, why)``. A plan is ``(tool, arguments, operand, label)``. The operand is
+        what the repeat guard keys on.
         """
         # A numbered answer IS a press: the menu of controls and the list of actions are one
         # list, so naming a control names the whole move.
@@ -617,25 +604,14 @@ class TypeSafeNavigator:
                 self._decline("back_not_offered")
                 return None, "back_not_offered"
             return (BACK_TOOL, {}, "back", "go back"), None
-        if kind == "done":
+        if kind in FINISH_KINDS:
             if FINISH_TOOL not in self.offered:
                 self._decline("finish_not_offered")
                 return None, "finish_not_offered"
-            outcome = answers.get("outcome")
-            if outcome is None:
-                self._decline("no_outcome")
-                return None, "no_outcome"
-            if outcome.choice == UNFINISHED:
-                # It asked to stop and said the goal is not finished. Both cannot be acted on.
-                self._decline("done_but_unfinished")
-                return None, "done_but_unfinished"
             # No note: it is free text, and a fabricated one would reach the judge as evidence.
-            # The only move that reads a second question, so the only one with a second
-            # confidence to respect. Merging the controls into the action list removed the
-            # *speculative* operand; it did not ban a question whose answer is actually used,
-            # and ending a run on a shaky outcome is this model's worst measured failure.
-            return (FINISH_TOOL, {"outcome": outcome.choice}, outcome.choice,
-                    f"finish as {outcome.choice}", outcome.confidence), None
+            # The enum the model answered is the whole claim, and the gate above applies to it
+            # exactly as to a press -- ending a run early is this model's worst measured skill.
+            return (FINISH_TOOL, {"outcome": kind}, kind, f"finish as {kind}"), None
         self._decline(f"kind:{kind}")
         return None, f"kind:{kind}"
 
@@ -670,4 +646,4 @@ class TypeSafeNavigator:
 __all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered",
            "MODEL", "MIN_CONFIDENCE",
            "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "WAIT_TOOL", "SCROLL_KINDS",
-           "FINISH_OUTCOMES", "UNFINISHED", "build_questions", "what_happened", "candidates", "tool_names"]
+           "FINISH_OUTCOMES", "FINISH_KINDS", "build_questions", "what_happened", "candidates", "tool_names"]
