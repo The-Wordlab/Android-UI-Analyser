@@ -26,6 +26,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from experiments.aua_controller.typesafe_cost import USD_PER_INPUT_TOKEN
+
 ORACLE = "typesafe_system_one_v1"
 DEFAULT_MODEL = "jev-latest"
 
@@ -274,6 +276,7 @@ class TypeSafeJudge:
             "model": self.model,
             "requests": self.requests,
             "input_tokens": self.input_tokens,
+            "usd": round(self.input_tokens * USD_PER_INPUT_TOKEN, 8),
         }
 
 

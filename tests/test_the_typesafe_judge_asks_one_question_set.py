@@ -70,6 +70,7 @@ def test_one_run_costs_one_request_carrying_every_question() -> None:
     assert result["verdict"] == "pass"
     assert judge.report() == {
         "oracle": result["oracle"], "model": "jev-latest", "requests": 1, "input_tokens": 612,
+        "usd": 0.0000257,
     }
 
 

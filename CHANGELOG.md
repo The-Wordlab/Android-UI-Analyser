@@ -222,6 +222,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Harness run totals now include Jev navigation and judgement alongside chat-model spend,
+  including known Jev usage when a later step fails or is cancelled. The cost table shows
+  Jev separately and labels its input-token pricing as an estimate, not reported billing.
 - The System One menu now offers a text field as "Tap the text field 'Ask me anything' so text
   can be typed into it" instead of "Press 'Ask me anything'", and the state carries its `editable` flag, so a goal that says "tap the composer and type" can tell
   the field from the button beside it. Live, every option read "Press '…'" and the only

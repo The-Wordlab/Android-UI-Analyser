@@ -886,12 +886,15 @@ def verdict_markdown(result: dict[str, Any]) -> str:
     for reason in verdict.get("reasons", []):
         lines.append(f"- {reason}")
     cost = result["cost"]
-    lines += ["", "| tier | model | provider | reported USD |", "|---|---|---|---|"]
-    for tier in ("controller", "judge", "map"):
+    lines += ["", "| tier | model | provider | USD | basis |", "|---|---|---|---|---|"]
+    for tier in ("controller", "navigator", "judge", "map"):
         entry = cost.get(tier)
         if entry:
-            lines.append(f"| {tier} | {entry.get('model')} | {entry.get('provider')} | {entry.get('usd'):.6f} |")
-    lines.append(f"| total | | | {cost['total_usd']:.6f} |")
+            basis = "estimated" if entry.get("estimated") else "reported"
+            lines.append(f"| {tier} | {entry.get('model')} | {entry.get('provider')} | {entry.get('usd'):.6f} | {basis} |")
+    lines.append(f"| total | | | {cost['total_usd']:.6f} | |")
+    if any(entry.get("estimated") for entry in cost.values() if isinstance(entry, dict)):
+        lines.append("Jev cost is estimated from reported input tokens at $0.042 per million; output tokens are free.")
     if cost.get("complete") is False:
         lines.append("Reported cost is incomplete: cancelled/timed-out requests returned no usage; provider charges are unknown.")
     screens = result.get("screens") or []
@@ -1322,6 +1325,8 @@ async def run_realapp(
     recording_started = False
     decider: Decider | None = None
     namer_decider: Decider | None = None
+    navigator: TypeSafeNavigator | None = None
+    system_one_judge: TypeSafeJudge | None = None
     recording_path = (output / "journey.mp4").resolve()
     aua_artifacts_dir = (
         Path(session_artifacts_dir).resolve()
@@ -1737,7 +1742,6 @@ async def run_realapp(
         compactor = FrameCompactor(max_elements=max_elements)
         # The navigator answers the narrow "which control" steps and declines everything
         # else, so `host_next` returning None simply leaves the step with the chat model.
-        navigator = None
         if nav_engine == "typesafe":
             navigator = TypeSafeNavigator(
                 goal, tools=tools,
@@ -1775,8 +1779,6 @@ async def run_realapp(
             terminal_tools=frozenset({"session_finish"}), terminal_claim_limit=terminal_claim_limit,
             no_progress_limit=no_progress_limit,
         )
-        if navigator is not None:
-            result["navigator"] = navigator.report()
         result["controller"] = {
             key: report.get(key) for key in (
                 "stop_reason", "error", "steps_consumed", "model_requests", "tool_calls_executed",
@@ -1915,13 +1917,13 @@ async def run_realapp(
                                     "text_evidence_source_count": len(positioned_frames),
                                     "text_evidence": [frame.get("_judge_evidence", {}) for frame in judged_frames]}
             if judge_engine == "typesafe":
-                system_one = TypeSafeJudge()
-                verdict = system_one.judge(goal=goal, criteria=criteria, final_frame=final,
-                                           frames=judged_frames, actions=context_actions)
+                system_one_judge = TypeSafeJudge()
+                verdict = system_one_judge.judge(goal=goal, criteria=criteria, final_frame=final,
+                                                 frames=judged_frames, actions=context_actions)
                 # Both keys are read off every verdict downstream. A System One judge runs no
                 # vote ladder, and its output tokens are not billed.
                 verdict["votes"] = []
-                verdict["cost"] = 0.0
+                verdict["cost"] = system_one_judge.report()["usd"]
             else:
                 verdict = await judge_outcome_votes(
                     decider, votes=judge_votes, goal=goal, final_frame=final,
@@ -1941,10 +1943,7 @@ async def run_realapp(
                 )
             verdict["controller_stop_reason"] = stop
             result["verdict"] = verdict
-            if judge_engine == "typesafe":
-                result["cost"]["judge"] = {"model": system_one.model, "provider": "typesafe",
-                                           "usd": 0.0, "decider": system_one.report()}
-            else:
+            if judge_engine == "chat":
                 result["cost"]["judge"] = {"model": judging_model, "provider": (verdict["votes"][0].get("provider") if verdict["votes"] else None),
                                            "usd": verdict["cost"], "decider": decider.report()}
         else:
@@ -2022,6 +2021,15 @@ async def run_realapp(
             result["verdict"] = {"oracle": "none", "verified": False, "verdict": "unverified",
                                  "reasons": [result["error"][:300]]}
     finally:
+        # Jev's input tokens cost money even when it declines to act, or a later step fails.
+        # Keep these in the same ledger as chat-model spend so the total includes each once.
+        for role, system_one in (("navigator", navigator), ("judge", system_one_judge)):
+            if system_one is not None:
+                usage = system_one.report()
+                result["cost"][role] = {"model": usage["model"], "provider": "typesafe",
+                                        "usd": usage["usd"], "estimated": True, "decider": usage}
+                if role == "navigator":
+                    result["navigator"] = usage
         # Failed judge/schema attempts still consumed paid tokens. Preserve their own role's
         # accounting even when the call raised before returning an aggregate verdict.
         for role, decision_maker, decision_model in (

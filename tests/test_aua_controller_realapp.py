@@ -878,6 +878,93 @@ def test_failed_judgement_spend_survives_in_result_and_markdown(tmp_path):
     assert "0.013000" in (tmp_path / "run/verdict.md").read_text()
 
 
+@pytest.mark.parametrize("failed_judge", [False, True])
+def test_jev_navigator_cost_is_included_once_even_when_judgement_fails(tmp_path, monkeypatch, failed_judge):
+    import experiments.aua_controller.run_realapp as module
+
+    class Navigator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __call__(self, observation):
+            return None
+
+        def observed(self, name, arguments):
+            pass
+
+        def report(self):
+            return {"model": "jev-latest", "requests": 1, "input_tokens": 5000, "usd": 0.00021}
+
+    monkeypatch.setattr(module, "TypeSafeNavigator", Navigator)
+    judgement = model_call("record_verdict", {"verdict": "invalid"}, cost=0.005) if failed_judge else verdict("pass", "observed")
+    model = FakeModel(
+        controller=[model_call("session_finish", {"outcome": "achieved", "note": "observed"}, cost=0.003)],
+        judgements={"record_verdict": [judgement, judgement]},
+    )
+    result = run(tmp_path, FakeAua(), model, nav_engine="typesafe", judge_votes=1)
+    expected = 0.01321 if failed_judge else 0.00361
+    assert result["cost"]["navigator"]["usd"] == result["navigator"]["usd"] == 0.00021
+    assert result["cost"]["navigator"]["estimated"] is True
+    assert result["cost"]["total_usd"] == pytest.approx(expected)
+    saved = json.loads((tmp_path / "run/result.json").read_text())
+    assert saved["cost"]["total_usd"] == pytest.approx(expected)
+    markdown = (tmp_path / "run/verdict.md").read_text()
+    assert "| navigator | jev-latest | typesafe | 0.000210 | estimated |" in markdown
+    assert "input tokens" in markdown and f"{expected:.6f}" in markdown
+
+
+def test_jev_navigator_cost_survives_controller_cancellation(tmp_path, monkeypatch):
+    import experiments.aua_controller.run_realapp as module
+
+    class Navigator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def report(self):
+            return {"model": "jev-latest", "requests": 1, "input_tokens": 5000, "usd": 0.00021}
+
+    async def cancelled(**kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(module, "TypeSafeNavigator", Navigator)
+    monkeypatch.setattr(module, "run_agent", cancelled)
+    aua = FakeAua()
+    with pytest.raises(asyncio.CancelledError):
+        run(tmp_path, aua, FakeModel([], {}), nav_engine="typesafe")
+    saved = json.loads((tmp_path / "run/result.json").read_text())
+    assert saved["cost"]["total_usd"] == pytest.approx(0.00021)
+    assert saved["cost"]["complete"] is False
+    assert saved["navigator"]["requests"] == 1
+    assert aua.calls[-1][0] == "session_finish"
+
+
+@pytest.mark.parametrize("failed_judge", [False, True])
+def test_jev_judge_input_tokens_are_not_reported_as_free(tmp_path, monkeypatch, failed_judge):
+    import experiments.aua_controller.run_realapp as module
+
+    class Judge:
+        model = "jev-latest"
+
+        def judge(self, **kwargs):
+            if failed_judge:
+                raise ValueError("response could not be composed")
+            return {"verdict": "pass", "oracle": "typesafe_system_one_v1", "verified": False, "reasons": []}
+
+        def report(self):
+            return {"model": self.model, "requests": 1, "input_tokens": 5000, "usd": 0.00021}
+
+    monkeypatch.setattr(module, "TypeSafeJudge", Judge)
+    model = FakeModel(
+        [model_call("session_finish", {"outcome": "achieved", "note": "observed"}, cost=0.003)], {},
+    )
+    result = run(tmp_path, FakeAua(), model, judge_engine="typesafe", contract="- Light is visible")
+    assert result["cost"]["judge"]["usd"] == 0.00021
+    assert result["cost"]["judge"]["estimated"] is True
+    assert result["cost"]["total_usd"] == pytest.approx(0.00321)
+    if not failed_judge:
+        assert result["verdict"]["cost"] == 0.00021
+
+
 def test_cancel_during_judge_preserves_unknown_cost_and_still_finishes_session(tmp_path):
     aua = FakeAua()
 

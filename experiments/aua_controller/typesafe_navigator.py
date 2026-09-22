@@ -63,6 +63,8 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from experiments.aua_controller.typesafe_cost import USD_PER_INPUT_TOKEN
+
 MODEL = "jev-latest"
 MIN_CONFIDENCE = 0.85  # measured; see the module docstring -- the threshold is not the lever
 #: A near miss under the gate buys one wait and a fresh read, not a retry. The same request
@@ -82,8 +84,6 @@ PROBABILITY_GATE_FLOOR = 0.60
 #: about the decision, and a run's journey grows every step.
 MAX_JOURNEY_CHARS = 30_000
 MAX_OPTIONS = 60  # a Choice takes up to 255 options; a screen offering more is not a decision
-#: $42 per billion input tokens, output free (typesafe.ai pricing, Sep 2026).
-USD_PER_INPUT_TOKEN = 42 / 1e9
 TAP_TOOL = "tap_and_analyze"
 SCROLL_TOOL = "scroll_and_analyze"
 BACK_TOOL = "back_gesture_and_analyze"
