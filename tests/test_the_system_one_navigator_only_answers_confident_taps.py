@@ -922,3 +922,68 @@ def test_a_status_bar_item_with_a_checked_field_is_not_a_switch() -> None:
     assert "el:clock" not in options, "a non-interactive node is not an option because it carries a checked flag"
     assert options["el:login"] == "Log in", "a plain button is not a switch"
     assert options["el:dark"].endswith("[switch is ON]")
+
+
+class SequenceClient(FakeClient):
+    """Answers a fixed sequence of (choice, confidence) pairs, one per call."""
+
+    def __init__(self, answers):
+        super().__init__()
+        self.answers = list(answers)
+
+    async def system_one(self, *, state, questions, model, timeout=None):
+        self.calls += 1
+        choice, confidence = self.answers.pop(0)
+        return SimpleNamespace(answers={"move": SimpleNamespace(choice=choice, confidence=confidence)},
+                               usage=SimpleNamespace(input_tokens=400))
+
+
+LOOK_TOOLS = [TAP_TOOL, "wait_and_analyze", "session_finish"]
+
+
+def test_a_near_miss_gets_one_more_look_before_the_chat_model() -> None:
+    """Replayed eight times, the same screen scored 0.66-0.78 and never crossed the gate; a fresh
+    read after a wait scored 0.85 every time. So a near miss buys one wait, not a retry."""
+    client = SequenceClient([("achieved", 0.72), ("achieved", 0.72), ("achieved", 0.72)])
+    navigator = TypeSafeNavigator("Look at the landing screen", client=client, tools=LOOK_TOOLS,
+                                  action_space="full", min_confidence=0.80)
+
+    first = asyncio.run(navigator(SCREEN))
+    assert first["tool"] == "wait_and_analyze" and first["arguments"] == {"idle": True}
+    assert "second look" in first["reason"] and "0.72" in first["reason"]
+    assert navigator.proposals[-1]["second_look"] is True and navigator.proposals[-1]["accepted"] is False
+
+    second = asyncio.run(navigator(SCREEN))
+    assert second is None, "the same near miss on the same screen is handed to the chat model"
+    third = asyncio.run(navigator(SCREEN))
+    assert third is None, "one more look means one"
+    assert navigator.declined == {"second_look": 1, "below_confidence": 2}
+
+
+def test_a_confident_answer_after_the_second_look_is_taken() -> None:
+    client = SequenceClient([("achieved", 0.7), ("achieved", 0.9)])
+    navigator = TypeSafeNavigator("Look at the landing screen", client=client, tools=LOOK_TOOLS,
+                                  action_space="full", min_confidence=0.80)
+    assert asyncio.run(navigator(SCREEN))["tool"] == "wait_and_analyze"
+    assert asyncio.run(navigator(SCREEN))["tool"] == "session_finish"
+
+
+def test_a_clear_miss_is_handed_over_at_once() -> None:
+    client = SequenceClient([("achieved", 0.55)])
+    navigator = TypeSafeNavigator("Look at the landing screen", client=client, tools=LOOK_TOOLS,
+                                  action_space="full", min_confidence=0.80)
+    assert asyncio.run(navigator(SCREEN)) is None
+    assert navigator.declined == {"below_confidence": 1}
+
+
+def test_a_near_miss_without_a_wait_tool_is_handed_over() -> None:
+    client = SequenceClient([("1", 0.7)])
+    navigator = TypeSafeNavigator("Open notification settings", client=client, tools=[TAP_TOOL],
+                                  min_confidence=0.80)
+    assert asyncio.run(navigator(SCREEN)) is None
+    assert navigator.declined == {"below_confidence": 1}
+
+
+def test_the_second_look_floor_must_sit_under_the_gate() -> None:
+    with pytest.raises(ValueError):
+        TypeSafeNavigator("g", client=FakeClient(), min_confidence=0.8, second_look_floor=0.9)

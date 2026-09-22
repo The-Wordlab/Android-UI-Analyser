@@ -65,6 +65,11 @@ from typing import Any
 
 MODEL = "jev-latest"
 MIN_CONFIDENCE = 0.85  # measured; see the module docstring -- the threshold is not the lever
+#: A near miss under the gate buys one wait and a fresh read, not a retry. The same request
+#: replayed eight times scored 0.66-0.78 and never crossed 0.80; the screen read again after a
+#: wait scored 0.85 eight times out of eight -- the first frame was the login page still
+#: finishing. Below this floor the chat model takes the step at once.
+SECOND_LOOK_FLOOR = 0.60
 #: A ceiling on the journey, not a documented API limit -- the SDK publishes none. It exists
 #: because this model is documented to lose accuracy as the state fills with material that is not
 #: about the decision, and a run's journey grows every step.
@@ -372,6 +377,7 @@ class TypeSafeNavigator:
         tools: Sequence[str] = (),
         model: str = MODEL,
         min_confidence: float = MIN_CONFIDENCE,
+        second_look_floor: float | None = None,
         action_space: str = "taps",
         shadow: bool = False,
         timeout_s: float = 10.0,
@@ -381,6 +387,11 @@ class TypeSafeNavigator:
             raise ValueError("min_confidence must sit in (0, 1]")
         if action_space not in ACTION_SPACES:
             raise ValueError(f"action_space must be one of {ACTION_SPACES}")
+        if second_look_floor is None:
+            # The default floor follows a gate set under it; an explicit one above the gate is a mistake.
+            second_look_floor = min(SECOND_LOOK_FLOOR, min_confidence)
+        if not 0 <= second_look_floor <= min_confidence:
+            raise ValueError("second_look_floor must sit in [0, min_confidence]")
         if client is None:
             from typesafe_sdk import AsyncTypeSafeClient
 
@@ -389,6 +400,7 @@ class TypeSafeNavigator:
         self.goal = goal
         self.model = model
         self.min_confidence = min_confidence
+        self.second_look_floor = second_look_floor
         self.action_space = action_space
         self.shadow = shadow
         self.timeout_s = timeout_s
@@ -414,6 +426,7 @@ class TypeSafeNavigator:
         # live as a 20-step loop. A screen mid-load re-fingerprints on every frame, so a wait is
         # keyed on the activity instead, or waiting would never be bounded at all.
         self._seen: set[tuple[str, str]] = set()
+        self._second_looks: set[str] = set()
         self._last_fingerprint: str | None = None
         self._last_activity: str | None = None
         self.proposals: list[dict[str, Any]] = []
@@ -550,6 +563,19 @@ class TypeSafeNavigator:
         record["gate"] = round(gate, 4)
         record["gate_needed"] = self.min_confidence
         if gate < self.min_confidence:
+            look_key = self._last_activity or str(fingerprint)
+            if (gate >= self.second_look_floor and WAIT_TOOL in self.offered
+                    and look_key not in self._second_looks):
+                # One more look, not one more ask: the same screen re-asked gives the same
+                # number, a screen read again after a wait may not be the same screen.
+                self._second_looks.add(look_key)
+                record["second_look"] = True
+                self._decline("second_look")
+                settle(False, "below_confidence")
+                self._pending["you_chose"] = TOOL_WORDS[WAIT_TOOL]
+                return {"tool": WAIT_TOOL, "arguments": {"idle": True},
+                        "reason": (f'System One second look: {record["kind"]} at {gate:.2f} is under '
+                                   f"{self.min_confidence:.2f}; waiting for the screen once before asking again")}
             self._decline("below_confidence")
             settle(False, "below_confidence")
             return None
@@ -650,7 +676,8 @@ class TypeSafeNavigator:
         return {
             "engine": "typesafe_system_one", "model": self.model, "shadow": self.shadow,
             "action_space": self.action_space,
-            "min_confidence": self.min_confidence, "requests": self.requests,
+            "min_confidence": self.min_confidence, "second_look_floor": self.second_look_floor,
+            "requests": self.requests,
             "input_tokens": self.input_tokens, "usd": round(self.usd, 8),
             "transcript": str(self.transcript_path) if self.transcript_path else None,
             "proposals": len(self.proposals),
