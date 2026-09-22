@@ -863,6 +863,21 @@ def test_a_step_the_chat_model_took_is_named_in_the_same_words() -> None:
         assert navigator._pending["you_chose"] == expected, tool
 
 
+def test_text_the_chat_model_typed_is_told_as_typing_never_as_a_tap() -> None:
+    """Named after the field's own menu line, a typed turn read "tap the text field so text can
+    be typed into it": the model never learned the text went in. On one live row it asked to
+    type again on every later screen of the step, eight asks at 0.88-0.97, and the step never
+    moved. The text itself stays out of the journey: it may be a password.
+    """
+    navigator = TypeSafeNavigator("send a message", client=FakeClient(), tools=[TAP_TOOL])
+    asyncio.run(navigator(FIELD_SCREEN))
+    navigator.observed("input_and_analyze", {"id": "el:field", "text": "hunter2"})
+    assert navigator._pending["you_chose"] == "type text into the text field 'Ask me anything'"
+    navigator.observed("input_and_analyze", {"id": "el:field", "text": "hunter2", "submit": True})
+    assert navigator._pending["you_chose"] == "type text into the text field 'Ask me anything' and send it"
+    assert "hunter2" not in json.dumps(navigator._pending, default=str)
+
+
 def test_a_forgotten_turn_never_reaches_the_journey() -> None:
     # A press AUA refused as stale was never sent, so it is not part of the story the model
     # reads on the next step. The harness says `forget()`; the open turn is dropped.

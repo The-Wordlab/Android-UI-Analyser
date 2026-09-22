@@ -538,7 +538,13 @@ class TypeSafeNavigator:
             self._pending["step"] = self.steps[self.step_index]
         handle = (arguments or {}).get("id")
         label = self._options.get(handle) if isinstance(handle, str) else None
-        if label:
+        if tool == "input_and_analyze" and label and label.endswith(FIELD_SUFFIX):
+            # Named after the field's tap line, typing read "tap the text field so text can be
+            # typed into it", and the model asked to type again on every later screen. The text
+            # itself stays out: it may be a secret.
+            sent = " and send it" if (arguments or {}).get("submit") else ""
+            self._pending["you_chose"] = f"type text into the text field '{label[: -len(FIELD_SUFFIX)]}'{sent}"
+        elif label:
             phrase = move_phrase(label)
             self._pending["you_chose"] = phrase[0].lower() + phrase[1:]
         else:
