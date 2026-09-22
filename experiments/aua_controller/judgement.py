@@ -1263,6 +1263,56 @@ def judge_story(frames: Sequence[Any], actions: Sequence[dict[str, Any]] = ()) -
     return story
 
 
+def outcome_question(contract: Any) -> str:
+    """The one question the outcome judge answers, with the rules that bind evidence to actions."""
+    question = "Was this goal achieved, as shown by the journey? `final` is the current screen."
+    if contract:
+        question = ("Judge the run against `authored_contract`, which is the authority here. Every "
+                    "criterion it states must hold. Return one compact `criteria` entry per "
+                    "markdown bullet, identified ONLY by `criterion_index`: zero-based source order "
+                    "(first bullet is 0). Never repeat the criterion text. Include each index exactly "
+                    "once, in source order, with a result and concise observed evidence that names "
+                    "the journey entry (its ref) showing it. A negative criterion is verified by "
+                    "evidence that the forbidden state is absent throughout its relevant journey; do "
+                    "not mark it not_applicable merely because the forbidden state did not occur. "
+                    "Reserve not_applicable for a genuinely conditional clause whose trigger did not "
+                    "occur. A criterion with several parts is verified only when every part is "
+                    "shown; it failed only when an entry shows a part to be false; a part that is "
+                    "merely absent from the evidence makes it not_verified, never failed. Decide "
+                    "each criterion once by that rule. If a criterion cannot be checked from this "
+                    "evidence, do not assume it passed: mark it not_verified and return 'unverified' "
+                    "unless another criterion is outright broken, which is 'fail'.")
+    question += (" An entry marked loading proves only what was visible at that capture, including "
+                 "a pending indicator; it does not prove a settled destination or completion -- use "
+                 "later entries for those.")
+    # A criterion of the form "doing X leaves you at Y" is verified by the screen X produced, and
+    # by no other. On 2026-09-17 a run where back from a deeplinked screen went to Home was passed
+    # 8/8 because the controller then tapped the Tools tab to recover, and that tap's screen showed
+    # the grid the criterion described; both judges cited it. The controller's recovery from a
+    # defect had manufactured the evidence that hid the defect, and the better the recovery the
+    # more convincing the false pass. Every entry carries the step that produced it, so the
+    # attribution is checkable -- it was simply not required.
+    question += (" When a criterion says that a particular action produces or leads to some state, "
+                 "verify it ONLY from the journey entry whose `step` is that action's: the screen "
+                 "that action produced. A later entry showing the asserted state does not verify it "
+                 "if a different action produced that entry -- a controller that recovers from a "
+                 "failure by navigating to the expected place itself creates such an entry, and "
+                 "crediting it to the original action reports a broken contract as met. If the entry "
+                 "that action produced does not show the asserted state, the criterion failed, "
+                 "whatever later entries show. If that step appears in some entry's steps_not_shown, "
+                 "no screen for it is in evidence: mark the criterion not_verified rather than "
+                 "assuming. This binds a criterion to the action that COMPLETES it, which is not "
+                 "always the one that starts it. When the criterion describes an outcome that "
+                 "arrives later -- work continuing in the background, a result that is there 'on "
+                 "return', a state checked after re-entering a screen -- the completing action is "
+                 "that return, re-entry or wait, and the entry IT produced is the evidence. Do not "
+                 "fail such a criterion because the starting action's entry shows work still in "
+                 "progress; that is what the contract says should happen. The rule exists to stop a "
+                 "later UNRELATED action supplying the proof, not to require an outcome before the "
+                 "contract says it arrives.")
+    return question
+
+
 async def judge_outcome(
     decider: Decider,
     *,
@@ -1350,51 +1400,7 @@ async def judge_outcome(
         context["aua_goal_progress"] = progress
     if contract:
         context["authored_contract"] = str(contract)[:12000]
-    question = "Was this goal achieved, as shown by the journey? `final` is the current screen."
-    if contract:
-        question = ("Judge the run against `authored_contract`, which is the authority here. Every "
-                    "criterion it states must hold. Return one compact `criteria` entry per "
-                    "markdown bullet, identified ONLY by `criterion_index`: zero-based source order "
-                    "(first bullet is 0). Never repeat the criterion text. Include each index exactly "
-                    "once, in source order, with a result and concise observed evidence that names "
-                    "the journey entry (its ref) showing it. A negative criterion is verified by "
-                    "evidence that the forbidden state is absent throughout its relevant journey; do "
-                    "not mark it not_applicable merely because the forbidden state did not occur. "
-                    "Reserve not_applicable for a genuinely conditional clause whose trigger did not "
-                    "occur. A criterion with several parts is verified only when every part is "
-                    "shown; it failed only when an entry shows a part to be false; a part that is "
-                    "merely absent from the evidence makes it not_verified, never failed. Decide "
-                    "each criterion once by that rule. If a criterion cannot be checked from this "
-                    "evidence, do not assume it passed: mark it not_verified and return 'unverified' "
-                    "unless another criterion is outright broken, which is 'fail'.")
-    question += (" An entry marked loading proves only what was visible at that capture, including "
-                 "a pending indicator; it does not prove a settled destination or completion -- use "
-                 "later entries for those.")
-    # A criterion of the form "doing X leaves you at Y" is verified by the screen X produced, and
-    # by no other. On 2026-09-17 a run where back from a deeplinked screen went to Home was passed
-    # 8/8 because the controller then tapped the Tools tab to recover, and that tap's screen showed
-    # the grid the criterion described; both judges cited it. The controller's recovery from a
-    # defect had manufactured the evidence that hid the defect, and the better the recovery the
-    # more convincing the false pass. Every entry carries the step that produced it, so the
-    # attribution is checkable -- it was simply not required.
-    question += (" When a criterion says that a particular action produces or leads to some state, "
-                 "verify it ONLY from the journey entry whose `step` is that action's: the screen "
-                 "that action produced. A later entry showing the asserted state does not verify it "
-                 "if a different action produced that entry -- a controller that recovers from a "
-                 "failure by navigating to the expected place itself creates such an entry, and "
-                 "crediting it to the original action reports a broken contract as met. If the entry "
-                 "that action produced does not show the asserted state, the criterion failed, "
-                 "whatever later entries show. If that step appears in some entry's steps_not_shown, "
-                 "no screen for it is in evidence: mark the criterion not_verified rather than "
-                 "assuming. This binds a criterion to the action that COMPLETES it, which is not "
-                 "always the one that starts it. When the criterion describes an outcome that "
-                 "arrives later -- work continuing in the background, a result that is there 'on "
-                 "return', a state checked after re-entering a screen -- the completing action is "
-                 "that return, re-entry or wait, and the entry IT produced is the evidence. Do not "
-                 "fail such a criterion because the starting action's entry shows work still in "
-                 "progress; that is what the contract says should happen. The rule exists to stop a "
-                 "later UNRELATED action supplying the proof, not to require an outcome before the "
-                 "contract says it arrives.")
+    question = outcome_question(contract)
     criteria = contract_criteria(contract)
     decision = await decider.decide(
         role="outcome judge (" + stance + ")", instructions=JUDGE_INSTRUCTIONS[stance] + CLAIM_NOTE,
