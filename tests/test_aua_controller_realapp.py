@@ -325,8 +325,10 @@ def test_loading_capture_reaches_judges_but_never_becomes_action_safe(tmp_path):
     for payload in judges:
         content = json.dumps(payload["messages"])
         assert "Working..." in content
-        assert "observed_transient_state" in content
-        assert "proves_settled_destination" in content
+        # The story tells the judge the same thing the old evidence_usage fields did: this
+        # capture is mid-transition and proves no settled destination.
+        assert '\\"loading\\": true' in content
+        assert "captured mid-transition" in content
 
 
 def test_realapp_tools_accept_the_current_public_mcp_schemas():
