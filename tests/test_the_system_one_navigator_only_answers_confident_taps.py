@@ -905,3 +905,20 @@ def test_a_forgotten_turn_never_reaches_the_journey() -> None:
     navigator.forget()
     asyncio.run(navigator(SCREEN))
     assert client.states[-1]["journey_so_far"] == []
+
+
+def test_a_status_bar_item_with_a_checked_field_is_not_a_switch() -> None:
+    """A raw hierarchy dump puts ``checked: false`` on every node, the status-bar clock included.
+
+    Seen on the first frame of every row: 22 status-bar nodes became "Press '11:28 [switch is
+    OFF]'" and friends, thirteen junk options that diluted the one real choice.
+    """
+    options = candidates({"elements": [
+        {"id": "el:clock", "text": "11:28", "resource_id": "com.android.systemui:id/clock",
+         "clickable": False, "checkable": False, "checked": False},
+        {"id": "el:login", "text": "Log in", "clickable": True, "checkable": False, "checked": False},
+        {"id": "el:dark", "text": "Dark mode", "clickable": True, "checkable": True, "checked": True},
+    ]})
+    assert "el:clock" not in options, "a non-interactive node is not an option because it carries a checked flag"
+    assert options["el:login"] == "Log in", "a plain button is not a switch"
+    assert options["el:dark"].endswith("[switch is ON]")

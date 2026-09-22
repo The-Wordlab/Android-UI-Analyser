@@ -170,6 +170,17 @@ def where(element: Mapping[str, Any], screen: Mapping[str, Any] | None) -> str:
     return f"unlabelled control, {down} {across} of the screen"
 
 
+def is_switch(element: Mapping[str, Any]) -> bool:
+    """A control whose checked state means something.
+
+    Compact observations carry ``checked`` only on switches. A raw hierarchy dump carries
+    ``checked: false`` on every node -- the status-bar clock, the battery icon, static text --
+    with ``checkable: false`` beside it; that first frame turned 22 status-bar nodes into
+    "switches" and thirteen junk options.
+    """
+    return "checked" in element and element.get("checkable") is not False
+
+
 def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTIONS) -> dict[str, str]:
     """Interactive ids on this screen, labelled the way a person would read them."""
     if not isinstance(observation, Mapping):
@@ -182,14 +193,14 @@ def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTION
         if not isinstance(handle, str) or not handle:
             continue
         if not (element.get("clickable") is True or element.get("editable") is True
-                or "checked" in element):
+                or is_switch(element)):
             continue
         label = next((element[key] for key in ("text", "desc", "content_desc", "resource_id", "rid")
                       if isinstance(element.get(key), str) and element[key].strip()),
                      None)
         if label is None:
             label = where(element, observation.get("screen") if isinstance(observation, Mapping) else None)
-        if "checked" in element:
+        if is_switch(element):
             label = f"{label} [switch is {'ON' if element['checked'] else 'OFF'}]"
         options[handle] = label[:90]
         if len(options) >= limit:

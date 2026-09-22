@@ -89,8 +89,10 @@ def compact_element(element: dict[str, Any], *, max_text: int = 120, keep_id: bo
             continue
         # `checked` is not like those: an off switch IS the reading, and dropping the false
         # makes it indistinguishable from an element that is no switch at all, which leaves
-        # "the X switch is off" unprovable. A None does mean no switch, and still goes.
-        if key == "checked" and value is None:
+        # "the X switch is off" unprovable. A None does mean no switch, and still goes -- and
+        # so does a raw hierarchy dump's `checked: false` on a node that says `checkable: false`
+        # (every status-bar node has one), which is no reading either.
+        if key == "checked" and (value is None or element.get("checkable") is False):
             continue
         if key in ("text", "desc", "content_desc", "resource_id", "rid") and (not isinstance(value, str) or not value.strip()):
             continue

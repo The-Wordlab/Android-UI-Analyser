@@ -63,3 +63,38 @@ def test_flags_whose_false_really_is_the_default_are_still_dropped() -> None:
     assert "scrollable" not in plain
     # A None checked means the element is no switch at all, so it carries nothing either.
     assert "checked" not in plain
+
+
+def raw_dump_frame() -> dict[str, object]:
+    """A raw hierarchy read: every node carries ``checkable: false, checked: false``."""
+    return {
+        "ok": True,
+        "observation": {
+            "screen": {"package": "com.example.demo", "source": "hierarchy"},
+            "meta": {"fingerprint": "f-raw"},
+            "elements": [
+                {"id": "el:clock", "text": "11:28", "resource_id": "com.android.systemui:id/clock",
+                 "clickable": False, "checkable": False, "checked": False, "bounds": [0, 0, 100, 40]},
+                {"id": "el:login", "text": "Log in", "clickable": True, "checkable": False,
+                 "checked": False, "bounds": [0, 100, 720, 200]},
+                {"id": "el:dark", "text": "Dark mode", "clickable": True, "checkable": True,
+                 "checked": False, "bounds": [0, 200, 720, 300]},
+            ],
+        },
+    }
+
+
+def test_a_raw_dumps_checked_false_on_a_non_switch_is_dropped() -> None:
+    """Seen on the first frame of every row: 22 status-bar nodes each carried ``checked: false``
+    and became "switches" in the navigator's menu. Only a checkable node has a reading."""
+    by_label = elements_by_label(compact_frame(raw_dump_frame()))
+    assert "checked" not in by_label["11:28"], "the status-bar clock is not a switch"
+    assert "checked" not in by_label["Log in"], "a plain button is not a switch"
+    assert by_label["Dark mode"]["checked"] is False, "a real off switch keeps its reading"
+
+
+def test_the_navigator_offers_no_status_bar_switches() -> None:
+    from experiments.aua_controller.typesafe_navigator import candidates
+    options = candidates(compact_frame(raw_dump_frame(), keep_ids=True)["observation"])
+    assert set(options) == {"el:login", "el:dark"}
+    assert options["el:login"] == "Log in" and options["el:dark"].endswith("[switch is OFF]")
