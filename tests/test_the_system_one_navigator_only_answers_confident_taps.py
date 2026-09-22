@@ -1168,13 +1168,50 @@ def test_a_direct_yes_to_is_this_step_done_moves_the_pointer_without_a_device_st
     assert "step" not in plain_client.questions[0]
 
 
-def test_an_unsure_yes_to_is_this_step_done_does_not_move_the_pointer() -> None:
-    client = ScriptedClient([("back", 0.93)], step_answers=[("done", 0.55)])
+CONFIRM_SCREEN = {
+    "ok": True,
+    "observation": {
+        "screen": {"package": "com.example.demo", "activity": ".List"},
+        "meta": {"fingerprint": "fp-confirm"},
+        "elements": [
+            {"id": "el:ask", "text": "Remove this item?", "bounds": [0, 0, 15, 7]},
+            {"id": "el:remove", "text": "Remove", "clickable": True, "bounds": [0, 8, 7, 15]},
+            {"id": "el:cancel", "text": "Cancel", "clickable": True, "bounds": [8, 8, 15, 15]},
+        ],
+    },
+}
+
+
+def test_an_unsure_yes_to_is_this_step_done_stops_the_move_that_came_with_it() -> None:
+    """Live, "tap Remove item" opened a confirm dialog. Asked on it, the step question said done at
+    0.30: too unsure to move the pointer, so the move was still about that step, and it pressed the
+    dialog's Remove at 0.83 while the next step said to cancel. The same press came in all three
+    runs of that script; of the day's 156 moves taken, only four came beside a "done" answer. A
+    move chosen for a step the model thinks may be over is not taken, and the pointer stays."""
+    menu, _ = numbered(candidates(CONFIRM_SCREEN["observation"]))
+    remove = next(number for number, label in menu.items() if label.startswith("Remove"))
+    client = ScriptedClient([(remove, 0.90)], step_answers=[("done", 0.30)])
+    navigator = TypeSafeNavigator("Tap Remove item. Then tap Cancel.", client=client, tools=WIDE_TOOLS,
+                                  action_space="full", min_confidence=0.80)
+    assert asyncio.run(navigator(CONFIRM_SCREEN)) is None, "the chat model has the turn"
+    assert navigator.report()["phase"] == {"current": 1, "of": 2}
+    assert navigator.report()["declined"] == {"step_may_be_done": 1}
+    # A back gesture chosen for a step that may be over is just as stale as a press.
+    back = ScriptedClient([("back", 0.93)], step_answers=[("done", 0.55)])
+    navigator = TypeSafeNavigator(SCRIPT, client=back, tools=WIDE_TOOLS, action_space="full",
+                                  min_confidence=0.80)
+    assert asyncio.run(navigator(FIELD_SCREEN)) is None
+    assert navigator.report()["phase"] == {"current": 1, "of": 4}
+
+
+def test_a_move_that_says_the_step_is_done_still_moves_on_beside_an_unsure_done() -> None:
+    """Both answers say the step is over; the move clears the gate on its own, as it always did."""
+    client = ScriptedClient([("achieved", 0.95), ("back", 0.93)], step_answers=[("done", 0.30)])
     navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full",
                                   min_confidence=0.80)
     action = asyncio.run(navigator(FIELD_SCREEN))
-    assert action["tool"] == "back_gesture_and_analyze", "the move is judged on its own"
-    assert navigator.report()["phase"] == {"current": 1, "of": 4}
+    assert action["tool"] == "back_gesture_and_analyze"
+    assert navigator.report()["phase"] == {"current": 2, "of": 4}
 
 
 def test_an_unsure_phase_done_is_declined_and_the_pointer_stays() -> None:

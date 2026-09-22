@@ -631,7 +631,7 @@ class TypeSafeNavigator:
             step = answers.get("step") if isinstance(answers, Mapping) else None
             if steps_remain and step is not None and step.choice == "done":
                 # A confident "already done" moves the pointer; the move it came with was about a
-                # step that is over, so it is not taken. An unsure one changes nothing.
+                # step that is over, so it is not taken.
                 verdict = {"kind": "phase_done", "via": "step_question", "choice": "done",
                            "confidence": round(step.confidence, 4), "step": self.step_index + 1,
                            "options": len(self._options)}
@@ -642,6 +642,13 @@ class TypeSafeNavigator:
                     self._record(turn)
                     self._advance()
                     continue
+                if move.choice not in FINISH_KINDS:
+                    # An unsure one leaves the pointer, but its move was still chosen for a step
+                    # that may be over. Live, that move pressed a confirm dialog's destructive
+                    # button while the next step said to cancel.
+                    self._decline("step_may_be_done")
+                    settle(False, "step_may_be_done")
+                    return None
             if steps_remain and move.choice in FINISH_KINDS:
                 # "Done" with steps still to go is a claim about the current step, not the run.
                 record["kind"] = "phase_done"
