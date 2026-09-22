@@ -186,6 +186,21 @@ def is_switch(element: Mapping[str, Any]) -> bool:
     return "checked" in element and element.get("checkable") is not False
 
 
+FIELD_SUFFIX = " (text field)"
+
+
+def move_phrase(label: str) -> str:
+    """The menu line for one control: what a person would do to it, not just its name.
+
+    A button is pressed. A field is tapped so text can be typed into it -- the same words the
+    goal uses when it asks for typing, which is how a literal reader tells the field apart from
+    the button beside it whose id happens to contain a word from the goal.
+    """
+    if label.endswith(FIELD_SUFFIX):
+        return f"Tap the text field '{label[: -len(FIELD_SUFFIX)]}' so text can be typed into it"
+    return f"Press '{label}'"
+
+
 def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTIONS) -> dict[str, str]:
     """Interactive ids on this screen, labelled the way a person would read them."""
     if not isinstance(observation, Mapping):
@@ -210,7 +225,7 @@ def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTION
             # "Press 'buttonOpenComposerAttachments'" -- and a goal that said "tap the composer"
             # matched the word, not the field, twice at 0.96 and 0.93. The role is the fact a
             # reader uses to tell a field from the button next to it.
-            label = f"{label} (text field)"
+            label = f"{label}{FIELD_SUFFIX}"
         if is_switch(element):
             label = f"{label} [switch is {'ON' if element['checked'] else 'OFF'}]"
         options[handle] = label[:90]
@@ -365,7 +380,7 @@ def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -
     # about different things. Measured over 60 real screens, three times: the merged form is
     # steadier (median confidence 0.54-0.55 against 0.47-0.48) and acts on the same taps at the
     # same accuracy. It is not faster; it is one question with one answer and nothing discarded.
-    criteria: dict[str, str] = {index: f"Press '{label}'"
+    criteria: dict[str, str] = {index: move_phrase(label)
                                 for index, label in numbered(options)[0].items()}
     criteria.update({kind: text for kind, text in ACTION_KINDS.items() if kind != "tap"})
     return {"move": Choice(instructions="What should happen next on this screen?",
@@ -457,7 +472,8 @@ class TypeSafeNavigator:
         handle = (arguments or {}).get("id")
         label = self._options.get(handle) if isinstance(handle, str) else None
         if label:
-            self._pending["you_chose"] = f"press '{label}'"
+            phrase = move_phrase(label)
+            self._pending["you_chose"] = phrase[0].lower() + phrase[1:]
         else:
             self._pending["you_chose"] = TOOL_WORDS.get(tool, tool)
 

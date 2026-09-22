@@ -199,8 +199,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
-- The System One menu now names a text field as one ("Ask me anything (text field)") and the
-  state carries its `editable` flag, so a goal that says "tap the composer and type" can tell
+- The System One menu now offers a text field as "Tap the text field 'Ask me anything' so text
+  can be typed into it" instead of "Press 'Ask me anything'", and the state carries its `editable` flag, so a goal that says "tap the composer and type" can tell
   the field from the button beside it. Live, every option read "Press '…'" and the only
   "composer" on screen was the attachments button's resource id, which the model pressed
   twice at 0.96 and 0.93; the chat model then paid to close the sheet each time.

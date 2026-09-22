@@ -1006,3 +1006,7 @@ def test_a_text_field_is_named_as_one_in_the_menu_and_in_the_state() -> None:
     state = screen_for_model({"observation": observation})
     assert {"text": "Ask me anything", "editable": True} in state["elements"]
     assert {"text": "Ask me anything"} in state["elements"], "plain text stays plain"
+    # The menu line is a move, and a field's move is not a press: you tap it to type into it.
+    criteria = build_questions(options)["move"].criteria
+    assert criteria["1"] == "Tap the text field 'Ask me anything' so text can be typed into it"
+    assert criteria["2"] == "Press 'buttonOpenComposerAttachments'"
