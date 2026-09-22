@@ -26,7 +26,7 @@ from experiments.aua_controller.typesafe_navigator import (  # noqa: E402
     candidates,
     numbered,
     screen_for_model,
-    what_happened,
+    sketch,
 )
 
 SCREEN = {
@@ -225,10 +225,11 @@ def test_the_whole_journey_is_sent_not_a_list_of_tool_names() -> None:
     first, second = client.states
     assert first["journey_so_far"] == [], "nothing has happened yet"
     turn = second["journey_so_far"][0]
-    assert turn["you_chose"] == "press 'Notifications'", "the model's words, not AUA's"
-    assert turn["what_happened"].startswith("now showing:")
-    assert "[Notifications]" in turn["what_happened"], "and the journey shows what was there"
-    assert "screen_you_saw" not in turn, "a list of every label per turn is context rot"
+    assert turn == {"n": 1, "you_chose": "press 'Notifications'"}, "the model's words, and nothing else"
+    # Only the screen the last choice was made on is quoted. Quoting every screen of the run cost
+    # 23% of the tokens on replayed asks and bought no accuracy; the current screen is in full.
+    assert "[Notifications]" in second["previous_screen"]
+    assert "previous_screen" not in first, "there is no previous screen yet"
 
 
 def test_a_screen_that_did_not_move_is_said_so_in_the_journey() -> None:
@@ -238,9 +239,8 @@ def test_a_screen_that_did_not_move_is_said_so_in_the_journey() -> None:
     asyncio.run(navigator(SCREEN))
     navigator.observed(TAP_TOOL, {"id": "el:aaa"})
     asyncio.run(navigator(SCREEN))
-    said = client.states[1]["journey_so_far"][0]["what_happened"]
-    assert said.startswith("the screen did not change")
-    assert "Notifications" in said, "and it says which screen refused to move"
+    turn = client.states[1]["journey_so_far"][0]
+    assert turn["screen_did_not_change"] is True
 
 
 class WideClient(FakeClient):
@@ -455,12 +455,6 @@ def test_ending_a_run_as_hopeless_is_still_the_chat_models_call() -> None:
         assert navigator.report()["declined"] == {f"kind:{kind}": 1}
 
 
-def test_a_screen_with_no_readable_labels_still_says_it_moved() -> None:
-    # A canvas, a game, a WebView that announces nothing: there is no sketch to draw, and the
-    # one-bit answer is all there is. It must not come out blank.
-    from experiments.aua_controller.typesafe_navigator import what_happened
-
-    assert what_happened({"change": {"activity_changed": True}}, moved=True) == "the screen changed"
 
 
 def test_a_screen_that_barely_moved_shows_it_is_the_same_screen() -> None:
@@ -468,12 +462,9 @@ def test_a_screen_that_barely_moved_shows_it_is_the_same_screen() -> None:
     # the login was in flight. Told "screen changed", the navigator pressed sign-in again. Told
     # "2 controls appeared, 2 went away", it had no way to know which screen that was. The words
     # say it: this is still the sign-in page.
-    from experiments.aua_controller.typesafe_navigator import what_happened
-
-    said = what_happened({"change": {"activity_changed": False},
+    said = sketch({"change": {"activity_changed": False},
                           "observation": {"elements": [{"text": "Sign in", "clickable": True},
-                                                       {"text": "Forgot password?"}]}},
-                         moved=True)
+                                                       {"text": "Forgot password?"}]}})
     assert "[Sign in]" in said and "Forgot password?" in said
     assert "still working" not in said, "nothing is inferred; the screen speaks for itself"
 
@@ -481,45 +472,29 @@ def test_a_screen_that_barely_moved_shows_it_is_the_same_screen() -> None:
 def test_a_relabel_shows_the_new_label() -> None:
     # A control that only changed its text used to be counted and never quoted, so "2 were
     # relabelled" left the one fact that mattered -- what it now says -- out of the journey.
-    from experiments.aua_controller.typesafe_navigator import what_happened
-
-    said = what_happened({"change": {"activity_changed": False},
-                          "observation": {"elements": [{"text": "Signing in…"}]}}, moved=True)
+    said = sketch({"change": {"activity_changed": False},
+                          "observation": {"elements": [{"text": "Signing in…"}]}})
     assert "Signing in…" in said
 
 
 def test_nothing_about_the_meaning_of_a_change_is_ever_asserted() -> None:
     # One control changing IS the completed action on a settings toggle, and IS mid-flight work
     # on a login. No wording can be right for both, so the journey states and never interprets.
-    from experiments.aua_controller.typesafe_navigator import what_happened
-
-    said = what_happened({"change": {"activity_changed": False},
-                          "observation": {"elements": [{"text": "Dark mode", "checked": True}]}},
-                         moved=True)
+    said = sketch({"change": {"activity_changed": False},
+                          "observation": {"elements": [{"text": "Dark mode", "checked": True}]}})
     for guess in ("still working", "loading", "in progress", "finished", "succeeded"):
         assert guess not in said, guess
 
 
 def test_a_pressable_control_is_marked_and_a_label_is_not() -> None:
     # "What could I have pressed on that screen" is the question a journey turn gets read for.
-    from experiments.aua_controller.typesafe_navigator import what_happened
-
-    said = what_happened({"observation": {"elements": [{"text": "Settings", "clickable": True},
-                                                       {"text": "Version 1.2.3"}]}}, moved=True)
+    said = sketch({"observation": {"elements": [{"text": "Settings", "clickable": True},
+                                                       {"text": "Version 1.2.3"}]}})
     assert "[Settings]" in said and "Version 1.2.3" in said and "[Version" not in said
 
 
-def test_an_unmoved_screen_still_says_so_whatever_the_frame_carries() -> None:
-    from experiments.aua_controller.typesafe_navigator import what_happened
-
-    assert what_happened({"change": {"activity_changed": True}}, moved=False) == \
-        "the screen did not change at all"
 
 
-def test_a_frame_without_change_telemetry_falls_back_to_the_old_wording() -> None:
-    from experiments.aua_controller.typesafe_navigator import what_happened
-
-    assert what_happened({}, moved=True) == "the screen changed"
 
 
 def test_finishing_is_gated_on_its_one_confidence() -> None:
@@ -661,8 +636,7 @@ def test_every_journey_turn_says_what_was_chosen_and_what_followed() -> None:
     for state in states:
         for turn in state["journey_so_far"]:
             assert turn["you_chose"] and turn["you_chose"] != "(nothing yet)"
-            assert turn["what_happened"]
-            assert "_label" not in turn
+            assert "what_happened" not in turn and "_label" not in turn and "_screen" not in turn
 
 
 def test_a_step_the_chat_model_took_still_appears_in_the_journey() -> None:
@@ -843,28 +817,23 @@ def test_a_turn_shows_the_screen_it_landed_on() -> None:
     and the model has to decide whether it is looping. The labels can. The current screen is in
     the state in full; what the journey was missing is what the *earlier* ones looked like.
     """
-    landed = what_happened({"observation": {"elements": [
+    landed = sketch({"observation": {"elements": [
         {"text": "Welcome back"},
         {"text": "Sign in", "clickable": True},
         {"text": "Browse as a guest", "clickable": True},
-    ]}}, moved=True)
+    ]}})
     assert "Welcome back" in landed
     assert "[Sign in]" in landed, "a pressable control is marked as one"
     assert "Browse as a guest" in landed
     assert "controls appeared" not in landed
 
 
-def test_a_screen_that_did_not_move_still_says_so_first() -> None:
-    """The one-bit answer is what says "your tap did nothing"; the labels do not replace it."""
-    landed = what_happened({"observation": {"elements": [{"text": "Welcome back"}]}}, moved=False)
-    assert landed.startswith("the screen did not change")
-    assert "Welcome back" in landed
 
 
 def test_a_long_screen_is_cut_short() -> None:
     """A journey turn carrying forty labels buys context rot on a model documented to suffer it."""
     many = {"observation": {"elements": [{"text": f"Row number {n}"} for n in range(40)]}}
-    landed = what_happened(many, moved=True)
+    landed = sketch(many)
     assert len(landed) < 400
     assert "Row number 0" in landed
 
@@ -1113,8 +1082,10 @@ def test_jev_is_asked_about_the_current_phase_not_the_whole_script() -> None:
     state = client.states[0]
     assert state["goal"] == "Tap the top-left menu and look at it"
     assert state["done_before_this"] == []
-    assert state["still_to_do_after_this"] == ["close it", "Send one short message and wait for the reply",
-                                               "open the menu and look again"]
+    # One step at a time: the rest of the script is not listed. Offered at the bottom, the next
+    # step was *done* instead of the current one: on replayed asks Jev pressed the menu at
+    # 0.84-0.98 while the step said to send a message.
+    assert "still_to_do_after_this" not in state and "next_step" not in state
     # Live, the finish line still read "nothing further is needed" beside a list of steps still
     # to do, and a true "this step is done" came back at 0.73 and 0.49; reworded for a step it
     # came back at 0.88 on the same screen.
@@ -1220,3 +1191,17 @@ def test_every_ask_in_the_transcript_names_the_screen_it_was_about(tmp_path: Pat
     turns = [json.loads(line) for line in (tmp_path / "jev.jsonl").read_text().splitlines()]
     assert [t["call"] for t in turns] == [1, 2, 3]
     assert [t["screen_seq"] for t in turns] == [1, 1, 2], "two asks about the first screen, one about the second"
+
+
+def test_each_journey_turn_names_the_step_it_was_taken_on() -> None:
+    client = ScriptedClient([("1", 0.95), ("achieved", 0.95), ("back", 0.93)])
+    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    action = asyncio.run(navigator(FIELD_SCREEN))
+    navigator.observed(action["tool"], action["arguments"])
+    moved = {"ok": True, "observation": {**FIELD_SCREEN["observation"], "meta": {"fingerprint": "fp-2"}}}
+    asyncio.run(navigator(moved))
+    journey = client.states[-1]["journey_so_far"]
+    assert journey[0] == {"n": 1, "step": "Tap the top-left menu and look at it",
+                          "you_chose": "press 'hamburger menu button, opens the side drawer'"}
+    assert journey[1] == {"n": 2, "step": "Tap the top-left menu and look at it", "you_chose": "said this step was done"}
+    assert client.states[-1]["goal"] == "close it"

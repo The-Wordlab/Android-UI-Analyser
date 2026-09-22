@@ -41,9 +41,11 @@ gate  steps acted on  same control the run tapped
 ====  ==============  ===========================
 
 Every row of that table moved when the journey started quoting screens instead of counting
-controls (see ``what_happened``): at 0.85 it was 19 steps at 74%, and is now 26 at 83% -- more
-coverage *and* more accuracy, which is not a trade. That was the single largest measured change
-to this navigator, larger than the question shape and far larger than the threshold.
+controls: at 0.85 it was 19 steps at 74%, and is now 26 at 83% -- more coverage *and* more
+accuracy, which is not a trade. Once a brief is read one step at a time, quoting *every* earlier
+screen stopped paying: replayed on 24 saved asks, a journey of choices plus only the screen the
+last choice was made on (``previous_screen``) matched it (8 vs 7 asks at 0.80 or more) on 23%
+fewer tokens.
 
 0.85 stays the default. 0.90 is now a real alternative for the first time -- it was within noise
 of 0.85 under the old journey and is worth about ten points of fidelity under this one, for a
@@ -290,20 +292,7 @@ def sketch(result: Any) -> str:
     return " · ".join(labels)
 
 
-def what_happened(result: Any, moved: bool) -> str:
-    """Whether the last action moved the screen, and what the screen then said.
 
-    This began as a boolean off the fingerprint, so a button losing its label mid-login read like
-    arriving somewhere new. The repair after that reported counts -- "7 controls appeared, 2 went
-    away, out of 32" -- which are facts, but facts about a screen the model never sees: they
-    cannot tell a login page from a settings list, and telling those apart is exactly how a model
-    knows it is going in circles. The labels can. The one-bit answer stays in front of them,
-    because "your tap did nothing" is not recoverable from a screen that looks plausible.
-    """
-    seen = sketch(result)
-    if not moved:
-        return f"the screen did not change: {seen}" if seen else "the screen did not change at all"
-    return f"now showing: {seen}" if seen else "the screen changed"
 
 def screen_for_model(compact: Mapping[str, Any] | None) -> dict[str, Any]:
     """The screen with everything the model cannot read taken out.
@@ -519,6 +508,7 @@ class TypeSafeNavigator:
         # keyed on the activity instead, or waiting would never be bounded at all.
         self._seen: set[tuple[str, str]] = set()
         self._second_looks: set[str] = set()
+        self._previous_screen = ""
         # One number per screen this navigator was shown; every ask about that screen carries it,
         # so a reader can pair a step's several asks (a step declared done is re-asked) with the step.
         self._screen_seq = 0
@@ -543,6 +533,9 @@ class TypeSafeNavigator:
         """
         if self._pending is None:
             return
+        if self.steps:
+            # The step the run is on when it acts; a step declared done on this screen moved it.
+            self._pending["step"] = self.steps[self.step_index]
         handle = (arguments or {}).get("id")
         label = self._options.get(handle) if isinstance(handle, str) else None
         if label:
@@ -574,13 +567,21 @@ class TypeSafeNavigator:
         # Leaving a turn open across a decline closed it later against a screen it never saw,
         # which is how a tap on Notifications came back as "scroll_and_analyze on '?'".
         if self._pending is not None:
-            self._pending["what_happened"] = what_happened(
-                result, moved=fingerprint != self._last_fingerprint)
+            # A turn is what was chosen, on which step; the screen it was chosen on is kept only
+            # for the last turn. "Your tap did nothing" is the one fact a screen that looks
+            # plausible cannot tell, so an unmoved screen still says so.
+            self._previous_screen = self._pending.pop("_screen", "")
+            if fingerprint == self._last_fingerprint:
+                self._pending["screen_did_not_change"] = True
             self._journey.append(self._pending)
         self._last_fingerprint = fingerprint if isinstance(fingerprint, str) else None
         self._last_activity = activity if isinstance(activity, str) else self._last_activity
         # Opened for every step. Whoever acts, `observed` fills it in.
-        self._pending = {"n": len(self._journey) + 1, "you_chose": "(nothing yet)"}
+        self._pending = {"n": len(self._journey) + 1}
+        if self.steps:
+            self._pending["step"] = self.steps[self.step_index]
+        self._pending["you_chose"] = "(nothing yet)"
+        self._pending["_screen"] = sketch(compact)
         self._screen_seq += 1
 
         if not self.can_tap:
@@ -703,23 +704,26 @@ class TypeSafeNavigator:
         # accuracy. Oldest turns go first -- a loop is made of the recent ones.
         while len(json.dumps(journey, default=str)) > MAX_JOURNEY_CHARS and journey:
             journey.pop(0)
+        # The rest of the script is not listed. Offered at the bottom as `next_step`, it was done
+        # instead of the current step: replayed, Jev pressed the menu at 0.84-0.98 while the step
+        # said to send a message. The current step is the only instruction.
         state: dict[str, Any] = {"goal": self.goal}
         if self.steps:
             state["goal"] = self.steps[self.step_index]
             state["done_before_this"] = self.steps[: self.step_index]
-            state["still_to_do_after_this"] = self.steps[self.step_index + 1:]
-        state["journey_so_far"] = journey
+        state["journey_so_far"] = [{k: v for k, v in turn.items() if not k.startswith("_")} for turn in journey]
+        if self._previous_screen:
+            state["previous_screen"] = self._previous_screen
         state["this_is_the_new_screen"] = screen_for_model(compact)
         return state
 
     def _advance(self) -> None:
         """The current step is done: move the pointer and say so in the journey."""
         done, self.step_index = self.steps[self.step_index], self.step_index + 1
-        self._journey.append({"n": len(self._journey) + 1,
-                              "you_chose": f"said the step '{done}' was done",
-                              "what_happened": f"the next step is '{self.steps[self.step_index]}'"})
+        self._journey.append({"n": len(self._journey) + 1, "step": done, "you_chose": "said this step was done"})
         if self._pending is not None:
             self._pending["n"] = len(self._journey) + 1
+            self._pending["step"] = self.steps[self.step_index]
 
     async def _ask(self, compact: Mapping[str, Any], questions: Mapping[str, Any]):
         """One request; ``None`` when it failed, else the transcript turn and every answer."""
@@ -869,4 +873,4 @@ class TypeSafeNavigator:
 __all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered", "goal_steps", "STEP_DONE_KINDS", "STEP_QUESTION",
            "MODEL", "MIN_CONFIDENCE",
            "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "WAIT_TOOL", "SCROLL_KINDS",
-           "FINISH_OUTCOMES", "FINISH_KINDS", "build_questions", "what_happened", "candidates", "tool_names"]
+           "FINISH_OUTCOMES", "FINISH_KINDS", "build_questions", "sketch", "candidates", "tool_names"]
