@@ -186,6 +186,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Changed
 
+- The System One gate now also takes a pick whose own probability clears the gate while its
+  confidence sits between 0.60 and the gate. Jev reports both numbers and the confidence runs a
+  median 0.03 under the top probability (never more than 0.07 over 399 saved answers); measured
+  on 112 aligned steps the picks this admits were three for three right, each of which had cost
+  a wait, a re-ask and a chat-model call for the very press it named.
 - Maps learned by an older AUA (map schema below 5) retire themselves on first load, on every
   install: screens, routes, contexts and research questions are archived beside the map as
   `index.v4.json` and rebuilt from scratch, while taught knowledge, deeplinks, recipes, notes,

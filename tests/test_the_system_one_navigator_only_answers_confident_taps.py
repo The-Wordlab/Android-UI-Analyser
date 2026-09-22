@@ -45,10 +45,11 @@ SCREEN = {
 
 class FakeClient:
     def __init__(self, kind="tap", target="1", kind_conf=0.99, target_conf=0.95,
-                 settled=0.02, error=None):
+                 settled=0.02, error=None, probability=None):
         self.kind, self.target = kind, target
         self.kind_conf, self.target_conf, self.settled = kind_conf, target_conf, settled
         self.error = error
+        self.probability = probability  # the pick's own entry in `probabilities`, when the test sets one
         self.calls = 0
 
     async def system_one(self, *, state, questions, model, timeout=None):
@@ -59,10 +60,10 @@ class FakeClient:
         # "press whichever control `target` names" and every other kind answers as itself.
         choice = self.target if self.kind == "tap" else self.kind
         confidence = self.target_conf if self.kind == "tap" else self.kind_conf
-        return SimpleNamespace(
-            answers={"move": SimpleNamespace(choice=choice, confidence=confidence)},
-            usage=SimpleNamespace(input_tokens=430),
-        )
+        move = SimpleNamespace(choice=choice, confidence=confidence)
+        if self.probability is not None:
+            move.probabilities = {choice: self.probability}
+        return SimpleNamespace(answers={"move": move}, usage=SimpleNamespace(input_tokens=430))
 
 
 def propose(client, **kwargs):
@@ -1010,3 +1011,29 @@ def test_a_text_field_is_named_as_one_in_the_menu_and_in_the_state() -> None:
     criteria = build_questions(options)["move"].criteria
     assert criteria["1"] == "Tap the text field 'Ask me anything' so text can be typed into it"
     assert criteria["2"] == "Press 'buttonOpenComposerAttachments'"
+
+
+def test_a_pick_whose_probability_clears_the_gate_is_taken_at_a_lower_confidence() -> None:
+    # Live: the right control at confidence 0.79, probability 0.81, gate 0.80. The near miss bought
+    # a wait, a re-ask at 0.75, another at 0.76 and then a chat-model call for the same press.
+    # Jev reports both numbers; confidence runs a median 0.03 under the top probability and
+    # never more than 0.07 over 399 saved answers, so a probability over the gate is the same
+    # statement in the model's other voice.
+    action, navigator = propose(FakeClient(target_conf=0.79, probability=0.81), min_confidence=0.80)
+    assert action == {"tool": TAP_TOOL, "arguments": {"id": "el:aaa"}, "reason": action["reason"]}
+    assert "probability 0.81" in action["reason"]
+    assert navigator.report()["accepted"] == 1
+
+
+def test_the_probability_clause_keeps_a_confidence_floor() -> None:
+    # A probability alone is not enough: under 0.60 confidence the model is saying it is unsure
+    # whatever the distribution looks like, and unsure presses were the measured wrong ones.
+    action, navigator = propose(FakeClient(target_conf=0.59, probability=0.90), min_confidence=0.80)
+    assert action is None
+    assert navigator.report()["declined"] == {"below_confidence": 1}
+
+
+def test_a_probability_under_the_gate_does_not_rescue_a_near_miss() -> None:
+    action, navigator = propose(FakeClient(target_conf=0.79, probability=0.79), min_confidence=0.80)
+    assert action is None
+    assert navigator.report()["declined"] == {"below_confidence": 1}

@@ -70,6 +70,13 @@ MIN_CONFIDENCE = 0.85  # measured; see the module docstring -- the threshold is 
 #: wait scored 0.85 eight times out of eight -- the first frame was the login page still
 #: finishing. Below this floor the chat model takes the step at once.
 SECOND_LOOK_FLOOR = 0.60
+#: A pick whose own probability clears the gate is taken when its confidence is at least this,
+#: although that confidence sits under the gate. Jev reports both numbers: over 399 saved answers
+#: the confidence ran a median 0.03 under the top probability and never more than 0.07, so a
+#: probability over the gate is the same judgement in the model's other voice. Measured on 112
+#: aligned steps, the picks this admits were three for three right (0.79/0.82, 0.79/0.81,
+#: 0.77/0.80); each had cost a wait, a re-ask and a chat-model call for the very press it named.
+PROBABILITY_GATE_FLOOR = 0.60
 #: A ceiling on the journey, not a documented API limit -- the SDK publishes none. It exists
 #: because this model is documented to lose accuracy as the state fills with material that is not
 #: about the decision, and a run's journey grows every step.
@@ -582,9 +589,15 @@ class TypeSafeNavigator:
         # One question, one answer, one number -- `min()` of two confidences about different
         # things was never a statement about this decision.
         gate = move.confidence
+        probability = float((getattr(move, "probabilities", None) or {}).get(str(move.choice), 0.0) or 0.0)
         record["gate"] = round(gate, 4)
         record["gate_needed"] = self.min_confidence
-        if gate < self.min_confidence:
+        record["probability"] = round(probability, 4)
+        by_probability = (PROBABILITY_GATE_FLOOR <= gate < self.min_confidence
+                          and probability >= self.min_confidence)
+        if by_probability:
+            record["accepted_by"] = "probability"
+        if gate < self.min_confidence and not by_probability:
             look_key = self._last_activity or str(fingerprint)
             if (gate >= self.second_look_floor and WAIT_TOOL in self.offered
                     and look_key not in self._second_looks):
@@ -618,8 +631,9 @@ class TypeSafeNavigator:
         if screen_key is not None:
             self._seen.add(pair)
         self._pending["you_chose"] = f"{tool} on '{label}'"
+        voice = f" (probability {probability:.2f})" if by_probability else ""
         return {"tool": tool, "arguments": arguments,
-                "reason": f'System One {record["kind"]} at confidence {gate:.2f}: {label}'}
+                "reason": f'System One {record["kind"]} at confidence {gate:.2f}{voice}: {label}'}
 
     def _plan(self, move, by_index):
         """Bind the one chosen move to an offered tool, or say why it cannot be.
