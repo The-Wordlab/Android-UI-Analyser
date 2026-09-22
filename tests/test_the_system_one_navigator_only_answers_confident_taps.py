@@ -1110,6 +1110,16 @@ def test_jev_is_asked_about_the_current_phase_not_the_whole_script() -> None:
     assert state["done_before_this"] == []
     assert state["still_to_do_after_this"] == ["close it", "Send one short message and wait for the reply",
                                                "open the menu and look again"]
+    # Live, the finish line still read "nothing further is needed" beside a list of steps still
+    # to do, and a true "this step is done" came back at 0.73 and 0.49; reworded for a step it
+    # came back at 0.88 on the same screen.
+    criteria = client.questions[0]["move"].criteria
+    assert criteria["achieved"] == "This step is done; the run should move on to the next step"
+    assert criteria["already_satisfied"].startswith("This step was already true")
+    # On the last step, and on a goal with no steps, finishing means what it always meant.
+    last = ScriptedClient([("achieved", 0.95)] * 4)
+    asyncio.run(TypeSafeNavigator(SCRIPT, client=last, tools=WIDE_TOOLS, action_space="full")(FIELD_SCREEN))
+    assert last.questions[-1]["move"].criteria["achieved"].startswith("The goal was carried out")
 
 
 def test_a_goal_without_sequence_words_is_sent_whole() -> None:

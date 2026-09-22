@@ -372,11 +372,24 @@ def numbered(options: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]
     return criteria, by_index
 
 
-def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -> dict[str, Any]:
+#: What finishing means while the script has steps to go: the step is done, not the run. Live,
+#: the run-level line ("nothing further is needed") sat beside a list of steps still to do, and a
+#: true "this step is done" came back at 0.73 and 0.49 -- under the gate, so the pointer never
+#: moved and every later ask was about a step the run had long finished. Reworded, the same
+#: screen came back at 0.88.
+STEP_DONE_KINDS: dict[str, str] = {
+    "achieved": "This step is done; the run should move on to the next step",
+    "already_satisfied": "This step was already true before anything was done; move on to the next step",
+}
+
+
+def build_questions(options: Mapping[str, str], *, action_space: str = "taps",
+                    steps_remain: bool = False) -> dict[str, Any]:
     """One question naming every move this screen allows, finishing included.
 
     A press is not an action plus a separate operand; each pressable control *is* an action, and
-    so is each way of finishing: the outcome `session_finish` records is the move itself.
+    so is each way of finishing: the outcome `session_finish` records is the move itself. With
+    ``steps_remain`` the two finish lines speak of the current step, not the run.
     """
     from typesafe_sdk import Choice
 
@@ -398,6 +411,8 @@ def build_questions(options: Mapping[str, str], *, action_space: str = "taps") -
                                 for index, label in numbered(options)[0].items()
                                 if lone is None or not label.endswith(FIELD_SUFFIX)}
     actions = dict(ACTION_KINDS)
+    if steps_remain:
+        actions.update(STEP_DONE_KINDS)
     if lone is not None:
         actions["type"] = f"Type text into the text field '{lone}'"
     criteria.update({kind: text for kind, text in actions.items() if kind != "tap"})
@@ -557,12 +572,13 @@ class TypeSafeNavigator:
             self._decline("too_few_controls")
             return None
 
-        questions = build_questions(self._options, action_space=self.action_space)
         by_index = numbered(self._options)[1]
         # One ask per step the model may declare done on this screen, plus the move itself. A
         # step declared done costs a second question, never a device step, and the pointer only
         # ever moves forward, so this is bounded by the script's length.
         for _ in range(len(self.steps) + 1):
+            questions = build_questions(self._options, action_space=self.action_space,
+                                        steps_remain=bool(self.steps) and self.step_index < len(self.steps) - 1)
             asked = await self._ask(compact, questions)
             if asked is None:
                 return None
@@ -808,7 +824,7 @@ class TypeSafeNavigator:
         }
 
 
-__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered", "goal_steps",
+__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered", "goal_steps", "STEP_DONE_KINDS",
            "MODEL", "MIN_CONFIDENCE",
            "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "WAIT_TOOL", "SCROLL_KINDS",
            "FINISH_OUTCOMES", "FINISH_KINDS", "build_questions", "what_happened", "candidates", "tool_names"]
