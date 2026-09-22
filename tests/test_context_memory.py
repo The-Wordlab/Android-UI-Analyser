@@ -9,7 +9,6 @@ from typer.testing import CliRunner
 from android_ui_analyser.cli import app as cli_app
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.memory import (
-    LEGACY_CONTEXT_ID,
     AppMemoryStore,
     RouteStep,
     _shortest_path,
@@ -31,7 +30,10 @@ from test_memory import APPS, HOME, SETTINGS_XML, P, _elements, _hier, _node, _s
 runner = CliRunner()
 
 
-def test_v2_map_migrates_to_trusted_legacy_context(tmp_path) -> None:
+def test_v2_map_is_retired_but_its_legacy_note_becomes_knowledge(tmp_path) -> None:
+    """A map learned under an old schema is set aside; what was taught survives the reset."""
+    from android_ui_analyser.memory import MEMORY_SCHEMA_VERSION
+
     store = _store(tmp_path)
     store.record_screen(package=P, elements=_elements(HOME), name_hint="home")
     store.remember_note(P, "Apps differs by feature flag")
@@ -56,10 +58,10 @@ def test_v2_map_migrates_to_trusted_legacy_context(tmp_path) -> None:
 
     migrated = store.load(P)
 
-    assert migrated is not None and migrated.schema_version == 4
-    assert migrated.contexts[LEGACY_CONTEXT_ID].verified is True
-    assert migrated.screens["home"].context_id == LEGACY_CONTEXT_ID
-    assert migrated.screens["home"].id
+    assert migrated is not None and migrated.schema_version == MEMORY_SCHEMA_VERSION
+    assert migrated.screens == {} and migrated.routes == []
+    archived = json.loads((store.app_dir(P) / "index.v2.json").read_text(encoding="utf-8"))
+    assert "home" in archived["screens"]
     assert any(
         item.text == "Apps differs by feature flag"
         and item.source == "legacy"
@@ -249,9 +251,7 @@ def test_generic_shell_roots_do_not_override_destination_resource(tmp_path) -> N
         ),
     )
 
-    outcome = store.record_screen(
-        package=P, elements=_elements(conversation), screen_height=800
-    )
+    outcome = store.record_screen(package=P, elements=_elements(conversation), screen_height=800)
 
     assert outcome.name == "conversation"
 
@@ -418,20 +418,12 @@ def test_navigation_never_crosses_feature_flag_contexts(tmp_path) -> None:
         context_id=context_b,
         context_flags={"catalog_experiment": "b"},
     )
-    store.record_route(
-        P, home_a.name, target_a.name, "tap 'Open'", context_id=context_a
-    )
-    store.record_route(
-        P, home_b.name, target_b.name, "tap 'Open'", context_id=context_b
-    )
+    store.record_route(P, home_a.name, target_a.name, "tap 'Open'", context_id=context_a)
+    store.record_route(P, home_b.name, target_b.name, "tap 'Open'", context_id=context_b)
     app = store.load(P)
 
-    assert _shortest_path(
-        app, target_b.name, start=home_a.name, context_id=context_a
-    ) == []
-    assert resolve_goal(
-        app, target_b.name, start=home_a.name, context_id=context_a
-    ) is None
+    assert _shortest_path(app, target_b.name, start=home_a.name, context_id=context_a) == []
+    assert resolve_goal(app, target_b.name, start=home_a.name, context_id=context_a) is None
 
 
 def test_research_hints_are_scoped_to_active_flag_context(tmp_path) -> None:
@@ -533,25 +525,18 @@ def test_auto_routes_are_provisional_until_observed_twice(tmp_path) -> None:
     store = _store(tmp_path)
     serial = "route-verification"
     store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
-    store.observe_action(
-        serial, RouteStep(kind="tap", label="Apps", resource_id="nav_apps")
-    )
+    store.observe_action(serial, RouteStep(kind="tap", label="Apps", resource_id="nav_apps"))
     store.observe_screen(serial, package=P, elements=_elements(APPS), screen_height=800)
 
     first_map = store.load(P)
     edge = next(route for route in first_map.routes if route.to_screen == "apps")
     assert edge.status == "provisional"
     assert _shortest_path(first_map, "apps", start=edge.from_screen) == []
-    assert any(
-        task["issue_type"] == "provisional_route"
-        for task in first_map.research_tasks
-    )
+    assert any(task["issue_type"] == "provisional_route" for task in first_map.research_tasks)
 
     store.observe_action(serial, RouteStep(kind="key", arg="back"))
     store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
-    store.observe_action(
-        serial, RouteStep(kind="tap", label="Apps", resource_id="nav_apps")
-    )
+    store.observe_action(serial, RouteStep(kind="tap", label="Apps", resource_id="nav_apps"))
     store.observe_screen(serial, package=P, elements=_elements(APPS), screen_height=800)
 
     verified_map = store.load(P)
@@ -560,8 +545,7 @@ def test_auto_routes_are_provisional_until_observed_twice(tmp_path) -> None:
     assert edge.verification_count == 1
     assert len(_shortest_path(verified_map, "apps", start=edge.from_screen)) == 1
     assert not any(
-        task["issue_type"] == "provisional_route"
-        and edge.id in task["affected_ids"]
+        task["issue_type"] == "provisional_route" and edge.id in task["affected_ids"]
         for task in verified_map.research_tasks
     )
 
@@ -571,9 +555,7 @@ def test_unlabeled_route_is_rejected_and_pushed_as_research(tmp_path) -> None:
     serial = "route-rejection"
     store.observe_screen(serial, package=P, elements=_elements(HOME), screen_height=800)
     store.observe_action(serial, RouteStep(kind="tap"))
-    store.observe_screen(
-        serial, package=P, elements=_elements(SETTINGS_XML), screen_height=800
-    )
+    store.observe_screen(serial, package=P, elements=_elements(SETTINGS_XML), screen_height=800)
     app_map = store.load(P)
     edge = app_map.routes[0]
     hints = store.navigation_hints(serial, P)
@@ -671,9 +653,7 @@ def test_cli_knowledge_and_reconcile_contract(tmp_path) -> None:
     planned = runner.invoke(cli_app, ["reconcile", "plan", "--app", P])
     assert planned.exit_code == 0, planned.stderr
     task = next(
-        item
-        for item in json.loads(planned.stdout)["tasks"]
-        if item["issue_type"] == "poor_name"
+        item for item in json.loads(planned.stdout)["tasks"] if item["issue_type"] == "poor_name"
     )
     report_path = tmp_path / "report.json"
     report_path.write_text(

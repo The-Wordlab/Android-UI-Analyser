@@ -40,6 +40,7 @@ from urllib.parse import parse_qsl, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from .atomic import atomic_write_text
+from .layout import build_layout, render_layout
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .config import LogsCfg, MemoryCfg
@@ -47,7 +48,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger("android_ui_analyser.memory")
 
-MEMORY_SCHEMA_VERSION = 4
+MEMORY_SCHEMA_VERSION = 5
+#: A map saved below this version has its *learned* half — screens, routes, contexts,
+#: research — retired on first load and rebuilt from scratch; what an agent or a person
+#: *taught* (knowledge, deeplinks, recipes, notes, launch, vocabulary) is kept. Raise it only
+#: when old learned data would mislead the new AUA: every install then starts clean on its
+#: own, with the old map archived beside the new one as ``index.v<N>.json``.
+MEMORY_LEARNING_FLOOR = 5
 LEGACY_CONTEXT_ID = "legacy-default"
 DEFAULT_CONTEXT_ID = "default"
 
@@ -301,6 +308,8 @@ class ScreenRecord(BaseModel):
     # ``_READOPT_SIGHTINGS`` and the re-anchoring branch in ``record_screen``.
     pending_anchors: list[str] = Field(default_factory=list)
     pending_anchor_hits: int = 0
+    # What is where, as a rendered text tree (``layout.render_layout``); refreshed per visit.
+    layout: str | None = None
 
 
 def screen_skips_ocr(rec: ScreenRecord, *, min_hierarchy_ok: int = 3) -> bool:
@@ -2212,14 +2221,52 @@ class AppMemoryStore:
     def load(self, package: str) -> AppMap | None:
         if self._sqlite is not None:
             app = self._sqlite.load_app(package)
-            return upgrade_app_map(app) if app is not None else None
-        path = self.index_path(package)
-        if not path.is_file():
+        else:
+            path = self.index_path(package)
+            if not path.is_file():
+                return None
+            try:
+                app = AppMap.model_validate_json(path.read_text(encoding="utf-8"))
+            except Exception:  # pragma: no cover - corrupt file → treat as absent
+                return None
+        if app is None:
             return None
-        try:
-            return upgrade_app_map(AppMap.model_validate_json(path.read_text(encoding="utf-8")))
-        except Exception:  # pragma: no cover - corrupt file → treat as absent
-            return None
+        if app.schema_version < MEMORY_LEARNING_FLOOR:
+            app = self._retire_learning(app)
+        return upgrade_app_map(app)
+
+    def _retire_learning(self, old: AppMap) -> AppMap:
+        """Set an older map's learned half aside and keep only what was taught. Runs once."""
+        d = self.app_dir(old.package)
+        d.mkdir(parents=True, exist_ok=True)
+        archive = d / f"index.v{old.schema_version}.json"
+        atomic_write_text(archive, old.model_dump_json(indent=2))
+        learned = (len(old.screens), len(old.routes))
+        # Fold legacy notes/recipes/description into knowledge items before copying the taught half.
+        old = upgrade_app_map(old)
+        fresh = AppMap(
+            package=old.package,
+            label=old.label,
+            app_version=old.app_version,
+            description=old.description,
+            deeplinks=old.deeplinks,
+            recipes=old.recipes,
+            notes=old.notes,
+            vocabulary=old.vocabulary,
+            launch=old.launch,
+            launcher_activities=old.launcher_activities,
+            knowledge=old.knowledge,
+        )
+        logger.info(
+            "retired map %s for %s (%d screens, %d routes); kept %d knowledge items at %s",
+            archive.name,
+            old.package,
+            *learned,
+            len(old.knowledge),
+            archive,
+        )
+        self.save(fresh)  # stamps the current schema, so this happens exactly once
+        return fresh
 
     def save(self, app: AppMap) -> None:
         app = upgrade_app_map(app)
@@ -2801,6 +2848,7 @@ class AppMemoryStore:
                 tier=tier,
                 key_elements=key_elements(elements, redact=self.cfg.redact, height=screen_height),
                 dynamic=detect_dynamic(elements),
+                layout=self._layout_tree(elements, name, screen_height),
                 app_version=app_version,
                 first_seen=now,
                 last_seen=now,
@@ -2891,6 +2939,8 @@ class AppMemoryStore:
                     rec.key_elements = ke
                 if dyn := detect_dynamic(elements):
                     rec.dynamic = dyn
+                if tree := self._layout_tree(elements, rec.name, screen_height):
+                    rec.layout = tree
                 rec.state = state
             if title:
                 title_alias = _short(title)
@@ -3761,6 +3811,15 @@ class AppMemoryStore:
         ]
         self.save_session(serial, sess)
         return proof
+
+    def _layout_tree(self, elements: list[Element], name: str, height: int | None) -> str | None:
+        """The screen's what-is-where tree as text, or ``None`` when nothing app-owned is on it."""
+        nodes = build_layout(
+            elements,
+            height=height,
+            label_of=lambda el: redact_label(el, redact=self.cfg.redact),
+        )
+        return render_layout(nodes, title=name, height=height) if nodes else None
 
     def observe_screen(
         self,
@@ -5522,6 +5581,12 @@ def _render_find(app: AppMap, query: str, context_id: str | None = None) -> str:
 def _render_screen_detail(app: AppMap, screen: str) -> str:
     rec = app.screens.get(screen)
     if rec is None:
+        variants = sorted(
+            (r for r in app.screens.values() if screen in (r.logical_name, r.canonical_name)),
+            key=lambda r: (r.context_id, r.name),
+        )
+        if variants:
+            return _render_screen_variants(app, screen, variants)
         avail = ", ".join(sorted(app.screens)) or "(none)"
         return f"# {screen}\n\n_(unknown screen; known: {avail})_\n"
     lines = [f"# {screen}  ({app.package})"]
@@ -5550,6 +5615,12 @@ def _render_screen_detail(app: AppMap, screen: str) -> str:
         lines.append("")
         lines.append("## Dynamic")
         lines.extend(f"- {d}" for d in rec.dynamic)
+    if rec.layout:
+        lines.append("")
+        lines.append("## Layout")
+        lines.append("```")
+        lines.append(rec.layout.rstrip())
+        lines.append("```")
     incoming = [e for e in app.routes if e.to_screen == screen]
     outgoing = [e for e in app.routes if e.from_screen == screen]
     if incoming or outgoing:
@@ -5560,3 +5631,25 @@ def _render_screen_detail(app: AppMap, screen: str) -> str:
         for e in outgoing:
             lines.append(f"→ {e.to_screen} ({e.action})")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_screen_variants(app: AppMap, logical: str, variants: list[ScreenRecord]) -> str:
+    """One logical screen as it looks in each feature-flag context: a layout tree per variant."""
+    lines = [f"# {logical}  ({app.package}, {len(variants)} variants)"]
+    for rec in variants:
+        context = app.contexts.get(rec.context_id)
+        flags = ", ".join(f"{k}={v}" for k, v in sorted(context.flags.items())) if context else ""
+        meta = [f"context: {rec.context_id}"]
+        if flags:
+            meta.append(flags)
+        if rec.stale:
+            meta.append("STALE")
+        lines.append("")
+        lines.append(f"## {rec.name}  ({' · '.join(meta)})")
+        if rec.layout:
+            lines.append("```")
+            lines.append(rec.layout.rstrip())
+            lines.append("```")
+        else:
+            lines.append("_(no layout recorded yet; visit it once with `aua analyze`)_")
+    return "\n".join(lines) + "\n"

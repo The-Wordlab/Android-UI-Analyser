@@ -13,6 +13,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- The app map now remembers each screen's layout tree: what is where, top to bottom, with
+  tap/scroll/input/selected marks, repeated rows collapsed and system chrome dropped.
+  `aua map --screen <name>` prints it (and `--json` carries it as `layout`); a logical name
+  prints one tree per feature-flag context. The dashboard's App map shows the same tree per
+  screen.
+
 - Opt-in `connection: existing-chrome` drives one explicitly approved, already-open Chrome tab
   through AUA's semantic UI, screenshot, diagnostics, map and flow surfaces. A bundled Manifest
   V3 extension/native host detaches on disconnect and cannot read browser cookies, history, or
@@ -179,6 +185,12 @@ notes, so you can check for a newer version — and read what changed — withou
   screen as it is now. The run summary reports `host_ignored_actions`.
 
 ### Changed
+
+- Maps learned by an older AUA (map schema below 5) retire themselves on first load, on every
+  install: screens, routes, contexts and research questions are archived beside the map as
+  `index.v4.json` and rebuilt from scratch, while taught knowledge, deeplinks, recipes, notes,
+  launch activity and vocabulary are kept. Bump `MEMORY_SCHEMA_VERSION` for any map field
+  change; raise `MEMORY_LEARNING_FLOOR` only when old learned data would mislead.
 
 - `run_realapp.py` judges with one neutral vote by default; `--judge-votes 2` still asks the
   neutral and skeptical stances to agree. Over 44 judged rows the second vote agreed 34 times,

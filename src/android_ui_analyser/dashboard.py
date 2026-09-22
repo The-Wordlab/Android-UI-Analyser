@@ -1483,6 +1483,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .knowledge-command span { color: var(--faint); font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
   .knowledge-command code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent); font-size: 0.66rem; }
   .knowledge-json { margin: 0; padding: 0.65rem; border-radius: 8px; background: rgba(3,5,11,0.72); color: #cdd2db; font: 0.62rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .knowledge-tree { margin: 0; padding: 0.65rem; border-radius: 8px; background: rgba(3,5,11,0.72); color: #e6ebf2; font: 0.68rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; overflow-x: auto; }
   .knowledge-steps { display: grid; gap: 0.35rem; margin: 0; padding: 0; list-style: none; }
   .knowledge-step { display: grid; grid-template-columns: 1.6rem minmax(0,1fr); gap: 0.45rem; padding: 0.5rem; border-radius: 8px; border: 1px solid rgba(142,157,211,0.12); background: rgba(255,255,255,0.018); }
   .knowledge-step-index { color: var(--faint); font: 0.6rem ui-monospace, monospace; }
@@ -4032,6 +4033,20 @@ function knowledgeJson(value) {
   return pre;
 }
 
+function knowledgeTree(text) {
+  // The screen's layout tree: what is where, as `aua map --screen` prints it.
+  if (!text) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No layout recorded yet — visit the screen once with analyze.';
+    return empty;
+  }
+  const pre = document.createElement('pre');
+  pre.className = 'knowledge-tree';
+  pre.textContent = text;
+  return pre;
+}
+
 function knowledgeSteps(steps, emptyMessage) {
   if (!steps || !steps.length) {
     const empty = document.createElement('div');
@@ -4115,11 +4130,14 @@ function renderKnowledge(d) {
     const name = screen.name || '?';
     const bodyData = Object.assign({}, screen);
     delete bodyData.name;
+    delete bodyData.layout;
     screenHost.appendChild(knowledgeItem(
       name,
       (screen.activity || 'No activity recorded') + (screen.stale ? ' · stale' : ''),
       [knowledgeBadge('goto target', 'ok'), knowledgeBadge((screen.visit_count || 0) + ' visits')],
       [
+        knowledgeTree(screen.layout),
+        knowledgeCommand('CLI', 'aua map --screen "' + name + '"'),
         knowledgeCommand('CLI', 'aua goto "' + name + '"'),
         knowledgeJson(bodyData),
       ],
@@ -6157,6 +6175,7 @@ class _DashboardState:
                     "anchors": s.anchors,
                     "notes": s.notes,
                     "last_verified": s.last_verified,
+                    "layout": getattr(s, "layout", None),
                 }
                 for s in screens[:80]
             ]

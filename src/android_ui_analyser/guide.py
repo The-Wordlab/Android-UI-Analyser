@@ -200,7 +200,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         'instead of re-exploring. `aua map --find "<goal>"` gives only a verified route to a '
         "target; provisional evidence is shown as no verified route, never as runnable steps. "
         "Feature-flag sets are separate contexts; use `--all-contexts` to compare variants and "
-        "`--audit` to persist ambiguous names/routes as concrete research tasks.",
+        "`--audit` to persist ambiguous names/routes as concrete research tasks. "
+        "`aua map --screen <name>` prints that screen's layout tree — what is where, top to "
+        "bottom, with ◉ tap / ↕ scroll / ✎ input / ★ selected marks and repeated rows collapsed — "
+        "and given a logical name it prints one tree per feature-flag context, so you see how "
+        "the screen looks with a flag on or off without visiting it.",
     ),
     (
         "Take shortcuts with deeplinks",
@@ -264,7 +268,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Feed research back and correct the map",
         "`aua knowledge add` stores an experience with source/agent/session/evidence so future "
-        "runs inherit it; add `--alias \"<goal phrasing>\"` for each way a goal might name the "
+        'runs inherit it; add `--alias "<goal phrasing>"` for each way a goal might name the '
         "situation, because that is what makes the fact surface in `relevant_knowledge`. AUA also creates research tasks automatically when a new map entry is "
         "ambiguous or a route is provisional/unreplayable. **The cheapest of those is answered in "
         "passing.** A response may carry `meta.ask` — a `# aua asks: …` line under `--format tsv` "
@@ -425,7 +429,7 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "the redundant matching prefix. The same applies to "
         "`text:` with `--text` and `desc:` with `--desc`. "
         "Prefer handles over positional `#1`/`#2` selector keys in changing lists. "
-        '`aua tap-and-analyze <id>`, `aua long-press-and-analyze <id>`, '
+        "`aua tap-and-analyze <id>`, `aua long-press-and-analyze <id>`, "
         '`aua input-and-analyze <id> "text"`, `aua swipe-and-analyze up`, '
         "`aua key-and-analyze back`. "
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
