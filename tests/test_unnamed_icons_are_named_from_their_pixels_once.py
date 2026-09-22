@@ -4,8 +4,9 @@ Measured on one real app: 26% of the controls a navigator was offered carried no
 content description and no resource id, so they were offered as "unlabelled control, top left
 of the screen". A hosted vision model names such a crop correctly ("hamburger menu button,
 opens the side drawer") for about $0.00005, but takes 0.6-2.6 s, so the name is asked for once
-per distinct icon and kept in the cache directory; every later sight of the same pixels is
-free. The feature is off by default: it is a paid call and needs a key.
+per distinct icon and kept in one SQLite database shared by every AUA run on the machine, not
+in a per-run cache directory; every later sight of the same pixels is free. The feature is off
+by default: it is a paid call and needs a key.
 
 Only controls that could carry an icon are sent: clickable, in the app's own window, with no
 name of their own, of a plausible size, and with something drawn in them. An invisible touch
@@ -15,11 +16,12 @@ target is a blank crop and is skipped; the vision model would only say "unanswer
 from __future__ import annotations
 
 import io
-import json
+import sqlite3
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from android_ui_analyser.config import Config
 from android_ui_analyser.icon_names import KEY_TOLERANCE_BITS, icon_key, key_distance
 from android_ui_analyser.providers.base import Availability, IconNamerProvider, ScreenImage
 from android_ui_analyser.providers.registry import register_icon_names
@@ -75,6 +77,11 @@ def by_bounds(result, bounds):
     return next(el for el in result.elements if tuple(el.bounds) == bounds)
 
 
+def names_in(db: str) -> list[tuple[str, str]]:
+    with sqlite3.connect(Path(db).expanduser()) as conn:
+        return conn.execute("SELECT name, provider FROM icon_names").fetchall()
+
+
 def test_an_unnamed_drawn_icon_is_named_and_everything_else_is_left_alone(tmp_path: Path) -> None:
     FakeNamer.crops.clear()
     engine = engine_with(hamburger_png(), icon_names={"enabled": True, "chain": ["fake_namer"]})
@@ -88,12 +95,8 @@ def test_an_unnamed_drawn_icon_is_named_and_everything_else_is_left_alone(tmp_pa
     assert by_bounds(result, (16, 300, 112, 396)).content_desc is None, "a picture is not a control"
     assert by_bounds(result, BLANK).content_desc is None, "nothing drawn, nothing to ask about"
     assert len(FakeNamer.crops) == 1, "one paid call for the one icon worth naming"
-    cache_dir = Path(engine.config.cache.dir).expanduser() / "icon-names"
-    files = list(cache_dir.glob("*.json"))
-    assert len(files) == 1
-    saved = json.loads(files[0].read_text())
-    assert saved["name"] == "hamburger menu button, opens the side drawer"
-    assert saved["provider"] == "fake_namer"
+    rows = names_in(engine.config.icon_names.db)
+    assert rows == [("hamburger menu button, opens the side drawer", "fake_namer")]
 
 
 def test_the_second_sight_of_the_same_pixels_costs_nothing() -> None:
@@ -108,6 +111,24 @@ def test_the_second_sight_of_the_same_pixels_costs_nothing() -> None:
 
     assert by_bounds(result, ICON).content_desc == "hamburger menu button, opens the side drawer"
     assert len(FakeNamer.crops) == 1, "the cache answered; no second call"
+
+
+def test_every_run_on_the_machine_shares_one_database(tmp_path: Path) -> None:
+    """Harnesses give each run its own cache.dir; the names must not follow it."""
+    FakeNamer.crops.clear()
+    naming = {"enabled": True, "chain": ["fake_namer"]}
+    engine_with(hamburger_png(), icon_names=naming, cache={"dir": str(tmp_path / "run-a")}).analyze(
+        source="hierarchy", with_ocr=False
+    )
+    result = engine_with(hamburger_png(), icon_names=naming, cache={"dir": str(tmp_path / "run-b")}).analyze(
+        source="hierarchy", with_ocr=False
+    )
+
+    assert by_bounds(result, ICON).content_desc == "hamburger menu button, opens the side drawer"
+    assert len(FakeNamer.crops) == 1, "the second run found the first run's name"
+    default_db = Path(Config().icon_names.db).expanduser()
+    assert not default_db.is_relative_to(Path(Config().cache.dir).expanduser())
+    assert default_db.parent == Path(Config().memory.dir).expanduser(), "next to the app maps"
 
 
 def test_naming_is_off_unless_switched_on() -> None:

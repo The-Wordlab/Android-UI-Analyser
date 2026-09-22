@@ -14,8 +14,10 @@ notes, so you can check for a newer version — and read what changed — withou
 ### Added
 
 - `icon_names` (off by default): a clickable control the app never named gets a short name read
-  off its pixels by a hosted vision model, once per distinct icon, cached under
-  `cache.dir/icon-names`. It lands in `content_desc` marked `named_by`, so every reader sees
+  off its pixels by a hosted vision model, once per distinct icon, kept in one SQLite
+  database shared by every AUA run on the machine (`icon_names.db`, default
+  `~/.android-ui-analyser/icon-names.db`, never a per-run cache). It lands in `content_desc`
+  marked `named_by`, so every reader sees
   "hamburger menu button, opens the side drawer" instead of "unlabelled control, top left".
   Measured on one app: 26% of offered controls were unnamed; the default model named a
   hamburger correctly three times out of three in 0.6-2.6 s for about $0.00005, so the whole

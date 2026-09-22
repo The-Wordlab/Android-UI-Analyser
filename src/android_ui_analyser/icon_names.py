@@ -5,8 +5,9 @@ content description and no resource id. Every reader of the screen then sees "un
 control, top left of the screen": measured on one real app, 26% of the controls a navigator
 was offered. A hosted vision model names such a crop correctly ("hamburger menu button, opens
 the side drawer") for about $0.00005, but takes 0.6-2.6 s per call, so the name is asked for
-once per distinct icon and kept under the cache directory. Every later sight of the same
-pixels, on any screen, in any run, costs nothing.
+once per distinct icon and kept in one SQLite database shared by every AUA run on the machine
+(`icon_names.db`, deliberately not under the per-run `cache.dir`). Every later sight of the
+same pixels, on any screen, in any run, costs nothing.
 
 Off by default (`icon_names.enabled`): it is a paid call and needs a key. The provider is
 the only thing that talks to a network; this module crops, hashes, caches and writes the
@@ -16,12 +17,13 @@ name the app gave from a name read off pixels.
 
 from __future__ import annotations
 
-import json
 import logging
+import sqlite3
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -79,17 +81,32 @@ def clean_name(text: str | None) -> str | None:
 
 
 class IconNameCache:
-    """One JSON file per icon key under ``<cache dir>/icon-names/``, found by nearest key."""
+    """Every icon ever named on this machine: one SQLite file shared by all AUA runs.
 
-    def __init__(self, cache_dir: str | Path) -> None:
-        self.dir = Path(cache_dir).expanduser() / "icon-names"
+    A lookup finds the nearest known key within KEY_TOLERANCE_BITS. The store never raises:
+    an unreadable database means a miss, an unwritable one means the name is not kept.
+    """
+
+    def __init__(self, db_path: str | Path) -> None:
+        self.path = Path(db_path).expanduser()
         self._keys: list[str] | None = None
+
+    def _connect(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.path, timeout=5.0)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS icon_names ("
+            "key TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT, model TEXT, created_at TEXT)"
+        )
+        return conn
 
     def _known_keys(self) -> list[str]:
         if self._keys is None:
             try:
-                self._keys = [p.stem for p in self.dir.glob("*.json")]
-            except OSError:
+                with closing(self._connect()) as conn:
+                    self._keys = [str(row[0]) for row in conn.execute("SELECT key FROM icon_names")]
+            except sqlite3.Error as exc:
+                logger.info("icon names database %s unreadable: %s", self.path, exc)
                 self._keys = []
         return self._keys
 
@@ -103,16 +120,27 @@ class IconNameCache:
         if nearest is None or key_distance(nearest, key) > KEY_TOLERANCE_BITS:
             return None
         try:
-            data = json.loads((self.dir / f"{nearest}.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            with closing(self._connect()) as conn:
+                row = conn.execute(
+                    "SELECT name, provider, model FROM icon_names WHERE key = ?", (nearest,)
+                ).fetchone()
+        except sqlite3.Error:
             return None
-        return data if isinstance(data, dict) and data.get("name") else None
+        if not row or not row[0]:
+            return None
+        return {"name": row[0], "provider": row[1], "model": row[2]}
 
     def put(self, key: str, name: str, *, provider: str, model: str | None) -> None:
-        self.dir.mkdir(parents=True, exist_ok=True)
-        record = {"name": name, "provider": provider, "model": model,
-                  "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-        (self.dir / f"{key}.json").write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+        try:
+            with closing(self._connect()) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO icon_names VALUES (?, ?, ?, ?, ?)",
+                    (key, name, provider, model, time.strftime("%Y-%m-%dT%H:%M:%S%z")),
+                )
+                conn.commit()
+        except sqlite3.Error as exc:
+            logger.info("icon name not kept in %s: %s", self.path, exc)
+            return
         if self._keys is not None:
             self._keys.append(key)
 

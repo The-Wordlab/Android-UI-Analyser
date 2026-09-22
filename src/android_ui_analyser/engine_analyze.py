@@ -362,7 +362,7 @@ def _name_unlabelled_icons(self: Engine, observation: _HierarchyObservation) -> 
             observation.elements,
             image,
             self.factory.build_chain("icon_names").providers,
-            icon_names.IconNameCache(self.config.cache.dir),
+            icon_names.IconNameCache(cfg.db),
             max_per_screen=cfg.max_per_screen,
             min_side=cfg.min_side_px,
             max_side=cfg.max_side_px,

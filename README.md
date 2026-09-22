@@ -1026,8 +1026,10 @@ aua config exec --require OPEN_ROUTER_API_KEY -- python runner.py  # Save then l
 A clickable control the app never named (no text, content description or resource id) is
 cropped and named from its pixels, once per distinct icon. The name lands in `content_desc`
 with `named_by` set, so a reader sees "hamburger menu button, opens the side drawer" instead
-of "unlabelled control, top left". Names are cached under `cache.dir/icon-names` by a
-perceptual key: the same icon on another screen, or another run, costs nothing.
+of "unlabelled control, top left". Names are kept by a perceptual key in one SQLite
+database shared by every AUA run on the machine (`icon_names.db`, default
+`~/.android-ui-analyser/icon-names.db`): the same icon on another screen, or in another
+run, costs nothing.
 
 | Provider | License | Config key | Notes |
 |---|---|---|---|

@@ -667,6 +667,7 @@ def make_config(**overrides: Any) -> Config:
         base["memory"]["dir"] = str(Path(state) / "memory_home")
         base["cache"]["dir"] = str(Path(state) / "cache")
         base["lease"]["registry_dir"] = str(Path(state) / "lease_registry")
+        base["icon_names"]["db"] = str(Path(state) / "icon-names.db")
         # Capture is always-on with a real daemon; keep unit tests quiet unless opted in.
         base["capture"]["enabled"] = False
         # Deterministic memory assertions: record on the calling thread.
@@ -699,6 +700,7 @@ def _aua_isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("AUA_MEMORY__DIR", str(state / "memory_home"))
     monkeypatch.setenv("AUA_CACHE__DIR", str(state / "cache"))
     monkeypatch.setenv("AUA_LEASE__REGISTRY_DIR", str(state / "lease_registry"))
+    monkeypatch.setenv("AUA_ICON_NAMES__DB", str(state / "icon-names.db"))
     # CLI commands run in-process (never reach a stray dev-machine daemon socket).
     monkeypatch.setenv("AUA_DAEMON__ENABLED", "false")
     monkeypatch.setenv("AUA_PERF__ASYNC_MEMORY", "false")

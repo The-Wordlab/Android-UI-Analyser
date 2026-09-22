@@ -390,8 +390,9 @@ class IconNamesCfg(_ChainCfg):
     """Name clickable controls the app never named, once, from their pixels.
 
     Off by default: it is a paid vision call and needs the provider's key (see
-    ``models.hosted_vision``). On, each distinct icon is named once and kept under
-    ``cache.dir/icon-names``; every later sight of the same pixels is free. Only controls
+    ``models.hosted_vision``). On, each distinct icon is named once and kept in one SQLite
+    database shared by every AUA run on this machine; every later sight of the same pixels,
+    in any run, is free. Only controls
     that could carry an icon are sent: clickable, in the app's window, with no text, content
     description or resource id, between ``min_side_px`` and ``max_side_px`` on both sides,
     and with something drawn in them.
@@ -399,6 +400,9 @@ class IconNamesCfg(_ChainCfg):
 
     enabled: bool = False
     chain: list[str] = Field(default_factory=lambda: ["hosted_vision"])
+    # Host-wide on purpose, never under ``cache.dir``: harnesses give each run its own cache
+    # to keep screenshots and leases apart, and a name paid for once must serve every run.
+    db: str = "~/.android-ui-analyser/icon-names.db"
     # Paid calls per screen read at most; the rest wait for a later screen.
     max_per_screen: int = 4
     min_side_px: int = 24
@@ -1186,7 +1190,8 @@ ocr:
 icon_names:
   enabled: false                      # paid: names unnamed clickable icons from their pixels, once each
   chain: [hosted_vision]              # models.hosted_vision: OpenRouter + a vision model; needs OPEN_ROUTER_API_KEY
-  max_per_screen: 4                   # paid calls per screen read; the cache answers every later sight
+  max_per_screen: 4                   # paid calls per screen read; the database answers every later sight
+  db: "~/.android-ui-analyser/icon-names.db"  # one store for every run on this machine; never follows cache.dir
 
 detection:
   enabled: true
