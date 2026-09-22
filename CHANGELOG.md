@@ -199,6 +199,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The System One menu now names a text field as one ("Ask me anything (text field)") and the
+  state carries its `editable` flag, so a goal that says "tap the composer and type" can tell
+  the field from the button beside it. Live, every option read "Press '…'" and the only
+  "composer" on screen was the attachments button's resource id, which the model pressed
+  twice at 0.96 and 0.93; the chat model then paid to close the sheet each time.
 - OCR readings that are not text no longer join a hierarchy observation: a single glyph read
   off an icon ("+", "2", ">"), pixels inside the status bar or the keyboard ("| g",
   "ASDFGH"), and a misread of a label the tree already has with an icon glued to its front

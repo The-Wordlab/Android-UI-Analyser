@@ -987,3 +987,22 @@ def test_a_near_miss_without_a_wait_tool_is_handed_over() -> None:
 def test_the_second_look_floor_must_sit_under_the_gate() -> None:
     with pytest.raises(ValueError):
         TypeSafeNavigator("g", client=FakeClient(), min_confidence=0.8, second_look_floor=0.9)
+
+
+def test_a_text_field_is_named_as_one_in_the_menu_and_in_the_state() -> None:
+    # Live shape: the goal said "tap the composer and type"; the only place the word "composer"
+    # appeared on screen was the resource id of the attachments button beside the field, and the
+    # field itself was labelled only by its hint. Every option read "Press '...'", so the menu
+    # gave the model no way to tell the field from the button, and it pressed the button twice
+    # at 0.96 and 0.93 -- each time opening a sheet the chat model then had to close.
+    observation = {"elements": [
+        {"id": "el:field", "text": "Ask me anything", "editable": True, "clickable": True},
+        {"id": "el:add", "resource_id": "buttonOpenComposerAttachments", "clickable": True},
+        {"id": "el:hint", "text": "Ask me anything"},
+    ]}
+    options = candidates(observation)
+    assert options["el:field"] == "Ask me anything (text field)"
+    assert options["el:add"] == "buttonOpenComposerAttachments", "a button needs no role; Press says it"
+    state = screen_for_model({"observation": observation})
+    assert {"text": "Ask me anything", "editable": True} in state["elements"]
+    assert {"text": "Ask me anything"} in state["elements"], "plain text stays plain"

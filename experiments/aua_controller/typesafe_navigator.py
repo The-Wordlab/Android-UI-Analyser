@@ -112,7 +112,7 @@ ACTION_SPACES = ("taps", "full")
 # boundary case its own option is the doc's own advice, and it costs nothing: both decline.
 ACTION_KINDS: dict[str, str] = {
     "tap": "Press a control that is visible on this screen now",
-    "type": "Type text into a field on this screen",
+    "type": "Type text into a text field on this screen",
     "scroll_down": "What is needed is below; scroll down to reveal it",
     "scroll_up": "What is needed is above; scroll up to reveal it",
     "back": "This is not the screen the goal needs; the previous screen was closer",
@@ -205,6 +205,12 @@ def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTION
                      None)
         if label is None:
             label = where(element, observation.get("screen") if isinstance(observation, Mapping) else None)
+        if element.get("editable") is True:
+            # A field is labelled by its hint, so the menu read "Press 'Ask me anything'" beside
+            # "Press 'buttonOpenComposerAttachments'" -- and a goal that said "tap the composer"
+            # matched the word, not the field, twice at 0.96 and 0.93. The role is the fact a
+            # reader uses to tell a field from the button next to it.
+            label = f"{label} (text field)"
         if is_switch(element):
             label = f"{label} [switch is {'ON' if element['checked'] else 'OFF'}]"
         options[handle] = label[:90]
@@ -232,7 +238,7 @@ def plain(value: Any) -> Any:
 
 #: Element fields the model can actually read. Everything else on an element is the harness's
 #: vocabulary: digests, pixel bounds, internal flags.
-READABLE = ("text", "desc", "content_desc", "resource_id", "rid", "checked")
+READABLE = ("text", "desc", "content_desc", "resource_id", "rid", "checked", "editable")
 MAX_JOURNEY_LABELS = 10  # a turn is a reminder of a screen, not a second copy of one
 MAX_LABEL_CHARS = 34
 
