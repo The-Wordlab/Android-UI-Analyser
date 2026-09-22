@@ -88,7 +88,7 @@ def test_a_raw_dumps_checked_false_on_a_non_switch_is_dropped() -> None:
     """Seen on the first frame of every row: 22 status-bar nodes each carried ``checked: false``
     and became "switches" in the navigator's menu. Only a checkable node has a reading."""
     by_label = elements_by_label(compact_frame(raw_dump_frame()))
-    assert "checked" not in by_label["11:28"], "the status-bar clock is not a switch"
+    assert "11:28" not in by_label, "the status-bar clock is not part of the app's screen at all"
     assert "checked" not in by_label["Log in"], "a plain button is not a switch"
     assert by_label["Dark mode"]["checked"] is False, "a real off switch keeps its reading"
 

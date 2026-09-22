@@ -76,6 +76,20 @@ def _trim(value: Any, limit: int) -> Any:
     return value
 
 
+STATUS_BAR_PACKAGE = "com.android.systemui:"
+
+
+def _status_bar(element: dict[str, Any]) -> bool:
+    """Android's own status bar, which a raw hierarchy read returns beside the app's window.
+
+    Clock, battery, signal and notification icons: 22 nodes on a real first frame, none of
+    them part of the app under test. A permission prompt also sits in a system window and is
+    exactly what a run must see, so the test is the owning package, not the window.
+    """
+    rid = element.get("resource_id") or element.get("rid")
+    return isinstance(rid, str) and rid.startswith(STATUS_BAR_PACKAGE)
+
+
 def compact_element(element: dict[str, Any], *, max_text: int = 120, keep_id: bool = True) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key in ELEMENT_FIELDS:
@@ -179,7 +193,7 @@ def compact_frame(
         return out
     screen = observation.get("screen") if isinstance(observation.get("screen"), dict) else {}
     meta = observation.get("meta") if isinstance(observation.get("meta"), dict) else {}
-    elements = [e for e in observation.get("elements", []) if isinstance(e, dict)]
+    elements = [e for e in observation.get("elements", []) if isinstance(e, dict) and not _status_bar(e)]
     fingerprint = meta.get("fingerprint")
     compact_meta = {key: meta[key] for key in META_FIELDS if key in meta}
     if "goal_progress" in meta and "goal_progress" not in out:
