@@ -66,6 +66,39 @@ def test_judgement_loading_exception_rejects_stale_absent_or_ambiguous_captures(
     assert judgement_observation_frame(raw) is None
 
 
+def no_effect_capture():
+    """A press that changed nothing on screen: AUA marks it not reusable for acting."""
+    return {"observation_present": True,
+            "observation_contract": {"reusable": False, "analyze_needed": True,
+                                     "fingerprint": "source-frame"},
+            "observation": frame("Rename item", arrival_state="unconfirmed",
+                                 stale_risk="no semantic destination beyond layout movement")}
+
+
+def test_a_press_that_changed_nothing_is_still_evidence_of_what_was_on_screen(tmp_path):
+    """Live, pressing Save on an empty name left the dialog as it was, the one proof that Save
+    is disabled while empty. Its capture was dropped from the judge's evidence because it was
+    not reusable for acting, and the run was judged unverified."""
+    raw = no_effect_capture()
+    assert judgement_observation_frame(raw) == raw["observation"]
+    assert observation_frame(raw) is None, "still no authority to act on its ids"
+    s = state(tmp_path)
+    s.observe("tap_and_analyze", {"id": "old"}, raw, "E0001")
+    assert s.context()["current_observation"] is None
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda r: r.update(stale=True),
+    lambda r: r["observation"]["meta"].update(stale_risk=True),
+    lambda r: r["observation_contract"].update(fingerprint="different"),
+    lambda r: r["observation"]["meta"].update(arrival_state="ready"),
+])
+def test_a_no_effect_capture_is_still_refused_when_stale_or_contradictory(mutation):
+    raw = no_effect_capture()
+    mutation(raw)
+    assert judgement_observation_frame(raw) is None
+
+
 def test_flow_summary_uses_full_nested_observation_without_another_capture():
     current = frame()
     flow = {"ok": True, "elements": [{"id": "el:1", "label": "Ready"}], "observation": current}
