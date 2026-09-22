@@ -148,6 +148,25 @@ def _multiple_calls(response: dict[str, Any]) -> tuple[dict[str, Any], list[dict
     return message, native_calls
 
 
+def definitive_selector_miss(result: Any) -> bool:
+    """Recognize only AUA's pre-dispatch addressing refusal with a recovery observation."""
+    if (not isinstance(result, dict) or result.get("ok") is True or result.get("mcp_is_error")
+            or result.get("action") or result.get("capture_evidence") or result.get("action_sent") is True):
+        return False
+    error = result.get("error")
+    if not isinstance(error, dict):
+        return False
+    observation = error.get("observation")
+    return (error.get("code") == "element_not_found"
+            and error.get("action_sent") is not True
+            and str(error.get("hint") or "").startswith("No action was sent")
+            and error.get("observation_present") is True and isinstance(observation, dict)
+            and isinstance(observation.get("screen"), dict)
+            and isinstance(observation.get("elements"), list)
+            and isinstance(observation.get("meta"), dict)
+            and bool(observation["meta"].get("fingerprint")))
+
+
 async def run_agent(
     *,
     send: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
@@ -177,8 +196,15 @@ async def run_agent(
     conversation: AgentConversation | None = None,
     terminal_claim_limit: int | None = None,
     no_progress_limit: int | None = None,
+    reobserve_tool: str = "analyze_screen",
 ) -> dict[str, Any]:
     """Return trace metadata and an untrusted report, never a scenario verdict.
+
+    A host action that AUA refuses before dispatch as stale (``definitive_selector_miss``:
+    the screen moved on between the read and the press, nothing was sent) is not an error
+    and not a step. It is recorded ``ignored``, the chat model never hears of it, the host
+    is told to ``forget()`` it when it can, the screen is read again with ``reobserve_tool``
+    when that tool is offered, and the same host is asked about the screen as it is now.
 
     ``terminal_tools`` are caller-defined submission tools. A valid call stops
     only when the caller returns ``ok: true``; a rejected submission is feedback.
@@ -314,7 +340,7 @@ async def run_agent(
         "host_actions_selected": 0, "host_tool_calls_executed": 0, "model_tool_calls_executed": 0,
         "host_next_calls": 0, "host_decision_ms": [], "host_schema_repairs": 0, "steps_consumed": 0,
         "conversation_reused": conversation is not None and bool(conversation._messages),
-        "tool_errors": 0, "unknown_tool_outcomes": 0,
+        "tool_errors": 0, "unknown_tool_outcomes": 0, "host_ignored_actions": 0,
         "host_rejections": 0, "session_managed": session_state is not None,
         "model_request_ms": [], "tool_call_ms": [], "usage": [], "evidence": [],
         "returned_models": [], "providers": [], "warnings": [],
@@ -392,8 +418,10 @@ async def run_agent(
         if not messages:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": initial_content})
-        for step in range(max_steps):
-            report["steps_consumed"] = step + 1
+        step, ignored_steps = -1, 0
+        while step + 1 < max_steps + ignored_steps:
+            step += 1
+            report["steps_consumed"] = step + 1 - ignored_steps
             remaining()
             action = None
             if host_next is not None:
@@ -652,7 +680,12 @@ async def run_agent(
                     result = tool_result(await asyncio.wait_for(call_tool(name, copy.deepcopy(arguments)), timeout))
                     call["executed"] = True
                 call["result"] = result
-                if result.get("ok") is False or result.get("error") or result.get("mcp_is_error"):
+                ignored = actor == "host" and definitive_selector_miss(result)
+                if ignored:
+                    call["ignored"] = True
+                    call["ignored_because"] = ("stale target: the screen moved on between the read and "
+                                               "the press, and AUA sent nothing")
+                elif result.get("ok") is False or result.get("error") or result.get("mcp_is_error"):
                     report["tool_errors"] += 1
                 visible = record_evidence(result, "tool_result", name)
                 call["evidence_ref"] = visible["evidence_ref"]
@@ -675,6 +708,41 @@ async def run_agent(
                 call["duration_ms"] = (time.monotonic() - tick) * 1000
                 report["tool_call_ms"].append(call["duration_ms"])
                 _append(output / "tool-calls.jsonl", call)
+            if ignored:
+                ignored_steps += 1
+                report["host_ignored_actions"] += 1
+                forget = getattr(host_next, "forget", None)
+                if callable(forget):
+                    forget()
+                if reobserve_tool in schemas:
+                    # The refusal carries whatever frame AUA had mid-transition, often empty. The
+                    # next decision is about the screen as it is now.
+                    reread_action = {"tool": reobserve_tool, "arguments": {},
+                                     "reason": "fresh read after an ignored stale action"}
+                    reread: dict[str, Any] = {"step": step, "actor": "host", "tool": reobserve_tool,
+                                              "arguments": {}, "reason": reread_action["reason"]}
+                    tick = time.monotonic()
+                    try:
+                        report["tool_calls_executed"] += 1
+                        report["host_tool_calls_executed"] += 1
+                        reread["dispatch_started"] = True
+                        result = tool_result(await asyncio.wait_for(
+                            call_tool(reobserve_tool, {}),
+                            remaining(resolved_tool_timeouts.get(reobserve_tool, request_timeout_s))))
+                        reread["executed"] = True
+                        reread["result"] = result
+                        visible = record_evidence(result, "tool_result", reobserve_tool)
+                        reread["evidence_ref"] = visible["evidence_ref"]
+                        latest_result, latest_ref = copy.deepcopy(result), visible["evidence_ref"]
+                        if session_state is not None:
+                            session_state.observe(reobserve_tool, {}, observation_filter(result),
+                                                  evidence_namespace + visible["evidence_ref"])
+                    finally:
+                        reread["duration_ms"] = (time.monotonic() - tick) * 1000
+                        report["tool_call_ms"].append(reread["duration_ms"])
+                        _append(output / "tool-calls.jsonl", reread)
+                    append_result(visible, "host", reread_action, None)
+                continue
             append_result(visible, actor, action, native)
             if (call.get("executed") is True and name in terminal_tools and result.get("ok") is True
                     and not result.get("error") and not result.get("mcp_is_error")):

@@ -431,6 +431,15 @@ class TypeSafeNavigator:
         else:
             self._pending["you_chose"] = TOOL_WORDS.get(tool, tool)
 
+    def forget(self) -> None:
+        """Drop the open turn: its action was never sent.
+
+        AUA refused it as stale -- the screen moved on between the read and the press -- so
+        it is not part of the story the model reads on the next step. Leaving it in taught
+        the model that pressing the same control twice is what a run does.
+        """
+        self._pending = None
+
     async def __call__(self, result: Any) -> dict[str, Any] | None:
         from experiments.aua_controller.compaction import compact_frame
 

@@ -891,3 +891,17 @@ def test_a_step_the_chat_model_took_is_named_in_the_same_words() -> None:
                            ("input_and_analyze", "type")):
         navigator.observed(tool, {})
         assert navigator._pending["you_chose"] == expected, tool
+
+
+def test_a_forgotten_turn_never_reaches_the_journey() -> None:
+    # A press AUA refused as stale was never sent, so it is not part of the story the model
+    # reads on the next step. The harness says `forget()`; the open turn is dropped.
+    client = RecordingClient(kind="tap", target="1")
+    navigator = TypeSafeNavigator("Open notification settings", client=client, tools=WIDE_TOOLS,
+                                  action_space="full")
+    action = asyncio.run(navigator(SCREEN))
+    assert action is not None
+    navigator.observed(action["tool"], action["arguments"])
+    navigator.forget()
+    asyncio.run(navigator(SCREEN))
+    assert client.states[-1]["journey_so_far"] == []

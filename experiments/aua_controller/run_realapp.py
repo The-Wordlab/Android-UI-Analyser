@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from experiments.aua_controller.action_evidence import judge_action_history
-from experiments.aua_controller.agent_loop import run_agent
+from experiments.aua_controller.agent_loop import definitive_selector_miss, run_agent
 from experiments.aua_controller.compaction import FrameCompactor
 from experiments.aua_controller.hosted import BACKENDS, validate_endpoint, validate_request_config
 from experiments.aua_controller.hosted_projection import hosted_model_view
@@ -767,24 +767,6 @@ class PrimaryFlowUnavailable(RunError):
         self.route_action_count = count
         self.recovered_no_action = recovered_no_action
 
-
-def definitive_selector_miss(result: Any) -> bool:
-    """Recognize only AUA's pre-dispatch addressing refusal with a recovery observation."""
-    if (not isinstance(result, dict) or result.get("ok") is True or result.get("mcp_is_error")
-            or result.get("action") or result.get("capture_evidence") or result.get("action_sent") is True):
-        return False
-    error = result.get("error")
-    if not isinstance(error, dict):
-        return False
-    observation = error.get("observation")
-    return (error.get("code") == "element_not_found"
-            and error.get("action_sent") is not True
-            and str(error.get("hint") or "").startswith("No action was sent")
-            and error.get("observation_present") is True and isinstance(observation, dict)
-            and isinstance(observation.get("screen"), dict)
-            and isinstance(observation.get("elements"), list)
-            and isinstance(observation.get("meta"), dict)
-            and bool(observation["meta"].get("fingerprint")))
 
 
 def journal_terminal_claim(entries: list[Any], report: Any) -> bool:
