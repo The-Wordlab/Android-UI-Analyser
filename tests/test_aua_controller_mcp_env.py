@@ -46,3 +46,18 @@ def test_mcp_server_does_not_invent_config_the_caller_did_not_set(monkeypatch):
     assert "AUA_SERIAL" not in env and "AUA_CACHE__DIR" not in env
     assert "SOME_UNRELATED_SECRET" not in env, "only AUA_/Android pointers cross the boundary"
     assert server.args == ["mcp"] and server.command == "aua"
+
+
+def test_mcp_server_forwards_the_provider_keys_the_aua_config_names(monkeypatch):
+    """A paid AUA provider inside the child (icon names, grounding) reads its key from the
+    variable ``models.<name>.api_key_env`` names; by convention those end in ``_API_KEY``.
+    Scrubbed away, the provider reports "key not set" and the feature silently does nothing."""
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", "or-secret")
+    monkeypatch.setenv("GEMINI_API_KEY", "gm-secret")
+    monkeypatch.setenv("DATABASE_PASSWORD", "not-a-provider-key")
+
+    env = mcp_server("aua").env or {}
+
+    assert env["OPEN_ROUTER_API_KEY"] == "or-secret"
+    assert env["GEMINI_API_KEY"] == "gm-secret"
+    assert "DATABASE_PASSWORD" not in env

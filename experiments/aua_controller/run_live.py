@@ -41,7 +41,9 @@ from mcp.client.stdio import get_default_environment, stdio_client
 # A caller that scoped a run to its own cache lane or pinned a serial then had the server ignore
 # both: it wrote to the shared default cache and leased or provisioned whatever it liked. We forward
 # every AUA_* variable (cache dir, owner, worker scope, pinned serial) plus the Android SDK/adb
-# pointers, overlaid on the SDK's safe base.
+# pointers, overlaid on the SDK's safe base. Provider keys cross too: a paid AUA feature in the
+# child (icon names, grounding) reads the variable its ``models.<name>.api_key_env`` names, and by
+# convention those end in ``_API_KEY``; scrubbed away, the feature silently does nothing.
 _FORWARDED_CHILD_ENV = (
     "ANDROID_SERIAL", "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_AVD_HOME",
     "ANDROID_ADB_SERVER_PORT", "ANDROID_ADB_SERVER_ADDRESS", "ADB_SERVER_SOCKET",
@@ -57,7 +59,7 @@ def mcp_server(aua_command: str) -> StdioServerParameters:
     """
     env = dict(get_default_environment())
     for name, value in os.environ.items():
-        if name.startswith("AUA_") or name in _FORWARDED_CHILD_ENV:
+        if name.startswith("AUA_") or name.endswith("_API_KEY") or name in _FORWARDED_CHILD_ENV:
             env[name] = value
     return StdioServerParameters(command=aua_command, args=["mcp"], env=env)
 
