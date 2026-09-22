@@ -1762,7 +1762,7 @@ async def run_realapp(
         result["controller"] = {
             key: report.get(key) for key in (
                 "stop_reason", "error", "steps_consumed", "model_requests", "tool_calls_executed",
-                "tool_errors", "schema_repairs", "terminal_claims", "no_progress_streak",
+                "tool_errors", "schema_repairs", "terminal_claims", "no_progress_streak", "host_ignored_actions",
                 "returned_models", "providers", "model_http_seconds", "tool_seconds", "duration_seconds",
                 "final_model_text", "model_ladder", "model_escalations", "model_failures",
             )

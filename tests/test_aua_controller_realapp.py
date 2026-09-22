@@ -1042,3 +1042,16 @@ def test_realapp_refuses_a_dirty_output_directory(tmp_path):
     (tmp_path / "run" / "old.txt").write_text("x")
     with pytest.raises(RunError, match="must be empty"):
         run(tmp_path, FakeAua(), FakeModel([], {}))
+
+
+def test_the_result_reports_how_many_host_actions_were_ignored(tmp_path):
+    """A refused stale press is neither an error nor a step; the summary must still say it happened."""
+    aua = FakeAua()
+    model = FakeModel(
+        controller=[model_call("tap_and_analyze", {"id": "el:fp-home-1"})],
+        judgements={"record_verdict": [verdict("pass", "goal state is visible"), verdict("pass", "still visible")]},
+    )
+
+    result = run(tmp_path, aua, model, max_steps=1)
+
+    assert result["controller"]["host_ignored_actions"] == 0
