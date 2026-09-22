@@ -87,7 +87,13 @@ def _status_bar(element: dict[str, Any]) -> bool:
     exactly what a run must see, so the test is the owning package, not the window.
     """
     rid = element.get("resource_id") or element.get("rid")
-    return isinstance(rid, str) and rid.startswith(STATUS_BAR_PACKAGE)
+    if isinstance(rid, str) and rid.startswith(STATUS_BAR_PACKAGE):
+        return True
+    # Notification icons carry no id, only a description: a system-window image nobody can
+    # press and nobody can read. A toast has text and a dialog has buttons; both stay.
+    text = element.get("text")
+    return (element.get("window") == "system" and element.get("clickable") is not True
+            and not (isinstance(text, str) and text.strip()))
 
 
 def compact_element(element: dict[str, Any], *, max_text: int = 120, keep_id: bool = True) -> dict[str, Any]:

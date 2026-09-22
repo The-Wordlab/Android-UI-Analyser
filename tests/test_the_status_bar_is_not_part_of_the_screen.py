@@ -54,3 +54,20 @@ def test_the_navigator_never_sees_the_status_bar() -> None:
     shown = screen_for_model(compact_frame(frame(), keep_ids=True))
     assert "systemui" not in str(shown) and "Battery" not in str(shown)
     assert [e.get("text") for e in shown["elements"]][:2] == ["Welcome back", "Log in"]
+
+
+def test_unnamed_status_bar_icons_are_dropped_too() -> None:
+    """Notification icons carry no resource id, only a description, and slipped past the
+    package test on a real first frame: two "Android System notification:" images and one blank
+    icon, all in the system window, none pressable, none with text."""
+    frame_ = frame()
+    frame_["observation"]["elements"] += [
+        {"id": "el:n1", "desc": "Android System notification:", "window": "system", "clickable": False,
+         "bounds": [126, 0, 170, 48]},
+        {"id": "el:n2", "window": "system", "clickable": False, "bounds": [648, 11, 664, 37]},
+        {"id": "el:toast", "text": "Copied to clipboard", "window": "system", "clickable": False,
+         "bounds": [100, 1100, 620, 1160]},
+    ]
+    labels = [e.get("text") or e.get("desc") for e in compact_frame(frame_)["observation"]["elements"]]
+    assert "Android System notification:" not in labels and None not in labels
+    assert "Copied to clipboard" in labels, "a system toast has text a run may need to read"
