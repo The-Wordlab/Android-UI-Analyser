@@ -830,6 +830,7 @@ class Engine:
                 parallel=True,
             )
             serial = str(boot["target_id"])
+            serial_before_boot = self.config.device.serial
             if serial not in online_before:
                 # This serial had no live device a moment ago, so a lease record older than
                 # the boot is a dead run's leftover, not a holder; one acquired since is real.
@@ -857,6 +858,9 @@ class Engine:
                         ),
                     )
             except Exception:
+                # A boot this session gives up is not its target. Leaving the serial pinned made
+                # the caller's retry wait its whole budget for the rolled-back, offline device.
+                self.config.device.serial = serial_before_boot
                 # Roll back only what this boot demonstrably created — its own spawned
                 # process and instance record. A serial-scoped stop here once killed a
                 # foreign worker's emulator: the claim had failed precisely because that

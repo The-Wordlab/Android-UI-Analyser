@@ -114,3 +114,22 @@ def test_forget_predating_is_the_narrow_rule_it_says(tmp_path) -> None:
     assert leases.forget_predating(registry, "emulator-5556", booted_at=time.time()) is True
     assert leases.holder(registry, "emulator-5556") is None
     assert leases.forget_predating(registry, "emulator-5556", booted_at=time.time()) is False, "nothing left to drop"
+
+
+def test_a_failed_claim_does_not_leave_the_session_pinned_to_the_rolled_back_serial(tmp_path, monkeypatch) -> None:
+    """The same live run, one step later: the boot on 5556 was refused and rolled back, and the
+    caller's retry then waited its whole 600s for *emulator-5556* -- an offline device -- while
+    the device it had wanted all along had been free for four minutes. The failed claim had left
+    the session's target pinned to the serial it just gave up."""
+    registry = tmp_path / "coordination"
+
+    def someone_grabs_it() -> None:
+        assert leases.acquire(registry, "emulator-5556", owner="quick-agent") is True
+
+    engine, cfg, calls = engine_that_boots(tmp_path, monkeypatch, on_boot=someone_grabs_it)
+    assert engine.config.device.serial is None
+
+    with pytest.raises(DeviceLeasedError):
+        engine._prepare_session_target(wait_for_lease_s=0, start_emulator=True, headed=True, audio=False)
+
+    assert engine.config.device.serial is None, "a rolled-back boot is not the session's target"

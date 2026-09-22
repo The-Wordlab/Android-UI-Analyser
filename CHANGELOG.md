@@ -248,6 +248,10 @@ notes, so you can check for a newer version — and read what changed — withou
   before a boot on a serial that had no live device is dropped before the claim; one acquired
   after the boot, or on a serial that was online, is still a real holder.
 
+- A boot that session start rolls back no longer stays the session's target: the caller's
+  retry used to wait its whole budget for the rolled-back, offline serial while the device it
+  wanted had long been free.
+
 ## [0.30.0] - 2026-09-19
 
 ### Added
