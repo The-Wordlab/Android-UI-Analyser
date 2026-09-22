@@ -1074,9 +1074,10 @@ SCRIPT = ("Tap the top-left menu and look at it, then close it. "
 class ScriptedClient(FakeClient):
     """Answers a fixed list of (choice, confidence) in order and keeps every state it was sent."""
 
-    def __init__(self, answers):
+    def __init__(self, answers, step_answers=()):
         super().__init__()
         self.answers = list(answers)
+        self.step_answers = list(step_answers)  # answers to the direct "is this step done?" question
         self.states: list[dict] = []
         self.questions: list[dict] = []
 
@@ -1086,7 +1087,11 @@ class ScriptedClient(FakeClient):
         self.questions.append(questions)
         choice, confidence = self.answers.pop(0)
         move = SimpleNamespace(choice=choice, confidence=confidence, probabilities={choice: confidence})
-        return SimpleNamespace(answers={"move": move}, usage=SimpleNamespace(input_tokens=430))
+        answers = {"move": move}
+        if "step" in questions:
+            verdict, sure = self.step_answers.pop(0) if self.step_answers else ("not_yet", 0.95)
+            answers["step"] = SimpleNamespace(choice=verdict, confidence=sure, probabilities={verdict: sure})
+        return SimpleNamespace(answers=answers, usage=SimpleNamespace(input_tokens=430))
 
 
 def test_a_lone_text_field_is_offered_once_as_typing_not_twice() -> None:
@@ -1149,6 +1154,41 @@ def test_saying_a_phase_is_done_moves_on_and_asks_again_about_the_same_screen() 
     asyncio.run(navigator(SCREEN))
     journey = client.states[2]["journey_so_far"]
     assert any("was done" in str(turn.get("you_chose")) for turn in journey)
+
+
+def test_a_direct_yes_to_is_this_step_done_moves_the_pointer_without_a_device_step() -> None:
+    """Live, a step the chat model had already carried out ("close the menu") stayed current for
+    twelve asks: the model never *picked* "done" among fifteen moves. Asked directly, on the same
+    saved screens, it said done at up to 0.86. So while steps remain the request carries a second
+    question about the step, judged on its own and never mixed into the move's gate."""
+    client = ScriptedClient([("5", 0.30), ("back", 0.93)], step_answers=[("done", 0.90), ("not_yet", 0.95)])
+    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    action = asyncio.run(navigator(FIELD_SCREEN))
+
+    assert "step" in client.questions[0], "asked about the step while steps remain"
+    assert client.calls == 2 and client.states[1]["goal"] == "close it"
+    assert action["tool"] == "back_gesture_and_analyze"
+    detail = navigator.report()["proposals_detail"]
+    assert [p["kind"] for p in detail] == ["phase_done", "back"]
+    assert detail[0]["via"] == "step_question" and detail[0]["confidence"] == 0.9
+    # On the last step there is nothing to move on to, so the question is not asked.
+    last = ScriptedClient([("achieved", 0.95)] * 4)
+    asyncio.run(TypeSafeNavigator(SCRIPT, client=last, tools=WIDE_TOOLS, action_space="full")(FIELD_SCREEN))
+    assert "step" not in last.questions[-1] and "step" in last.questions[0]
+    # A goal with no steps never asks it.
+    plain_client = ScriptedClient([("1", 0.95)])
+    asyncio.run(TypeSafeNavigator("Open notification settings", client=plain_client, tools=WIDE_TOOLS,
+                                  action_space="full")(SCREEN))
+    assert "step" not in plain_client.questions[0]
+
+
+def test_an_unsure_yes_to_is_this_step_done_does_not_move_the_pointer() -> None:
+    client = ScriptedClient([("back", 0.93)], step_answers=[("done", 0.55)])
+    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full",
+                                  min_confidence=0.80)
+    action = asyncio.run(navigator(FIELD_SCREEN))
+    assert action["tool"] == "back_gesture_and_analyze", "the move is judged on its own"
+    assert navigator.report()["phase"] == {"current": 1, "of": 4}
 
 
 def test_an_unsure_phase_done_is_declined_and_the_pointer_stays() -> None:

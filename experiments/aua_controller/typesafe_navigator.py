@@ -383,13 +383,26 @@ STEP_DONE_KINDS: dict[str, str] = {
 }
 
 
+#: Asked beside the move while steps remain. Live, a step the chat model had already carried out
+#: stayed current for twelve asks because the model never *picked* "done" among fifteen moves
+#: (0.03-0.49); asked this directly on the same saved screens it said done at up to 0.86. It is
+#: a second decision, not a second opinion on the move, so it is judged on its own gate and never
+#: mixed into the move's -- the docstring's warning is about min() over one decision.
+STEP_QUESTION = {
+    "instructions": "Look at the screen and the journey. Has the current step (`goal`) already been carried out?",
+    "criteria": {"done": "Yes, the step is already done; nothing on this screen is left to do for it",
+                 "not_yet": "No, something still has to happen on this screen for this step"},
+}
+
+
 def build_questions(options: Mapping[str, str], *, action_space: str = "taps",
                     steps_remain: bool = False) -> dict[str, Any]:
     """One question naming every move this screen allows, finishing included.
 
     A press is not an action plus a separate operand; each pressable control *is* an action, and
     so is each way of finishing: the outcome `session_finish` records is the move itself. With
-    ``steps_remain`` the two finish lines speak of the current step, not the run.
+    ``steps_remain`` the two finish lines speak of the current step, not the run, and a second
+    question asks outright whether that step is already done.
     """
     from typesafe_sdk import Choice
 
@@ -416,8 +429,11 @@ def build_questions(options: Mapping[str, str], *, action_space: str = "taps",
     if lone is not None:
         actions["type"] = f"Type text into the text field '{lone}'"
     criteria.update({kind: text for kind, text in actions.items() if kind != "tap"})
-    return {"move": Choice(instructions="What should happen next on this screen?",
-                           criteria=criteria)}
+    questions: dict[str, Any] = {"move": Choice(instructions="What should happen next on this screen?",
+                                                criteria=criteria)}
+    if steps_remain:
+        questions["step"] = Choice(**STEP_QUESTION)
+    return questions
 
 
 def goal_steps(goal: str) -> list[str]:
@@ -582,7 +598,8 @@ class TypeSafeNavigator:
             asked = await self._ask(compact, questions)
             if asked is None:
                 return None
-            turn, move = asked
+            turn, answers = asked
+            move = answers["move"]
             record = {
                 "kind": "tap" if move.choice in by_index else move.choice,
                 "choice": move.choice,
@@ -599,21 +616,32 @@ class TypeSafeNavigator:
                 turn["verdict"] = dict(record)
                 self._record(turn)
 
-            if (self.steps and move.choice in FINISH_KINDS
-                    and self.step_index < len(self.steps) - 1):
+            steps_remain = bool(self.steps) and self.step_index < len(self.steps) - 1
+            step = answers.get("step") if isinstance(answers, Mapping) else None
+            if steps_remain and step is not None and step.choice == "done":
+                # A confident "already done" moves the pointer; the move it came with was about a
+                # step that is over, so it is not taken. An unsure one changes nothing.
+                verdict = {"kind": "phase_done", "via": "step_question", "choice": "done",
+                           "confidence": round(step.confidence, 4), "step": self.step_index + 1,
+                           "options": len(self._options)}
+                if self._gate(step, verdict):
+                    verdict["accepted"] = True
+                    self.proposals.append(verdict)
+                    turn["verdict"] = dict(verdict)
+                    self._record(turn)
+                    self._advance()
+                    continue
+            if steps_remain and move.choice in FINISH_KINDS:
                 # "Done" with steps still to go is a claim about the current step, not the run.
                 record["kind"] = "phase_done"
+                record["via"] = "move"
                 record["step"] = self.step_index + 1
                 if not self._gate(move, record):
                     self._decline("below_confidence")
                     settle(False, "below_confidence")
                     return None
                 settle(True)
-                done, self.step_index = self.steps[self.step_index], self.step_index + 1
-                self._journey.append({"n": len(self._journey) + 1,
-                                      "you_chose": f"said the step '{done}' was done",
-                                      "what_happened": f"the next step is '{self.steps[self.step_index]}'"})
-                self._pending["n"] = len(self._journey) + 1
+                self._advance()
                 continue
             break
 
@@ -680,8 +708,17 @@ class TypeSafeNavigator:
         state["this_is_the_new_screen"] = screen_for_model(compact)
         return state
 
+    def _advance(self) -> None:
+        """The current step is done: move the pointer and say so in the journey."""
+        done, self.step_index = self.steps[self.step_index], self.step_index + 1
+        self._journey.append({"n": len(self._journey) + 1,
+                              "you_chose": f"said the step '{done}' was done",
+                              "what_happened": f"the next step is '{self.steps[self.step_index]}'"})
+        if self._pending is not None:
+            self._pending["n"] = len(self._journey) + 1
+
     async def _ask(self, compact: Mapping[str, Any], questions: Mapping[str, Any]):
-        """One request; ``None`` when it failed, else the transcript turn and the move."""
+        """One request; ``None`` when it failed, else the transcript turn and every answer."""
         state = self._state(compact)
         started = time.perf_counter()
         try:
@@ -711,7 +748,7 @@ class TypeSafeNavigator:
             "response": plain(response),
             "menu": numbered(self._options)[0],
         }
-        return turn, response.answers["move"]
+        return turn, response.answers
 
     def _gate(self, move, record: dict[str, Any]) -> bool:
         """Does this one answer clear the gate? Writes the numbers it judged into the record.
@@ -824,7 +861,7 @@ class TypeSafeNavigator:
         }
 
 
-__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered", "goal_steps", "STEP_DONE_KINDS",
+__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered", "goal_steps", "STEP_DONE_KINDS", "STEP_QUESTION",
            "MODEL", "MIN_CONFIDENCE",
            "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "WAIT_TOOL", "SCROLL_KINDS",
            "FINISH_OUTCOMES", "FINISH_KINDS", "build_questions", "what_happened", "candidates", "tool_names"]
