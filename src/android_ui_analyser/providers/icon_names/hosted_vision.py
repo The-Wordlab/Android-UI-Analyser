@@ -66,8 +66,10 @@ class HostedVisionNamer(IconNamerProvider):
         )
         response.raise_for_status()
         text = _content(response.json())
-        if not text or text.strip().lower().rstrip(".") == "nothing":
+        if not text:
             return None
+        if text.strip().lower().rstrip(".") == "nothing":
+            return ""
         return text
 
 

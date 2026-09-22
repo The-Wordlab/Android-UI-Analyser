@@ -11,6 +11,8 @@ by default: it is a paid call and needs a key.
 Only controls that could carry an icon are sent: clickable, in the app's own window, with no
 name of their own, of a plausible size, and with something drawn in them. An invisible touch
 target is a blank crop and is skipped; the vision model would only say "unanswerable".
+When the model looks and sees nothing drawn, that answer is kept like a name, so the same
+pixels are never asked about twice.
 """
 
 from __future__ import annotations
@@ -19,11 +21,14 @@ import io
 import sqlite3
 from pathlib import Path
 
+import httpx
+import pytest
 from PIL import Image, ImageDraw
 
 from android_ui_analyser.config import Config
 from android_ui_analyser.icon_names import KEY_TOLERANCE_BITS, icon_key, key_distance
 from android_ui_analyser.providers.base import Availability, IconNamerProvider, ScreenImage
+from android_ui_analyser.providers.icon_names import hosted_vision
 from android_ui_analyser.providers.registry import register_icon_names
 from conftest import FakeDevice, make_config, make_engine
 
@@ -66,6 +71,19 @@ class FakeNamer(IconNamerProvider):
     def name_icon(self, image: ScreenImage) -> str | None:
         FakeNamer.crops.append((image.width, image.height))
         return "hamburger menu button, opens the side drawer."
+
+
+@register_icon_names("scripted_namer")
+class ScriptedNamer(IconNamerProvider):
+    answer: str | None = ""
+    crops: list[tuple[int, int]] = []
+
+    def is_available(self) -> Availability:
+        return Availability(True, "scripted namer")
+
+    def name_icon(self, image: ScreenImage) -> str | None:
+        ScriptedNamer.crops.append((image.width, image.height))
+        return ScriptedNamer.answer
 
 
 def engine_with(png: bytes, **overrides):
@@ -111,6 +129,44 @@ def test_the_second_sight_of_the_same_pixels_costs_nothing() -> None:
 
     assert by_bounds(result, ICON).content_desc == "hamburger menu button, opens the side drawer"
     assert len(FakeNamer.crops) == 1, "the cache answered; no second call"
+
+
+@pytest.mark.parametrize(
+    ("answer", "calls"),
+    [("", 1), (None, 2)],
+    ids=["nothing drawn is remembered", "no answer is asked again"],
+)
+def test_the_model_seeing_nothing_drawn_is_remembered_like_a_name(answer: str | None, calls: int) -> None:
+    """A dark control is not blank to the pixel check, yet the model sees nothing drawn in it.
+
+    Measured on one app: never remembered, that one crop was asked about on every read and
+    added 1-4 s to each. A reply with no answer in it is different, and is asked again.
+    """
+    ScriptedNamer.crops.clear()
+    ScriptedNamer.answer = answer
+    naming = {"icon_names": {"enabled": True, "chain": ["scripted_namer"]}}
+    for _ in range(2):
+        result = engine_with(hamburger_png(), **naming).analyze(source="hierarchy", with_ocr=False)
+
+    assert len(ScriptedNamer.crops) == calls
+    assert by_bounds(result, ICON).content_desc is None, "nothing is not a name"
+    assert by_bounds(result, ICON).named_by is None
+
+
+def test_the_hosted_namer_tells_nothing_drawn_from_no_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    replies = iter(["Nothing.", "", "Hamburger menu button, opens the side drawer"])
+
+    def post(url: str, **_: object) -> httpx.Response:
+        body = {"choices": [{"message": {"content": next(replies)}}]}
+        return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(hosted_vision.httpx, "post", post)
+    namer = hosted_vision.HostedVisionNamer({"model": "example/vision-model"})
+    crop = ScreenImage.from_pil(Image.new("RGB", (96, 96), (40, 42, 48)))
+
+    assert namer.name_icon(crop) == "", "the model looked and saw nothing drawn"
+    assert namer.name_icon(crop) is None, "an empty reply is no answer at all"
+    assert namer.name_icon(crop) == "Hamburger menu button, opens the side drawer"
 
 
 def test_every_run_on_the_machine_shares_one_database(tmp_path: Path) -> None:

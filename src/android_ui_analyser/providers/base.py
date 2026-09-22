@@ -248,7 +248,8 @@ class IconNamerProvider(Provider):
 
     @abstractmethod
     def name_icon(self, image: ScreenImage) -> str | None:
-        """A short name for the control in *image*, or ``None`` when nothing is drawn."""
+        """A short name for the control in *image*, ``""`` when nothing is drawn in it, or
+        ``None`` when there is no answer (only a name or ``""`` is remembered)."""
         raise NotImplementedError
 
 

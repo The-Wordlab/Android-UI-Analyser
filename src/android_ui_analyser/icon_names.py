@@ -126,9 +126,9 @@ class IconNameCache:
                 ).fetchone()
         except sqlite3.Error:
             return None
-        if not row or not row[0]:
+        if not row:
             return None
-        return {"name": row[0], "provider": row[1], "model": row[2]}
+        return {"name": row[0] or "", "provider": row[1], "model": row[2]}
 
     def put(self, key: str, name: str, *, provider: str, model: str | None) -> None:
         try:
@@ -201,8 +201,9 @@ def name_unlabelled(
         key = icon_key(crop)
         hit = cache.get(key)
         if hit is not None:
-            _apply(element, str(hit["name"]), str(hit.get("provider") or "cache"))
-            named += 1
+            if hit["name"]:  # "" is a known crop with nothing drawn in it
+                _apply(element, str(hit["name"]), str(hit.get("provider") or "cache"))
+                named += 1
         else:
             misses.append((element, key, crop))
     if not misses:
@@ -219,18 +220,21 @@ def name_unlabelled(
     try:
         for future, (element, key) in futures.items():
             try:
-                name = clean_name(future.result(timeout=max(0.0, deadline - time.monotonic())))
+                answer = future.result(timeout=max(0.0, deadline - time.monotonic()))
             except FuturesTimeout:
                 logger.info("icon naming: %s did not answer within %.1fs", provider.name, timeout_s)
                 continue
             except Exception as exc:
                 logger.info("icon naming: %s failed: %s", provider.name, exc)
                 continue
-            if name is None:
-                continue
+            if answer is None:
+                continue  # no answer: ask again next time
+            name = clean_name(answer) or ""
+            # "" remembers that nothing is drawn, so the same pixels are never asked twice.
             cache.put(key, name, provider=provider.name, model=str(model) if model else None)
-            _apply(element, name, provider.name)
-            named += 1
+            if name:
+                _apply(element, name, provider.name)
+                named += 1
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
     return named

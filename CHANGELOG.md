@@ -21,7 +21,9 @@ notes, so you can check for a newer version — and read what changed — withou
   "hamburger menu button, opens the side drawer" instead of "unlabelled control, top left".
   Measured on one app: 26% of offered controls were unnamed; the default model named a
   hamburger correctly three times out of three in 0.6-2.6 s for about $0.00005, so the whole
-  app costs a few thousandths of a dollar once. Needs `OPEN_ROUTER_API_KEY`.
+  app costs a few thousandths of a dollar once. A crop the model sees nothing drawn in is
+  remembered too, so no screen read waits on the same question twice. Needs
+  `OPEN_ROUTER_API_KEY`.
 - The app map now remembers each screen's layout tree: what is where, top to bottom, with
   tap/scroll/input/selected marks, repeated rows collapsed and system chrome dropped.
   `aua map --screen <name>` prints it (and `--json` carries it as `layout`); a logical name
