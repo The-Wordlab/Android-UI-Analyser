@@ -115,3 +115,27 @@ def test_tools_with_reasoning_stay_on_openrouter() -> None:
 def test_reasoning_without_tools_goes_direct() -> None:
     call = llm_route.prepare(_payload(tools=None, tool_choice=None), BOTH)
     assert call.route == "openai" and call.body["reasoning_effort"] == "low"
+
+
+def test_a_model_is_reachable_with_either_key_it_can_use() -> None:
+    assert llm_route.reachable(LUNA, {"OPENAI_API_KEY": "sk"})
+    assert llm_route.reachable(LUNA, OPENROUTER_ONLY)
+    assert not llm_route.reachable("google/gemma-4-26b", {"OPENAI_API_KEY": "sk"})
+    assert not llm_route.reachable(LUNA, {})
+    assert llm_route.reachable("google/gemma-4-26b", {}, openrouter_key="sk-or")
+
+
+def test_openai_shaped_fields_survive_both_routes() -> None:
+    """Grounding writes reasoning_effort and max_completion_tokens itself; both endpoints take them."""
+    payload = {"model": LUNA, "messages": [], "reasoning_effort": "none", "max_completion_tokens": 50}
+    assert llm_route.prepare(payload, BOTH).body["reasoning_effort"] == "none"
+    assert llm_route.prepare(payload, OPENROUTER_ONLY).body == payload
+
+
+def test_a_bare_model_id_means_openai_itself() -> None:
+    """`gpt-5` names no OpenRouter vendor: it is an OpenAI-only configuration, as grounding has."""
+    call = llm_route.prepare({"model": "gpt-5", "messages": []}, {"OPENAI_API_KEY": "sk"})
+    assert call.route == "openai" and call.body["model"] == "gpt-5"
+    with pytest.raises(llm_route.RouteError, match="OPENAI_API_KEY"):
+        llm_route.prepare({"model": "gpt-5", "messages": []}, OPENROUTER_ONLY)
+    assert not llm_route.reachable("gpt-5", OPENROUTER_ONLY)

@@ -62,6 +62,7 @@ from experiments.aua_controller.transport import resilient_request, retryable_ht
 from experiments.aua_controller.typesafe_judge import TypeSafeJudge
 from experiments.aua_controller.typesafe_navigator import TypeSafeNavigator
 
+from android_ui_analyser import llm_route
 from android_ui_analyser.engine_support import _parse_await_terms
 from android_ui_analyser.errors import UsageError
 
@@ -2392,7 +2393,8 @@ def main() -> int:
                      "The manifest records which candidates accept images; pass --judge-model.")
     request_config = validate_request_config(request_config)
     key = os.environ.get(args.api_key_env)
-    validate_endpoint(args.base_url, key)
+    # llm_route may answer an OpenAI model with OPENAI_API_KEY instead, so either key is enough here.
+    validate_endpoint(args.base_url, key or os.environ.get(llm_route.OPENAI_KEY))
 
     async def execute() -> dict[str, Any]:
         import httpx
@@ -2400,10 +2402,9 @@ def main() -> int:
         from mcp import ClientSession
         from mcp.client.stdio import stdio_client
 
-        headers = {"Authorization": f"Bearer {key}"}
         retries: list[dict[str, Any]] = []
         server = mcp_server(args.aua_command)
-        async with httpx.AsyncClient(headers=headers, timeout=120, follow_redirects=False) as http:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=False) as http:
             def classify(exc: BaseException):
                 """(status, headers) for a transport failure; None for anything else."""
                 if isinstance(exc, httpx.HTTPStatusError):
@@ -2421,11 +2422,14 @@ def main() -> int:
                       file=sys.stderr, flush=True)
 
             async def send(payload: dict[str, Any]) -> dict[str, Any]:
+                # llm_route picks the endpoint: OpenAI itself when there is a key for the model,
+                # OpenRouter otherwise. It also prices a direct answer into usage.cost.
+                call = llm_route.prepare(payload, openrouter_url=args.base_url, openrouter_key=key)
+
                 async def once() -> dict[str, Any]:
-                    response = await http.post(
-                        args.base_url.rstrip("/") + "/chat/completions", json=payload)
+                    response = await http.post(call.url, headers=call.headers, json=call.body)
                     response.raise_for_status()
-                    return response.json()
+                    return call.finish(response.json())
 
                 body = await resilient_request(
                     once, classify=classify, sleep=asyncio.sleep, on_retry=note_retry)

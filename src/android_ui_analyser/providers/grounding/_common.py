@@ -72,6 +72,20 @@ def commercial_availability(settings: dict[str, Any]) -> Availability:
     return Availability(True, "ok")
 
 
+def routed_availability(settings: dict[str, Any]) -> Availability:
+    """Whether a key reaches the configured model: OpenAI's own for an OpenAI model, else OpenRouter's."""
+    from ... import llm_route
+
+    model = str(settings.get("model") or "")
+    if not model:
+        return Availability(False, "model not configured")
+    openrouter_key = read_env_secret(settings.get("api_key_env")) if settings.get("api_key_env") else None
+    if llm_route.reachable(model, openrouter_key=openrouter_key):
+        return Availability(True, "ok")
+    wanted = llm_route.OPENAI_KEY if "/" not in model else f"{settings.get('api_key_env') or llm_route.OPENROUTER_KEYS[0]} or {llm_route.OPENAI_KEY}"
+    return Availability(False, f"{wanted} not set")
+
+
 # --------------------------------------------------------------------------- parsing
 
 

@@ -480,7 +480,7 @@ def test_commercial_unavailable_when_key_unset_names_env_var(monkeypatch, capsys
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     cases = [
-        (OpenAiGrounding({"api_key_env": "OPENAI_API_KEY"}), "OPENAI_API_KEY"),
+        (OpenAiGrounding({"model": "gpt-5", "api_key_env": "OPENAI_API_KEY"}), "OPENAI_API_KEY"),
         (GeminiGrounding({"api_key_env": "GEMINI_API_KEY"}), "GEMINI_API_KEY"),
         (AnthropicGrounding({"api_key_env": "ANTHROPIC_API_KEY"}), "ANTHROPIC_API_KEY"),
     ]
@@ -496,16 +496,17 @@ def test_commercial_unavailable_when_key_unset_names_env_var(monkeypatch, capsys
 
 def test_commercial_available_when_key_present(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", DUMMY_KEY)
-    avail = OpenAiGrounding({"api_key_env": "OPENAI_API_KEY"}).is_available()
+    avail = OpenAiGrounding({"model": "gpt-5", "api_key_env": "OPENAI_API_KEY"}).is_available()
     assert avail.ok is True
     assert DUMMY_KEY not in avail.reason
 
 
-def test_commercial_unavailable_when_api_key_env_missing(monkeypatch):
-    # No api_key_env configured at all.
+def test_commercial_unavailable_when_no_key_reaches_the_model(monkeypatch):
+    # An OpenAI model id needs OpenAI's key; llm_route has no other way to reach it.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     avail = OpenAiGrounding({"model": "gpt-5"}).is_available()
     assert avail.ok is False
-    assert "api_key_env" in avail.reason
+    assert "OPENAI_API_KEY" in avail.reason
 
 
 def test_local_vllm_availability(monkeypatch):

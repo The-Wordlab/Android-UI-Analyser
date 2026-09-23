@@ -17,9 +17,10 @@ from typing import Any
 
 import httpx
 
+from ... import llm_route
 from ...config import read_env_secret
 from ..base import Availability, IconNamerProvider, ScreenImage
-from ..grounding._common import commercial_availability, image_data_url
+from ..grounding._common import image_data_url, routed_availability
 from ..registry import register_icon_names
 
 PROMPT = (
@@ -33,9 +34,7 @@ MIN_SEND_PX = 192
 @register_icon_names("hosted_vision")
 class HostedVisionNamer(IconNamerProvider):
     def is_available(self) -> Availability:
-        if not self.settings.get("model"):
-            return Availability(False, "model not configured")
-        return commercial_availability(self.settings)
+        return routed_availability(self.settings)
 
     def _payload(self, image: ScreenImage) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -56,16 +55,20 @@ class HostedVisionNamer(IconNamerProvider):
         return payload
 
     def name_icon(self, image: ScreenImage) -> str | None:
-        key = read_env_secret(self.settings.get("api_key_env"))
-        base_url = str(self.settings.get("base_url", "https://openrouter.ai/api/v1")).rstrip("/")
+        env = self.settings.get("api_key_env")
+        call = llm_route.prepare(
+            self._payload(image),
+            openrouter_url=str(self.settings.get("base_url", llm_route.OPENROUTER_URL)),
+            openrouter_key=read_env_secret(env) if env else None,
+        )
         response = httpx.post(
-            f"{base_url}/chat/completions",
-            json=self._payload(image),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+            call.url,
+            json=call.body,
+            headers={"Content-Type": "application/json", **call.headers},
             timeout=float(self.settings.get("timeout_s", 8.0)),
         )
         response.raise_for_status()
-        text = _content(response.json())
+        text = _content(call.finish(response.json()))
         if not text:
             return None
         if text.strip().lower().rstrip(".") == "nothing":

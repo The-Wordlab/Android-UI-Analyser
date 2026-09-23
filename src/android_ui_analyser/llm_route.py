@@ -57,13 +57,21 @@ class Call:
 
 
 def openai_model(model: str) -> str | None:
-    """The OpenAI-direct id of an OpenRouter model id, or None when it cannot go direct."""
+    """The OpenAI-direct id of *model*, or None when it cannot go direct.
+
+    A bare id (``gpt-5``) names OpenAI itself. A vendor id goes direct only for ``openai/*`` with a
+    known price; any other stays on OpenRouter, which reports what it charged.
+    """
+    if "/" not in model:
+        return model or None
     vendor, _, name = model.partition("/")
     return name if vendor == "openai" and name in OPENAI_PRICES else None
 
 
 def openai_cost(model: str, usage: Mapping[str, Any]) -> float:
     """What OpenAI charges for one answer's usage, in USD."""
+    if model not in OPENAI_PRICES:
+        raise RouteError(f"no price is known for {model}; add it to llm_route.OPENAI_PRICES")
     fresh, cached_rate, write_rate, out = (rate / 1e6 for rate in OPENAI_PRICES[model])
     details = usage.get("prompt_tokens_details") or {}
     cached = int(details.get("cached_tokens") or 0)
@@ -110,23 +118,31 @@ def prepare(
     environ: Mapping[str, str] | None = None,
     *,
     openrouter_url: str = OPENROUTER_URL,
+    openrouter_key: str | None = None,
 ) -> Call:
-    """The endpoint, headers and body for *payload*, chosen by which keys exist."""
+    """The endpoint, headers and body for *payload*, chosen by which keys exist.
+
+    *openrouter_key* overrides the OpenRouter key names, for a caller told to read another one.
+    """
     environ = os.environ if environ is None else environ
-    direct = openai_model(str(payload.get("model", "")))
+    requested = str(payload.get("model", ""))
+    direct = openai_model(requested)
     openai_key = environ.get(OPENAI_KEY)
-    if direct and openai_key and not _reasons_with_tools(payload):
+    only_openai = bool(direct) and "/" not in requested
+    if only_openai and not openai_key:
+        raise RouteError(f"{requested} is an OpenAI model id: set {OPENAI_KEY}")
+    if direct and openai_key and (only_openai or not _reasons_with_tools(payload)):
 
         def priced(answer: dict[str, Any]) -> dict[str, Any]:
             usage = answer.get("usage")
-            if isinstance(usage, dict):
+            if isinstance(usage, dict) and direct in OPENAI_PRICES:
                 usage["cost"] = openai_cost(direct, usage)
             answer.setdefault("provider", "OpenAI")
             return answer
 
         return Call("openai", f"{OPENAI_URL}/chat/completions",
                     {"Authorization": f"Bearer {openai_key}"}, _openai_body(payload, direct), priced)
-    key = next((environ[name] for name in OPENROUTER_KEYS if environ.get(name)), None)
+    key = openrouter_key or next((environ[name] for name in OPENROUTER_KEYS if environ.get(name)), None)
     if not key:
         wanted = f"{OPENROUTER_KEYS[0]}" + (f" or {OPENAI_KEY}" if direct else "")
         raise RouteError(f"no key reaches {payload.get('model')}: set {wanted}")
@@ -134,7 +150,13 @@ def prepare(
                 {"Authorization": f"Bearer {key}"}, payload, lambda answer: answer)
 
 
-def has_key(environ: Mapping[str, str] | None = None) -> bool:
-    """Whether any model can be reached at all."""
+def reachable(
+    model: str, environ: Mapping[str, str] | None = None, *, openrouter_key: str | None = None
+) -> bool:
+    """Whether some key can reach *model*: OpenRouter's for any model, OpenAI's for its own."""
     environ = os.environ if environ is None else environ
-    return any(environ.get(name) for name in (*OPENROUTER_KEYS, OPENAI_KEY))
+    if "/" not in model:
+        return bool(model and environ.get(OPENAI_KEY))
+    if openrouter_key or any(environ.get(name) for name in OPENROUTER_KEYS):
+        return True
+    return bool(openai_model(model) and environ.get(OPENAI_KEY))

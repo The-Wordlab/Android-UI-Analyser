@@ -161,6 +161,7 @@ def test_the_hosted_namer_tells_nothing_drawn_from_no_answer(monkeypatch: pytest
         return httpx.Response(200, json=body, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(hosted_vision.httpx, "post", post)
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", "sk-or-test")
     namer = hosted_vision.HostedVisionNamer({"model": "example/vision-model"})
     crop = ScreenImage.from_pil(Image.new("RGB", (96, 96), (40, 42, 48)))
 

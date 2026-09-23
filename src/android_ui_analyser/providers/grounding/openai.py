@@ -1,6 +1,7 @@
 """``openai`` grounding provider — GPT-class vision via the OpenAI REST API.
 
-POSTs to ``{base_url}/chat/completions`` with the screenshot as an ``image_url`` content
+POSTs a chat completion, routed by ``llm_route`` (OpenAI itself when its key is set, else
+OpenRouter), with the screenshot as an ``image_url`` content
 part and a strict JSON-only prompt. The key is read at runtime from the env var named by
 ``settings["api_key_env"]`` (default ``OPENAI_API_KEY``) and sent as a bearer token; it
 is never stored in config or logged.
@@ -12,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from ... import llm_route
 from ...config import read_env_secret
 from ..base import (
     Availability,
@@ -25,9 +27,9 @@ from ..registry import register_grounding
 from ._common import (
     SYSTEM_PROMPT,
     build_user_prompt,
-    commercial_availability,
     image_data_url,
     parse_grounding_json,
+    routed_availability,
 )
 from ._screen_analysis import (
     DEFAULT_SCREEN_GRAPH_MAX_ELEMENTS,
@@ -59,7 +61,7 @@ class OpenAiGrounding(GroundingProvider):
     """OpenAI-compatible chat/completions grounding against the OpenAI API."""
 
     def is_available(self) -> Availability:
-        return commercial_availability(self.settings)
+        return routed_availability(self.settings)
 
     def _timeout_s(self) -> float:
         return float(self.settings.get("timeout_s", DEFAULT_TIMEOUT_S))
@@ -87,19 +89,23 @@ class OpenAiGrounding(GroundingProvider):
         return payload
 
     def locate(self, image: ScreenImage, instruction: str) -> Point | DetBox | None:
-        key = read_env_secret(self.settings.get("api_key_env"))
-        base_url = str(self.settings.get("base_url", "https://api.openai.com/v1")).rstrip("/")
+        call = self._route(self._payload(image, instruction))
         resp = httpx.post(
-            f"{base_url}/chat/completions",
-            json=self._payload(image, instruction),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}",
-            },
+            call.url,
+            json=call.body,
+            headers={"Content-Type": "application/json", **call.headers},
             timeout=self._timeout_s(),
         )
         resp.raise_for_status()
-        return parse_grounding_json(_extract_text(resp.json()), image, settings=self.settings)
+        return parse_grounding_json(
+            _extract_text(call.finish(resp.json())), image, settings=self.settings
+        )
+
+    def _route(self, payload: dict[str, Any]) -> llm_route.Call:
+        """OpenAI itself for an OpenAI model when its key is set, else OpenRouter (llm_route)."""
+        env = self.settings.get("api_key_env")
+        key = read_env_secret(env) if env and env != llm_route.OPENAI_KEY else None
+        return llm_route.prepare(payload, openrouter_key=key)
 
     def ask(
         self,
@@ -108,8 +114,6 @@ class OpenAiGrounding(GroundingProvider):
         elements: list[dict[str, Any]],
     ) -> ScreenAnalysisResult | None:
         """Answer a screen question from the screenshot fused with AUA's element graph."""
-        key = read_env_secret(self.settings.get("api_key_env"))
-        base_url = str(self.settings.get("base_url", "https://api.openai.com/v1")).rstrip("/")
         graph_limit = int(
             self.settings.get("screen_graph_max_elements", DEFAULT_SCREEN_GRAPH_MAX_ELEMENTS)
         )
@@ -151,17 +155,15 @@ class OpenAiGrounding(GroundingProvider):
         reasoning_effort = self.settings.get("reasoning_effort")
         if reasoning_effort is not None:
             payload["reasoning_effort"] = reasoning_effort
+        call = self._route(payload)
         resp = httpx.post(
-            f"{base_url}/chat/completions",
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}",
-            },
+            call.url,
+            json=call.body,
+            headers={"Content-Type": "application/json", **call.headers},
             timeout=self._timeout_s(),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = call.finish(resp.json())
         text = _extract_text(data)
         analysis = parse_screen_analysis(text)
         if analysis is None:
