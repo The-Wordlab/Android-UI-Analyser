@@ -650,11 +650,10 @@ def _default_models() -> dict[str, dict[str, Any]]:
         "paddleocr": {"lang": "en"},
         "tesseract": {"lang": "eng"},
         "easyocr": {"lang": ["en"]},
-        # icon names (referenced only if icon_names.enabled). GPT-6 Luna, reasoning off, named the
-        # hamburger crop right 3/3 in 1.3-2.5 s (2026-09-23). llm_route sends it to OpenAI itself
-        # when OPENAI_API_KEY is set, else through OpenRouter with the key named here.
+        # icon names (referenced only if icon_names.enabled). DeepSeek V4.1 Flash, not GPT-6 Luna:
+        # Luna calls an empty radio-button ring a "loading indicator" every time (2026-09-23).
         "hosted_vision": {
-            "model": "openai/gpt-6-luna",
+            "model": "deepseek/deepseek-v4.1-flash",
             "api_key_env": "OPEN_ROUTER_API_KEY",
             "base_url": "https://openrouter.ai/api/v1",
             "timeout_s": 8,
@@ -1237,7 +1236,7 @@ models:
   gemini:       { model: gemini-2.5-flash, api_key_env: GEMINI_API_KEY }
   gemini_flash: { model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY }
   # icon_names: any OpenAI-compatible vision endpoint; reasoning off or it thinks for 30 s about a 96 px crop
-  hosted_vision: { model: openai/gpt-6-luna, api_key_env: OPEN_ROUTER_API_KEY,
+  hosted_vision: { model: deepseek/deepseek-v4.1-flash, api_key_env: OPEN_ROUTER_API_KEY,
                    base_url: "https://openrouter.ai/api/v1", timeout_s: 8, reasoning: { enabled: false } }
   # Base model is local/external. null (or "bundled") uses AUA's small packaged LoRA adapter.
   functiongemma: { model_path: null, adapter_path: null, max_tokens: 24,

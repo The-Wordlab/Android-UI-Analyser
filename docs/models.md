@@ -30,7 +30,7 @@ environment variable, or on the command line; no code changes.
 | Controller (drives the app) | `controller.model` | `or-gpt6-luna-open` | a profile id from `experiments/aua_controller/openrouter-comparison.json`; reasoning off, so it can go direct |
 | Judge (decides the verdict) | `controller.judge_model` | `or-gpt6-luna-low-open` | keeps reasoning, which it needs; stays on OpenRouter |
 | Judge fallbacks | `controller.judge_fallbacks` | DeepSeek V4.1, then Gemma | other vendors, so an OpenAI outage does not stop judging |
-| Icon names | `models.hosted_vision.model` | `openai/gpt-6-luna` | reasoning off |
+| Icon names | `models.hosted_vision.model` | `deepseek/deepseek-v4.1-flash` | reasoning off; Luna calls an empty radio button a loading indicator |
 | Grounding / screen questions | `models.openai.model` | `openai/gpt-6-luna` | |
 | Jev navigator and judge | `TYPESAFE_API_KEY`, else the OpenRouter key | `typesafe/jev-*` | Jev's own client; the same "own key first, OpenRouter second" rule |
 

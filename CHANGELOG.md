@@ -207,8 +207,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 - Every model role now defaults to GPT-6 Luna: the controller (reasoning off, so it can use an
   OpenAI key directly), the judge (reasoning on; 96% pass/not-pass agreement with DeepSeek V4.1 over
-  27 saved rows, no passing row judged failed), icon names and grounding. DeepSeek V4.1 remains the
-  judge's first fallback.
+  27 saved rows, no passing row judged failed) and grounding. DeepSeek V4.1 remains the judge's
+  first fallback. Icon names stay on DeepSeek V4.1 Flash: Luna named an empty radio button a
+  loading indicator every time, which made a settings screen read as stuck.
 
 - The System One navigator reads a scripted goal one step at a time. A brief like "open the
   menu and look, then close it. Send a message and wait for the reply, then open the menu

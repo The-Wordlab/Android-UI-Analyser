@@ -39,7 +39,12 @@ def test_the_judge_falls_back_to_another_vendor() -> None:
         assert not BY_ID[rung]["repository"].startswith("openai/"), rung
 
 
-def test_icon_naming_and_grounding_use_luna() -> None:
-    models = Config().models
-    assert models["hosted_vision"]["model"] == "openai/gpt-6-luna"
-    assert models["openai"]["model"] == "openai/gpt-6-luna"
+def test_grounding_uses_luna() -> None:
+    assert Config().models["openai"]["model"] == "openai/gpt-6-luna"
+
+
+def test_icon_naming_stays_on_deepseek() -> None:
+    """Luna named an empty radio-button ring "loading indicator" on 7 of 7 crops, prompt
+    rewording included; the controller then read a settings screen as stuck and gave up.
+    DeepSeek V4.1 Flash named the same crops "radio button" every time (2026-09-23)."""
+    assert Config().models["hosted_vision"]["model"] == "deepseek/deepseek-v4.1-flash"
