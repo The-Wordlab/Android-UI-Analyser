@@ -1220,6 +1220,16 @@ def _kill_watchdog(meta: dict[str, Any] | None) -> None:
             os.kill(wpid, signal.SIGTERM)
 
 
+def _signal_emulator(pid: int, sig: int) -> None:
+    """Signal an emulator process AUA started -- the process, never its process group.
+
+    The first emulator on a host spawns `netsimd`, the network simulator every later emulator
+    shares, inside its own group. Signalling the group kills it, and each other running
+    emulator then shuts itself down ("Netsim Wifi ... is gone due to CANCELLED").
+    """
+    os.kill(pid, sig)
+
+
 def _rollback_failed_start(
     *,
     pid: int,
@@ -1247,9 +1257,9 @@ def _rollback_failed_start(
             process_gone = _wait_owned_process_exit(pid, started)
             break
         try:
-            os.killpg(pid, sig)
+            _signal_emulator(pid, sig)
         except ProcessLookupError:
-            pass  # the group may be gone before its child has been reaped
+            pass  # the process may be gone before it has been reaped
         except OSError:
             break
         process_gone = _wait_owned_process_exit(pid, started)
@@ -2072,16 +2082,19 @@ def _wait_owned_process_exit(pid: int, started: str | None) -> bool:
 
 
 def _terminate_recorded_process(pid: int, started: str | None) -> bool:
-    """SIGTERM a recorded instance's process group and wait until it has exited.
+    """SIGTERM a recorded instance's emulator process and wait until it has exited.
+
+    Only the process, never its group: the first emulator on a host spawns the `netsimd`
+    every later emulator shares, in its own group, and killing it shuts the others down.
 
     A delivered signal is not a stopped device: only an exited process frees its console
     port and its lease. A pid AUA may not signal counts as gone only when its start time
     proves the recorded process has exited and the pid was reused.
     """
     try:
-        os.killpg(pid, signal.SIGTERM)
+        _signal_emulator(pid, signal.SIGTERM)
     except ProcessLookupError:
-        pass  # the group is already gone; the recorded process may still be a zombie
+        pass  # already gone; the recorded process may still be a zombie
     except OSError:
         from .leases import _proc_started
 
@@ -2128,7 +2141,7 @@ def stop_spawned_instance(
     it down mid-run. A rollback owns only what it demonstrably created: the recorded
     emulator process and its instance record under this cache.
 
-    The recorded process group is stopped only when its instance identity is exact and no newer
+    The recorded emulator process is stopped only when its instance identity is exact and no newer
     live foreign lease may have claimed it. The shared ADB server is never involved. When a
     foreign lease exists, the timeline decides what is still ours:
 
@@ -2205,9 +2218,9 @@ def stop_spawned_instance(
                 may_kill_own_process = False
         if may_kill_own_process and isinstance(own_pid, int) and own_pid > 1:
             try:
-                os.killpg(own_pid, signal.SIGTERM)
+                _signal_emulator(own_pid, signal.SIGTERM)
             except ProcessLookupError:
-                # The group can already be gone; verify the recorded process as well.
+                # The process can already be gone; verify the recorded identity as well.
                 process_gone = _wait_owned_process_exit(own_pid, meta.get("process_started"))
             except OSError:
                 process_gone = False

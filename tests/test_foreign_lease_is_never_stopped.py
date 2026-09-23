@@ -53,7 +53,7 @@ def _no_real_devices(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     killed: list[str] = []
     monkeypatch.setattr(em, "_adb_emu_kill", killed.append)
     signalled: list[int] = []
-    monkeypatch.setattr(em.os, "killpg", lambda pid, _sig: signalled.append(pid))
+    monkeypatch.setattr(em, "_signal_emulator", lambda pid, _sig: signalled.append(pid))
     original_probe = em.os.kill
 
     def probe(pid: int, sig: int) -> None:
@@ -328,7 +328,7 @@ def test_spawned_rollback_is_atomic_against_a_concurrent_acquire(
         outcomes["acquired"] = leases.acquire(registry, serial, owner="new-owner")
         acquire_finished.set()
 
-    monkeypatch.setattr(em.os, "killpg", slow_kill)
+    monkeypatch.setattr(em, "_signal_emulator", slow_kill)
     rollback = threading.Thread(target=run_rollback)
     acquirer = threading.Thread(target=run_acquire)
     rollback.start()
@@ -454,7 +454,7 @@ def test_owned_rollback_releases_only_after_confirmed_process_exit(
         if outcome == "gone":
             raise ProcessLookupError()
 
-    monkeypatch.setattr(em.os, "killpg", signal_group)
+    monkeypatch.setattr(em, "_signal_emulator", signal_group)
     monkeypatch.setattr(em.os, "kill", probe)
     monkeypatch.setattr(em, "_OWNED_STOP_TIMEOUT_S", 0.01, raising=False)
     out = em.stop_spawned_instance(

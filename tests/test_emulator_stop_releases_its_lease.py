@@ -62,7 +62,7 @@ def host(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     killed: list[str] = []
     monkeypatch.setattr(em, "_adb_emu_kill", killed.append)
     signalled: list[int] = []
-    monkeypatch.setattr(em.os, "killpg", lambda pid, _sig: signalled.append(pid))
+    monkeypatch.setattr(em, "_signal_emulator", lambda pid, _sig: signalled.append(pid))
     real_kill = em.os.kill
 
     def probe(pid: int, sig: int) -> None:

@@ -54,7 +54,7 @@ def _no_real_kills(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     killed: list[str] = []
     monkeypatch.setattr(emulator_mod, "_adb_emu_kill", killed.append)
     # `stop` also signals recorded process groups; never let that reach a real pid.
-    monkeypatch.setattr(emulator_mod.os, "killpg", lambda *a, **k: None)
+    monkeypatch.setattr(emulator_mod, "_signal_emulator", lambda *a, **k: None)
     monkeypatch.setattr(emulator_mod, "_kill_watchdog", lambda meta: None)
     return killed
 

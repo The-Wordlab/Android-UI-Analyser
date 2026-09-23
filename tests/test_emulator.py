@@ -332,7 +332,7 @@ def test_start_inventory_failure_reaps_only_the_spawned_process(
     )
     signalled: list[int] = []
     released: list[int | None] = []
-    monkeypatch.setattr(emu.os, "killpg", lambda pid, _sig: signalled.append(pid))
+    monkeypatch.setattr(emu, "_signal_emulator", lambda pid, _sig: signalled.append(pid))
     monkeypatch.setattr(emu, "release_console_port", released.append)
     monkeypatch.setattr(
         emu,
@@ -563,7 +563,7 @@ def test_stop_mine_scoped_by_owner(
     killed: list[str] = []
     monkeypatch.setattr(emu, "_adb_emu_kill", lambda s: killed.append(s))
     monkeypatch.setattr(emu, "running_emulators", lambda: [])
-    monkeypatch.setattr(emu.os, "killpg", lambda *a, **k: None)
+    monkeypatch.setattr(emu, "_signal_emulator", lambda *a, **k: None)
     out = emu.stop(mine=True, owner="agent-a", cache_dir=tmp_path)
     assert killed == [], "owned teardown must not involve the shared adb server"
     assert out["stopped"] == ["emulator-5554"]
@@ -604,7 +604,7 @@ def test_stop_mine_kills_recorded(
     killed: list[str] = []
     monkeypatch.setattr(emu, "_adb_emu_kill", lambda s: killed.append(s))
     monkeypatch.setattr(emu, "running_emulators", lambda: [])
-    monkeypatch.setattr(emu.os, "killpg", lambda *a, **k: None)
+    monkeypatch.setattr(emu, "_signal_emulator", lambda *a, **k: None)
     out = emu.stop(mine=True, cache_dir=tmp_path)
     assert killed == [], "owned teardown must not involve the shared adb server"
     assert out["stopped"] == ["emulator-5554"]
@@ -632,7 +632,7 @@ def test_stop_owned_serial_uses_recorded_pid_without_shared_adb(
         encoding="utf-8",
     )
     signalled: list[int] = []
-    monkeypatch.setattr(emu.os, "killpg", lambda pid, _sig: signalled.append(pid))
+    monkeypatch.setattr(emu, "_signal_emulator", lambda pid, _sig: signalled.append(pid))
     monkeypatch.setattr(
         emu,
         "running_emulators",
@@ -675,8 +675,8 @@ def test_stop_mine_never_signals_unverified_or_pid_one_records(
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        emu.os,
-        "killpg",
+        emu,
+        "_signal_emulator",
         lambda pid, _sig: pytest.fail(f"unverified record signalled pid {pid}"),
     )
     monkeypatch.setattr(

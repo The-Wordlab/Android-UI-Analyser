@@ -41,7 +41,7 @@ def failed_start(tmp_path, monkeypatch):
 
     monkeypatch.setattr(emulator.os, "kill", probe)
     monkeypatch.setattr(emulator.os, "waitpid", lambda *_args: (0, 0))
-    monkeypatch.setattr(emulator.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(emulator, "_signal_emulator", lambda pid, sig: signals.append((pid, sig)))
     monkeypatch.setattr(leases, "_proc_started", lambda pid: state["started"])
     monkeypatch.setattr(emulator, "_OWNED_STOP_TIMEOUT_S", 0)
     monkeypatch.setattr(emulator, "_reservation_dir", lambda: reservations)
@@ -74,7 +74,7 @@ def test_failed_start_waits_for_exit_and_escalates_only_when_needed(
         if sig == exit_signal:
             state["alive"] = False
 
-    monkeypatch.setattr(emulator.os, "killpg", signal_group)
+    monkeypatch.setattr(emulator, "_signal_emulator", signal_group)
 
     assert rollback(meta, record) is True
 
@@ -95,7 +95,7 @@ def test_failed_start_keeps_bookkeeping_when_exit_cannot_be_confirmed(
         def deny_signal(_pid, _sig):
             raise PermissionError("synthetic signal denial")
 
-        monkeypatch.setattr(emulator.os, "killpg", deny_signal)
+        monkeypatch.setattr(emulator, "_signal_emulator", deny_signal)
 
     assert rollback(meta, record) is False
 
@@ -116,7 +116,7 @@ def test_failed_start_never_signals_a_reused_pid(failed_start, monkeypatch, reus
             signals.append((pid, sig))
             state["started"] = "replacement-start"
 
-        monkeypatch.setattr(emulator.os, "killpg", signal_group)
+        monkeypatch.setattr(emulator, "_signal_emulator", signal_group)
 
     assert rollback(meta, record) is True
 

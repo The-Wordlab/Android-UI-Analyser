@@ -224,6 +224,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Stopping one emulator no longer shuts down the others. AUA signalled the emulator's whole
+  process group, which also holds `netsimd`, the network simulator the host's first emulator
+  starts and every later one shares; the other emulators then lost it and exited. Only the
+  emulator process is signalled now.
+
 - Harness run totals now include Jev navigation and judgement alongside chat-model spend,
   including known Jev usage when a later step fails or is cancelled. The cost table shows
   Jev separately and labels its input-token pricing as an estimate, not reported billing.

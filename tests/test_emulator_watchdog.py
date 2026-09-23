@@ -166,8 +166,8 @@ def test_stop_mine_kills_watchdog(
 
     monkeypatch.setattr(emu.os, "kill", kill)
     monkeypatch.setattr(
-        emu.os,
-        "killpg",
+        emu,
+        "_signal_emulator",
         lambda pid, sig: None,
     )
     out = emu.stop(mine=True, cache_dir=tmp_path)

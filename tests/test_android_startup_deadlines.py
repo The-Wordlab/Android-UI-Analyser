@@ -222,7 +222,7 @@ def test_exhausted_readiness_retries_clean_only_the_owned_start(monkeypatch, tmp
 
     monkeypatch.setattr(emulator.subprocess, "run", run)
     killed, released = [], []
-    monkeypatch.setattr(emulator.os, "killpg", lambda pid, sig: killed.append(pid))
+    monkeypatch.setattr(emulator, "_signal_emulator", lambda pid, sig: killed.append(pid))
     monkeypatch.setattr(emulator, "release_console_port", released.append)
     monkeypatch.setattr(
         emulator, "_adb_emu_kill", lambda *args: pytest.fail("shared ADB must remain untouched")
@@ -277,7 +277,7 @@ def test_start_shares_readiness_budget_and_rolls_back_an_unready_boot(
     )
     killed = []
     released = []
-    monkeypatch.setattr(emulator.os, "killpg", lambda pid, sig: killed.append(pid))
+    monkeypatch.setattr(emulator, "_signal_emulator", lambda pid, sig: killed.append(pid))
     monkeypatch.setattr(emulator, "release_console_port", released.append)
     monkeypatch.setattr(
         emulator, "_adb_emu_kill", lambda *args: pytest.fail("must not touch shared ADB")
