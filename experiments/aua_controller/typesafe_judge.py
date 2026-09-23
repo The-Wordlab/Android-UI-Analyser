@@ -241,9 +241,10 @@ class TypeSafeJudge:
 
     def __init__(self, client: Any = None, *, model: str = DEFAULT_MODEL) -> None:
         if client is None:
+            from experiments.aua_controller.typesafe_cost import client_options
             from typesafe_sdk import TypeSafeClient
 
-            client = TypeSafeClient()
+            client = TypeSafeClient(**client_options())
         self.client = client
         self.model = model
         self.requests = 0

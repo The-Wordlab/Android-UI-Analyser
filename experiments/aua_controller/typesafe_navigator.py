@@ -66,7 +66,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from experiments.aua_controller.typesafe_cost import USD_PER_INPUT_TOKEN
+from experiments.aua_controller.typesafe_cost import USD_PER_INPUT_TOKEN, client_options
 
 MODEL = "jev-latest"
 MIN_CONFIDENCE = 0.85  # measured; see the module docstring -- the threshold is not the lever
@@ -476,7 +476,7 @@ class TypeSafeNavigator:
         if client is None:
             from typesafe_sdk import AsyncTypeSafeClient
 
-            client = AsyncTypeSafeClient()
+            client = AsyncTypeSafeClient(**client_options())
         self.client = client
         self.goal = goal
         # The script's steps and where the run is in it. A finish answered while steps remain is
