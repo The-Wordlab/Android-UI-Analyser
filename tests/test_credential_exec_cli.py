@@ -64,6 +64,7 @@ def test_child_argv_is_preserved_after_explicit_separator(
                 "env_file": destination,
                 "timeout_s": 45,
                 "prompt": False,
+                "optional": [],
             },
         )
     ]
@@ -98,6 +99,7 @@ def test_default_controls_and_child_exit_do_not_append_json(
                 "env_file": Path(".env"),
                 "timeout_s": 300,
                 "prompt": True,
+                "optional": [],
             },
         )
     ]

@@ -16,7 +16,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, BinaryIO, TextIO, cast
 
@@ -87,12 +87,13 @@ def _file_values(path: Path, names: list[str]) -> dict[str, str]:
 
 def _prepare(
     required: list[str], env_file: str | Path, *, timeout_s: int, prompt: bool,
+    optional: Sequence[str] = (),
 ) -> tuple[dict[str, Any], dict[str, str] | None]:
     """Internal boundary: the environment must never be serialized or logged."""
     try:
         if not required or any(
             not isinstance(name, str) or not credentials._NAME.fullmatch(name)
-            for name in required
+            for name in [*required, *optional]
         ):
             return _failure(
                 "credential_invalid_name", "Require at least one valid environment variable name."
@@ -129,7 +130,16 @@ def _prepare(
                         "credential_missing", f"Required credential {name} is absent after setup; no command was started."
                     ), None
                 child_env[name] = value
-        for name in names:
+        # An optional credential is passed when the process or the file has it, and is never
+        # asked for: an OpenAI key beside the required OpenRouter one is a cheaper route, not a
+        # requirement.
+        extras = [name for name in dict.fromkeys(optional) if name not in names]
+        absent = [name for name in extras if not child_env.get(name, "").strip()]
+        if absent:
+            target = Path(env_file).expanduser().absolute()
+            found = _file_values(target.parent.resolve(strict=True) / target.name, absent)
+            child_env.update({name: value for name, value in found.items() if value.strip()})
+        for name in [*names, *(name for name in extras if child_env.get(name, "").strip())]:
             value = child_env[name]
             if any(char in value for char in "\r\n\0") or len(value.encode("utf-8")) > 65_536:
                 return _failure(
@@ -344,7 +354,7 @@ def _stream_consumer(
 
 def run_with_credentials(
     command: list[str], *, required: list[str], env_file: str | Path,
-    timeout_s: int = 300, prompt: bool = True,
+    timeout_s: int = 300, prompt: bool = True, optional: list[str] | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Wait for required credentials, then start one command without a shell or retry.
 
@@ -355,12 +365,15 @@ def run_with_credentials(
     if not command or any(not isinstance(arg, str) or "\0" in arg for arg in command) or not command[0]:
         return _failure("credential_command_invalid", "Provide a command after --."), 1
     try:
-        result, child_env = _prepare(required, env_file, timeout_s=timeout_s, prompt=prompt)
+        result, child_env = _prepare(
+            required, env_file, timeout_s=timeout_s, prompt=prompt, optional=list(optional or [])
+        )
     except KeyboardInterrupt:
         return {"ok": False, "status": "cancelled", "started": False}, 130
     if child_env is None:
         return result, 130 if result.get("status") == "cancelled" else 1
-    values = [child_env[name] for name in dict.fromkeys(required)]
+    values = [child_env[name] for name in dict.fromkeys([*required, *(optional or [])])
+              if child_env.get(name, "").strip()]
     # A caller must never place a selected credential in process arguments. Pass it
     # via the environment only, including when the value was already configured.
     if any(value in arg for value in values for arg in command):

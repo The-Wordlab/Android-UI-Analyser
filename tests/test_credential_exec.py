@@ -222,3 +222,51 @@ def test_explicit_credential_in_consumer_argv_is_refused(tmp_path, monkeypatch):
     )
     assert code == 1 and result["error"]["code"] == "credential_value_in_command"
     assert TOKEN not in json.dumps(result)
+
+
+OPTIONAL = "AUA_TEST_OPTIONAL_TOKEN"
+
+
+def _reports_optional(marker):
+    return [sys.executable, "-c", (
+        "import os, pathlib; "
+        f"pathlib.Path({str(marker)!r}).write_text(os.environ.get({OPTIONAL!r}, '<absent>'))"
+    )]
+
+
+def test_an_optional_credential_is_passed_when_the_file_has_it(tmp_path, monkeypatch, capsys):
+    """A cheaper key (an OpenAI key beside the OpenRouter one) reaches the child when it exists."""
+    monkeypatch.delenv(OPTIONAL, raising=False)
+    destination, marker = tmp_path / ".env", tmp_path / "seen"
+    destination.write_text(f"{NAME}='{TOKEN}'\n{OPTIONAL}=optional-value\n")
+    monkeypatch.setattr(credentials, "_dialog", lambda *_: pytest.fail("no dialog"))
+    result, code = runner.run_with_credentials(
+        _reports_optional(marker), required=[NAME], optional=[OPTIONAL],
+        env_file=destination, prompt=False,
+    )
+    assert result["ok"] and code == 0
+    assert marker.read_text() == "optional-value"
+
+
+def test_a_missing_optional_credential_never_opens_a_dialog(tmp_path, monkeypatch):
+    monkeypatch.delenv(OPTIONAL, raising=False)
+    destination, marker = tmp_path / ".env", tmp_path / "seen"
+    destination.write_text(f"{NAME}='{TOKEN}'\n")
+    monkeypatch.setattr(credentials, "_dialog", lambda *_: pytest.fail("optional keys are never asked for"))
+    result, code = runner.run_with_credentials(
+        _reports_optional(marker), required=[NAME], optional=[OPTIONAL], env_file=destination,
+    )
+    assert result["ok"] and code == 0
+    assert marker.read_text() == "<absent>"
+
+
+def test_an_optional_credential_is_masked_in_output(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv(OPTIONAL, raising=False)
+    destination = tmp_path / ".env"
+    destination.write_text(f"{NAME}='{TOKEN}'\n{OPTIONAL}=optional-secret-value\n")
+    command = [sys.executable, "-c", f"import os; print(os.environ[{OPTIONAL!r}])"]
+    result, code = runner.run_with_credentials(
+        command, required=[NAME], optional=[OPTIONAL], env_file=destination, prompt=False,
+    )
+    assert code == 0
+    assert "optional-secret-value" not in capsys.readouterr().out

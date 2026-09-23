@@ -7907,6 +7907,12 @@ def config_exec(
         metavar="NAME",
         help="Required environment variable name; repeat for each.",
     ),
+    optional: list[str] = typer.Option(
+        [],
+        "--optional",
+        metavar="NAME",
+        help="Pass this variable too when it is set or in the .env file; never ask for it.",
+    ),
     timeout: int = typer.Option(300, "--timeout", help="Private dialog timeout in seconds."),
     no_prompt: bool = typer.Option(
         False, "--no-prompt", help="Fail if a required credential is missing; never open a dialog."
@@ -7940,7 +7946,8 @@ def config_exec(
         )
         raise typer.Exit(2)
     result, exit_code = run_with_credentials(
-        command, required=require, env_file=env_file, timeout_s=timeout, prompt=not no_prompt
+        command, required=require, env_file=env_file, timeout_s=timeout, prompt=not no_prompt,
+        optional=optional,
     )
     if not result.get("started") or result.get("error"):
         typer.echo(json.dumps(result, ensure_ascii=False, separators=(",", ":")), err=True)
