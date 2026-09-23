@@ -61,7 +61,7 @@ def test_an_enabled_controller_with_no_key_is_not_half_available(tmp_path) -> No
 def test_a_configured_controller_is_reported_ready() -> None:
     state = controller_state(_cfg(), environ={"OPEN_ROUTER_API_KEY": "sk-test"})
     assert state["available"] and state["reason"] == "ready"
-    assert state["model"] == "or-deepseek-v4-flash-0731-low-open"
+    assert state["model"] == "or-gpt6-luna-open"
 
 
 def test_the_controller_shipped_with_the_source_tree_is_found() -> None:
@@ -138,7 +138,7 @@ def test_a_driven_run_returns_the_verdict_with_its_evidence(tmp_path) -> None:
 
     assert result["driven_by"] == "aua" and result["ok"]
     assert result["verdict"] == "passed"
-    assert result["model"] == "or-deepseek-v4-flash-0731-low-open"
+    assert result["model"] == "or-gpt6-luna-open"
     assert result["evidence"]["counts"]["image"] == 1
     assert [entry["name"] for entry in result["evidence"]["videos"]] == ["journey.mp4"]
     assert result["evidence"]["report"].endswith("verdict.md")

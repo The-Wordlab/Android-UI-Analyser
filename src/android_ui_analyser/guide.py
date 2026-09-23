@@ -2104,8 +2104,10 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append(
         "To continue automatically after Save, wrap the intended program: "
         "`aua config exec --env-file /absolute/project/.env --require OPEN_ROUTER_API_KEY "
-        "-- python /absolute/project/runner.py`. Repeat `--require NAME` for each needed "
-        "variable. Nonempty inherited environment values win; otherwise only the named "
+        "--optional OPENAI_API_KEY -- python /absolute/project/runner.py`. Repeat "
+        "`--require NAME` for each needed variable; `--optional NAME` passes a variable when "
+        "the file has it and never asks. With OPENAI_API_KEY present, OpenAI models are "
+        "called on OpenAI directly instead of through OpenRouter (docs/models.md). Nonempty inherited environment values win; otherwise only the named "
         "variables are read from that exact dotenv file, without interpolation. Missing values "
         "open the private dialog; Save launches the child exactly once after all requirements "
         "are satisfied. Cancel or setup failure launches nothing. `--no-prompt` fails on missing "

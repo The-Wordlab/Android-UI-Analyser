@@ -13,6 +13,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- Model calls take the cheapest route they have a key for. Every hosted model request (controller,
+  judge, icon names, grounding) goes through `llm_route`: an OpenAI model is called on OpenAI
+  directly when `OPENAI_API_KEY` is set, and through OpenRouter otherwise. A direct answer is priced
+  into `usage.cost`, so spend stops and totals keep working. See `docs/models.md`, which also lists
+  the one setting that switches each model role.
+- `aua config exec --optional NAME` passes a credential when it is set or in the .env file, and
+  never asks for it.
+
 - `icon_names` (off by default): a clickable control the app never named gets a short name read
   off its pixels by a hosted vision model, once per distinct icon, kept in one SQLite
   database shared by every AUA run on the machine (`icon_names.db`, default
@@ -196,6 +204,11 @@ notes, so you can check for a newer version — and read what changed — withou
   screen as it is now. The run summary reports `host_ignored_actions`.
 
 ### Changed
+
+- Every model role now defaults to GPT-6 Luna: the controller (reasoning off, so it can use an
+  OpenAI key directly), the judge (reasoning on; 96% pass/not-pass agreement with DeepSeek V4.1 over
+  27 saved rows, no passing row judged failed), icon names and grounding. DeepSeek V4.1 remains the
+  judge's first fallback.
 
 - The System One navigator reads a scripted goal one step at a time. A brief like "open the
   menu and look, then close it. Send a message and wait for the reply, then open the menu

@@ -650,11 +650,11 @@ def _default_models() -> dict[str, dict[str, Any]]:
         "paddleocr": {"lang": "en"},
         "tesseract": {"lang": "eng"},
         "easyocr": {"lang": ["en"]},
-        # icon names (referenced only if icon_names.enabled). Measured on a hamburger icon:
-        # right three times out of three, 0.6-2.6 s, $0.00004-0.00008 a call; reasoning off,
-        # or the model thinks for 30 s about a 96 px crop.
+        # icon names (referenced only if icon_names.enabled). GPT-6 Luna, reasoning off, named the
+        # hamburger crop right 3/3 in 1.3-2.5 s (2026-09-23). llm_route sends it to OpenAI itself
+        # when OPENAI_API_KEY is set, else through OpenRouter with the key named here.
         "hosted_vision": {
-            "model": "deepseek/deepseek-v4.1-flash",
+            "model": "openai/gpt-6-luna",
             "api_key_env": "OPEN_ROUTER_API_KEY",
             "base_url": "https://openrouter.ai/api/v1",
             "timeout_s": 8,
@@ -662,10 +662,11 @@ def _default_models() -> dict[str, dict[str, Any]]:
         },
         # grounding (referenced only if grounding.enabled)
         "local_vllm": {"base_url": "http://localhost:8000/v1", "model": "Hcompany/Holo1.5-7B"},
+        # Routed by llm_route: OpenAI itself when OPENAI_API_KEY is set, else OpenRouter with
+        # the key named here.
         "openai": {
-            "model": "gpt-5.6-luna",
-            "api_key_env": "OPENAI_API_KEY",
-            "base_url": "https://api.openai.com/v1",
+            "model": "openai/gpt-6-luna",
+            "api_key_env": "OPEN_ROUTER_API_KEY",
             "reasoning_effort": "none",
             "screen_image_detail": "high",
             "screen_preview_max_width": 720,
@@ -798,9 +799,15 @@ class ControllerCfg(BaseModel):
     enabled: bool = False
     # Left empty, AUA looks for the controller shipped beside it (``experiments/aua_controller``).
     command: list[str] = Field(default_factory=list)
-    model: str = "or-deepseek-v4-flash-0731-low-open"
-    judge_model: str = "or-deepseek-v4p1-flash-low-open"
-    judge_fallbacks: list[str] = Field(default_factory=lambda: ["or-gemma4-26b-thinking"])
+    # GPT-6 Luna for both (2026-09-23; tests/test_every_model_role_defaults_to_gpt_6_luna.py).
+    # The controller has reasoning off, so an OPENAI_API_KEY takes it straight to OpenAI; the
+    # judge keeps reasoning, which it needs, and so stays on OpenRouter. The judge's fallbacks
+    # are other vendors, so an OpenAI outage does not take judging with it.
+    model: str = "or-gpt6-luna-open"
+    judge_model: str = "or-gpt6-luna-low-open"
+    judge_fallbacks: list[str] = Field(
+        default_factory=lambda: ["or-deepseek-v4p1-flash-low-open", "or-gemma4-26b-thinking"]
+    )
     api_key_env: str = "OPEN_ROUTER_API_KEY"
     base_url: str = "https://openrouter.ai/api/v1"
     max_steps: int = 24
@@ -1222,14 +1229,15 @@ models:
   apple_vision: { recognition_level: accurate, max_width: 720 }  # downscale, keep coordinates
   rapidocr:     { lang: en }
   local_vllm:   { base_url: "http://localhost:8000/v1", model: "Hcompany/Holo1.5-7B" }
-  openai:       { model: gpt-5.6-luna, api_key_env: OPENAI_API_KEY, reasoning_effort: none,
+  # openai, hosted_vision: OpenAI itself when OPENAI_API_KEY is set, else OpenRouter (api_key_env)
+  openai:       { model: openai/gpt-6-luna, api_key_env: OPEN_ROUTER_API_KEY, reasoning_effort: none,
                   screen_image_detail: high, screen_preview_max_width: 720,
                   screen_preview_jpeg_quality: 55 }
   anthropic:    { model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
   gemini:       { model: gemini-2.5-flash, api_key_env: GEMINI_API_KEY }
   gemini_flash: { model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY }
   # icon_names: any OpenAI-compatible vision endpoint; reasoning off or it thinks for 30 s about a 96 px crop
-  hosted_vision: { model: deepseek/deepseek-v4.1-flash, api_key_env: OPEN_ROUTER_API_KEY,
+  hosted_vision: { model: openai/gpt-6-luna, api_key_env: OPEN_ROUTER_API_KEY,
                    base_url: "https://openrouter.ai/api/v1", timeout_s: 8, reasoning: { enabled: false } }
   # Base model is local/external. null (or "bundled") uses AUA's small packaged LoRA adapter.
   functiongemma: { model_path: null, adapter_path: null, max_tokens: 24,

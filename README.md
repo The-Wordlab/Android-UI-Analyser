@@ -1033,7 +1033,7 @@ run, costs nothing.
 
 | Provider | License | Config key | Notes |
 |---|---|---|---|
-| `hosted_vision` | Commercial | `hosted_vision` | OpenRouter + `deepseek/deepseek-v4.1-flash` by default (about $0.00005 and 1-3 s an icon, right 3/3 on a hamburger); key via `OPEN_ROUTER_API_KEY`. Any OpenAI-compatible vision endpoint works: set `model` and `base_url`. |
+| `hosted_vision` | Commercial | `hosted_vision` | `openai/gpt-6-luna` by default, reasoning off (right 3/3 on a hamburger in 1.3-2.5 s); OpenAI itself when `OPENAI_API_KEY` is set, else OpenRouter via `OPEN_ROUTER_API_KEY` — see [docs/models.md](docs/models.md). Any OpenAI-compatible vision model id works. |
 
 ### Planner (opt-in, `planner.enabled: false` by default)
 

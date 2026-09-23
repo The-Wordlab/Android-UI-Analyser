@@ -218,9 +218,8 @@ def test_grounding_defaults_keep_gemini_and_add_key_aware_openai_fallback() -> N
     assert cfg.grounding.chain == ["local_vllm", "gemini", "openai"]
     assert cfg.models["gemini"]["model"] == "gemini-2.5-flash"
     assert cfg.models["openai"] == {
-        "model": "gpt-5.6-luna",
-        "api_key_env": "OPENAI_API_KEY",
-        "base_url": "https://api.openai.com/v1",
+        "model": "openai/gpt-6-luna",
+        "api_key_env": "OPEN_ROUTER_API_KEY",
         "reasoning_effort": "none",
         "screen_image_detail": "high",
         "screen_preview_max_width": 720,
