@@ -139,3 +139,25 @@ def test_a_bare_model_id_means_openai_itself() -> None:
     with pytest.raises(llm_route.RouteError, match="OPENAI_API_KEY"):
         llm_route.prepare({"model": "gpt-5", "messages": []}, OPENROUTER_ONLY)
     assert not llm_route.reachable("gpt-5", OPENROUTER_ONLY)
+
+
+def test_a_tool_schema_with_top_level_alternatives_is_flattened_for_openai() -> None:
+    """Live 2026-09-23: api.openai.com answered 400 "Invalid schema for function 'tap_and_analyze':
+    schema must have type 'object' and not have 'oneOf'/'anyOf'/'allOf'/'enum'/'const'/'not' at the
+    top level", and the run silently fell back to another model. AUA validates the arguments of
+    every call it executes, so the direct request only loses the alternative-requirement hint."""
+    tap = {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}},
+           "oneOf": [{"required": ["id"]}, {"required": ["text"]}]}
+    union = {"anyOf": [{"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+                       {"type": "object", "properties": {"b": {"type": "integer"}}}]}
+    payload = _payload(reasoning={"enabled": False}, tools=[
+        {"type": "function", "function": {"name": "tap_and_analyze", "parameters": tap}},
+        {"type": "function", "function": {"name": "either", "parameters": union}},
+    ])
+    tools = llm_route.prepare(payload, BOTH).body["tools"]
+    assert tools[0]["function"]["parameters"] == {
+        "type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}}}
+    assert tools[1]["function"]["parameters"] == {
+        "type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "integer"}}}
+    assert payload["tools"][0]["function"]["parameters"]["oneOf"], "the caller's payload is untouched"
+    assert llm_route.prepare(payload, OPENROUTER_ONLY).body["tools"][0]["function"]["parameters"] == tap

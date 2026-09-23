@@ -81,6 +81,31 @@ def openai_cost(model: str, usage: Mapping[str, Any]) -> float:
             + int(usage.get("completion_tokens") or 0) * out)
 
 
+_TOP_LEVEL_REFUSED = ("oneOf", "anyOf", "allOf", "enum", "const", "not")
+
+
+def _openai_parameters(schema: Any) -> Any:
+    """A function schema OpenAI accepts: an object, with no alternatives at the top level.
+
+    Live 2026-09-23: api.openai.com refuses `oneOf`/`anyOf`/`allOf`/`enum`/`const`/`not` at a
+    tool schema's top level, which OpenRouter accepts. The branches' properties are folded into
+    the object; AUA validates the arguments of every call it executes, so only the "one of these
+    is required" hint is lost.
+    """
+    if not isinstance(schema, dict) or not any(key in schema for key in _TOP_LEVEL_REFUSED):
+        return schema
+    flat = {key: value for key, value in schema.items() if key not in _TOP_LEVEL_REFUSED}
+    flat["type"] = "object"
+    properties = dict(flat.get("properties") or {})
+    for key in ("oneOf", "anyOf", "allOf"):
+        for branch in schema.get(key) or []:
+            if isinstance(branch, dict):
+                for name, spec in (branch.get("properties") or {}).items():
+                    properties.setdefault(name, spec)
+    flat["properties"] = properties
+    return flat
+
+
 def _openai_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
     body = {key: copy.deepcopy(value) for key, value in payload.items()
             if key not in _OPENROUTER_ONLY and value is not None}
@@ -94,6 +119,10 @@ def _openai_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
     if "max_tokens" in body:
         body["max_completion_tokens"] = body.pop("max_tokens")
     body.pop("temperature", None)
+    for tool in body.get("tools") or []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if isinstance(function, dict) and "parameters" in function:
+            function["parameters"] = _openai_parameters(function["parameters"])
     body["messages"] = [
         {key: value for key, value in message.items() if key not in _OPENROUTER_MESSAGE_FIELDS}
         if message.get("role") == "assistant" else message
