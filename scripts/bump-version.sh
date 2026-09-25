@@ -145,8 +145,7 @@ codex_plugin = json.loads(paths[".codex-plugin/plugin.json"].read_text(encoding=
 mcp = json.loads(paths[".mcp.json"].read_text(encoding="utf-8"))
 readme_path = root / "README.md"
 readme = readme_path.read_text(encoding="utf-8")
-mcp_args = mcp["mcpServers"]["android-ui-analyser"]["args"]
-mcp_source = mcp_args[2]
+mcp_source = mcp["mcpServers"]["android-ui-analyser"]["env"]["AUA_SPEC"]
 mcp_tag = re.search(r"@v([^@\s]+)$", mcp_source)
 pyproject_match = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
 init_match = re.search(r'^__version__ = "([^"]+)"$', init, re.MULTILINE)
@@ -193,7 +192,9 @@ init = init[: init_match.start(1)] + target + init[init_match.end(1) :]
 plugin["version"] = target
 marketplace["plugins"][0]["version"] = target
 codex_plugin["version"] = target
-mcp_args[2] = re.sub(r"@v[^@\s]+$", f"@v{target}", mcp_source)
+mcp["mcpServers"]["android-ui-analyser"]["env"]["AUA_SPEC"] = re.sub(
+    r"@v[^@\s]+$", f"@v{target}", mcp_source
+)
 readme = readme.replace(f"@v{current}", f"@v{target}")
 readme = readme.replace(f"`v{current}`", f"`v{target}`")
 readme = readme.replace(f"git checkout v{current}", f"git checkout v{target}")

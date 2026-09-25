@@ -66,7 +66,7 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
   regenerates and stages all three from `guide.py` on every commit. To regenerate by hand use
   `aua guide --emit-skill <path>` / `aua guide --emit-codex-metadata <path>`.
 - **Release every user-visible change deliberately.** The package/runtime version, both plugin
-  manifests, Claude marketplace listing, the Git tag pinned by `.mcp.json`, and README install
+  manifests, Claude marketplace listing, the Git tag pinned by `.mcp.json` (its `AUA_SPEC`), and README install
   examples must agree;
   `tests/test_the_version_is_the_same_everywhere.py` fails if they drift. Add the user-visible note
   under `## [Unreleased]` in `CHANGELOG.md` in the same commit. Cut the version with
@@ -76,7 +76,8 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
 - **Plugin/marketplace**: the repo is its own Claude Code and Codex marketplace
   (`.claude-plugin/marketplace.json`, name `the-wordlab`) exposing the `android-ui-analyser`
   plugin through `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`. Its shared
-  `.mcp.json` starts the matching release with `uvx`; plugin users need `uv`, not `aua` on PATH.
+  `.mcp.json` starts the matching release with `uvx` through a shell launcher that also looks
+  where Homebrew and the uv installer put it; plugin users need `uv`, not `aua` on PATH.
 - **`Engine` is one class spread over `engine.py` plus the `engine_*.py` domain modules.**
   `engine.py` keeps the constructor, properties, context managers and the device
   connect/lease core; every other method is a module-level function in the domain module its

@@ -630,7 +630,9 @@ class AndroidRuntimeBase(TargetRuntime, ABC):
     def wait_idle(self, timeout_ms: int = 5000) -> None:  # overridden by real device
         return None
 
-    def launch_app(self, package: str, *, activity: str | None = None) -> None:
+    def launch_app(
+        self, package: str, *, activity: str | None = None, arguments: Sequence[str] = ()
+    ) -> None:
         raise DeviceError("app launch requires a real device")  # overridden by real device
 
     def launcher_activities(self, package: str) -> list[str]:
@@ -1508,7 +1510,18 @@ class Uiautomator2Device(AndroidRuntimeBase):
             and match.group(0).split("/", 1)[0] == package
         ]
 
-    def launch_app(self, package: str, *, activity: str | None = None) -> None:
+    def launch_app(
+        self, package: str, *, activity: str | None = None, arguments: Sequence[str] = ()
+    ) -> None:
+        if arguments:
+            # `am start` carries intent extras, not argv; there is no process argument an
+            # Android app would read. Refusing is better than a launch that silently ignored
+            # what the caller passed and then looks like the flag "didn't work".
+            raise UsageError(
+                "launch arguments are not supported on Android",
+                hint="Android apps have no process arguments. Set up state with a feature-flag "
+                "deeplink or `aua flags` instead; `--arg` is for iOS simulators.",
+            )
         if activity is None:
             # uiautomator2 falls back to Monkey for an unresolved launcher, which prints a
             # page of warnings into agent transcripts and obscures the actual launch result.

@@ -5,14 +5,17 @@
 # Installs the `aua` CLI GLOBALLY (so it's on PATH in every project) and installs the
 # equivalent user-level skills so agents discover it in every project. Idempotent.
 #
-# Usage:  ./install.sh [--with-web] [--with-policy[=hybrid]] [--print-plan]
+# Usage:  ./install.sh [--with-web] [--with-ios] [--with-policy[=hybrid]] [--print-plan]
 #
 #   --with-web            install Playwright plus its Chromium browser
+#   --with-ios            macOS: install AXe through Homebrew (tap, trust, install) for
+#                         `--platform ios`; Xcode itself is left to you
 #   --with-policy         also install the optional LOCAL POLICY runtime (see below)
 #   --with-policy=hybrid  ... including the larger MLX-VLM reviewer
 #   --print-plan          print what would be installed and exit, touching nothing
 #   AUA_INSTALL_POLICY=1  same as --with-policy (=hybrid also accepted)
 #   AUA_INSTALL_WEB=1     same as --with-web
+#   AUA_INSTALL_IOS=1     same as --with-ios
 #
 # We intentionally do NOT use `set -e`: global installs are attempted with explicit
 # fallback to a project-local venv, so a failed `uv`/`pipx` step must not abort the script.
@@ -32,10 +35,12 @@ usage() {
 # and still printed "Setup complete".
 WITH_POLICY="${AUA_INSTALL_POLICY:-}"
 WITH_WEB="${AUA_INSTALL_WEB:-}"
+WITH_IOS="${AUA_INSTALL_IOS:-}"
 PRINT_PLAN=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --with-web)         WITH_WEB=1 ;;
+    --with-ios)         WITH_IOS=1 ;;
     --with-policy)      WITH_POLICY=1 ;;
     --with-policy=*)    WITH_POLICY="${1#*=}" ;;
     --print-plan)       PRINT_PLAN=1 ;;
@@ -119,6 +124,7 @@ if [ "$PRINT_PLAN" = 1 ]; then
   echo "extras: $EXTRA"
   echo "with: ${FEATURE_PKGS[*]}"
   echo "web-extra: ${WEB_EXTRA_LIST:-(none)}"
+  echo "ios-tools: $([ -n "$WITH_IOS" ] && echo "axe via Homebrew" || echo "(none)")"
   echo "policy-extras: ${POLICY_EXTRA_LIST:-(none)}"
   echo "policy-runtime: $POLICY_RUNTIME"
   exit 0
@@ -193,6 +199,22 @@ if [ -n "$WEB_EXTRA_LIST" ]; then
       || echo "    Browser install failed; retry with: pipx run --spec playwright playwright install chromium"
   else
     echo "    Playwright is installed, but Chromium still needs: playwright install chromium"
+  fi
+fi
+
+if [ -n "$WITH_IOS" ]; then
+  if [ "$(uname -s)" != "Darwin" ]; then
+    echo "==> --with-ios ignored: iOS simulators need macOS."
+  elif ! command -v brew >/dev/null 2>&1; then
+    echo "==> --with-ios needs Homebrew (https://brew.sh); install it and re-run, or run"
+    echo "    'aua --platform ios doctor --fix' later."
+  else
+    echo "==> Installing AXe for iOS simulators (brew tap, trust, install)..."
+    brew tap cameroncooke/axe
+    # A current Homebrew refuses to load a tap it has not been told to trust; an older one
+    # has no `trust` subcommand and loads the tap regardless, so that step may fail.
+    brew trust cameroncooke/axe >/dev/null 2>&1 || true
+    brew install axe || echo "    AXe install failed; retry with: aua --platform ios doctor --fix"
   fi
 fi
 

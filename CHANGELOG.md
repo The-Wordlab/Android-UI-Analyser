@@ -13,6 +13,24 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- `aua doctor --fix` installs the host tooling doctor found missing when the platform knows
+  how: on iOS, AXe through Homebrew — tap, `brew trust` (a current Homebrew refuses an
+  untrusted tap, which is where a by-hand `brew install axe` used to stop) and install.
+  `./install.sh --with-ios` does the same at setup. Nothing on a target is touched.
+- `aua app launch <bundle> --arg ARG` (repeatable) hands an iOS simulator app its process
+  arguments — how a test build reads launch flags — and MCP `app_launch_and_analyze` takes
+  `arguments`. Android has no process arguments and refuses them rather than dropping them.
+- The plugins' MCP server starts through a small shell launcher that looks for `uvx` in the
+  directories Homebrew and the uv installer use before giving up, and names what to install
+  when it is nowhere. An MCP host's PATH may not list those directories, and the plugin then
+  reported only the host's bare "command not found".
+
+### Changed
+
+- `docs/ios.md` says that element bounds are accessibility frames, which a rim or artwork
+  running past the view's edge widens by a few points, and what to measure instead for a
+  pixel-exact layout check.
+
 - Model calls take the cheapest route they have a key for. Every hosted model request (controller,
   judge, icon names, grounding) goes through `llm_route`: an OpenAI model is called on OpenAI
   directly when `OPENAI_API_KEY` is set, and through OpenRouter otherwise. A direct answer is priced

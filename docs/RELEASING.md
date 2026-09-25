@@ -41,7 +41,7 @@ Seven release surfaces, and they must agree:
 | `.claude-plugin/plugin.json` → `version` | the installed Claude Code plugin |
 | `.claude-plugin/marketplace.json` → `plugins[].version` | what `/plugin update` compares against |
 | `.codex-plugin/plugin.json` → `version` | the installed Codex plugin |
-| `.mcp.json` → pinned `@vX.Y.Z` source | the exact AUA release both plugins start through `uvx` |
+| `.mcp.json` → pinned `@vX.Y.Z` source (`env.AUA_SPEC`) | the exact AUA release both plugins start through `uvx` |
 | `README.md` → pinned install examples | the exact release users copy into `uvx` and clone commands |
 
 `tests/test_the_version_is_the_same_everywhere.py` fails if any of them drift apart, because a

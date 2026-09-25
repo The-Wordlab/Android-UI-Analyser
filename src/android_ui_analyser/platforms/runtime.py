@@ -379,7 +379,13 @@ class TargetRuntime(ABC):
 
     # -- optional application operations ---------------------------------
 
-    def launch_app(self, app_id: str, *, activity: str | None = None) -> None:
+    def launch_app(
+        self, app_id: str, *, activity: str | None = None, arguments: Sequence[str] = ()
+    ) -> None:
+        """Start *app_id*. *arguments* are process arguments for the app, on platforms that
+        have them (an iOS simulator passes them through ``simctl launch``); a platform without
+        them refuses a non-empty list rather than dropping it."""
+
         raise DeviceError("application launch is unsupported by this target runtime")
 
     def launcher_activities(self, app_id: str) -> list[str]:
