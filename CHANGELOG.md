@@ -17,7 +17,8 @@ notes, so you can check for a newer version — and read what changed — withou
   environment with the `proxy` extra (`typesafe-sdk` pins pydantic to a `typing-extensions` and
   `h11` newer than `mitmproxy` accepts), so `uv sync --frozen` failed on every run since. The two
   extras are now declared conflicting for uv and the lockfile is regenerated; nothing installs
-  both.
+  both. CI's test job now installs `typesafe`, which the System One judge and navigator suites
+  import — 80 of their tests had been failing on a missing module.
 
 ### Added
 
