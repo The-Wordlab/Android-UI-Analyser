@@ -338,9 +338,15 @@ class IOSSimulatorRuntime(TargetRuntime):
 
     # -- app lifecycle ------------------------------------------------------------------------
 
-    def launch_app(self, app_id: str, *, activity: str | None = None) -> None:
+    def launch_app(
+        self, app_id: str, *, activity: str | None = None, arguments: Sequence[str] = ()
+    ) -> None:
         del activity  # iOS apps have one entry point
-        result = self._tools.simctl("launch", self.target_id, app_id, timeout_s=60.0, check=False)
+        # Everything after the bundle id reaches the app as its process arguments — how a
+        # test build reads launch flags such as `--uitesting`.
+        result = self._tools.simctl(
+            "launch", self.target_id, app_id, *arguments, timeout_s=60.0, check=False
+        )
         if not result.ok:
             raise DeviceError(
                 f"could not launch {app_id}: {result.error_text}",

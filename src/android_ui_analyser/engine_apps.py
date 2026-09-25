@@ -790,6 +790,7 @@ def app(
     confirmed: bool = False,
     observe: bool = True,
     with_image: bool | str | None = None,
+    arguments: Sequence[str] = (),
 ) -> ActionResult:
     device = self.device
     a = action.lower()
@@ -833,7 +834,12 @@ def app(
             if clear_state:
                 clear_warning = lifecycle.clear_app(package)
             self._app_process_replaced(package)
-            lifecycle.launch_app(package, activity=entry)
+            # Only handed over when given: a runtime without process arguments keeps its
+            # two-argument `launch_app`, and a call with none reads exactly as before.
+            if arguments:
+                lifecycle.launch_app(package, activity=entry, arguments=tuple(arguments))
+            else:
+                lifecycle.launch_app(package, activity=entry)
         self._record_action_safe(step)
         if mem is not None:
             with self._mem_lock:

@@ -37,7 +37,7 @@ def _published_versions() -> dict[str, str]:
         (REPO / ".claude-plugin/marketplace.json").read_text(encoding="utf-8")
     )
     mcp = json.loads((REPO / ".mcp.json").read_text(encoding="utf-8"))
-    source = mcp["mcpServers"]["android-ui-analyser"]["args"][2]
+    source = mcp["mcpServers"]["android-ui-analyser"]["env"]["AUA_SPEC"]
     tag = re.search(r"@v([^@\s]+)$", source)
     return {
         "src/android_ui_analyser/__init__.py": __version__,
@@ -89,6 +89,13 @@ def test_both_plugins_share_the_pinned_uvx_mcp_server() -> None:
     assert claude_plugin["name"] == codex_plugin["name"] == "android-ui-analyser"
     assert codex_plugin["skills"] == "./skills/"
     assert codex_plugin["mcpServers"] == "./.mcp.json"
-    assert server["command"] == "uvx"
-    assert server["args"][-2:] == ["aua", "mcp"]
-    assert "@v" in server["args"][2], "the plugin must never follow moving main"
+    # The launcher is a shell one-liner rather than `uvx` itself: an MCP host inherits a
+    # PATH that may lack the directory Homebrew or the uv installer put `uvx` in, and then
+    # the plugin was "installed" on a machine where it could not start a single command.
+    # The one-liner looks in those directories first and says what to install when `uvx`
+    # is nowhere, instead of the host's bare "command not found".
+    assert server["command"] == "sh"
+    assert server["args"][0] == "-c"
+    assert "command -v uvx" in server["args"][1]
+    assert server["args"][1].endswith('exec uvx --quiet --from "$AUA_SPEC" aua mcp')
+    assert "@v" in server["env"]["AUA_SPEC"], "the plugin must never follow moving main"

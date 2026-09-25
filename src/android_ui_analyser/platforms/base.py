@@ -561,3 +561,13 @@ class PlatformAdapter(ABC):
                 "capabilities": sorted(self.capabilities),
             }
         }
+
+    def doctor_fix(self) -> dict[str, Any]:
+        """Install the host tooling ``doctor`` found missing, when the platform knows how.
+
+        Host tooling only: a fix never touches a target, so it needs no device-ledger entry.
+        The default platform has nothing it can install; ``fixed`` lists what was installed and
+        ``skipped`` says why the rest was left alone.
+        """
+
+        return {"fixed": [], "skipped": [f"{self.name} has nothing it can install"]}

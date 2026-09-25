@@ -5845,6 +5845,14 @@ def app_cmd(
         "--observe/--no-observe",
         help="launch: also return the screen the app opened on (skips a follow-up analyze).",
     ),
+    arg: list[str] = typer.Option(
+        [],
+        "--arg",
+        metavar="ARG",
+        help="launch / restart: one process argument for the app, repeatable "
+        "(`--arg --uitesting --arg --feature-flag-x:on`). iOS simulators pass them through "
+        "`simctl launch`; Android has no process arguments and refuses them.",
+    ),
 ) -> None:
     """Inspect or control the foreground app.
 
@@ -5921,6 +5929,7 @@ def app_cmd(
                     clear_state=False,
                     confirmed=yes,
                     observe=True if explicit_analyze else observe,
+                    arguments=tuple(arg),
                 ),
                 fmt,
             )
@@ -5938,6 +5947,11 @@ def app_cmd(
                 hint="Example: `aua app clear com.example.app --yes`. "
                 "Then re-apply flag overrides / re-login before asserting experiment UI.",
             )
+        if arg and a != "launch":
+            raise UsageError(
+                f"--arg only applies to launch, not to {action}",
+                hint="e.g. `aua app launch com.example.app --arg --uitesting`",
+            )
         _emit(
             _route(
                 engine,
@@ -5948,6 +5962,7 @@ def app_cmd(
                 clear_state=clear_state,
                 confirmed=yes,
                 observe=True if explicit_analyze else observe,
+                arguments=tuple(arg),
             ),
             fmt,
         )
@@ -8501,7 +8516,16 @@ def teardown_cmd(
 
 
 @app.command()
-def doctor(ctx: typer.Context) -> None:
+def doctor(
+    ctx: typer.Context,
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Install the host tooling doctor finds missing, when the platform knows how "
+        "(iOS: AXe through Homebrew, including the tap trust a current Homebrew needs). "
+        "Host tooling only; a target is never touched.",
+    ),
+) -> None:
     """Check environment + provider availability (never prints secret values)."""
     opts = _opts(ctx)
     # doctor never fails on unavailable subsystems: a config error still surfaces, but
@@ -8512,7 +8536,19 @@ def doctor(ctx: typer.Context) -> None:
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err
 
+    fix_report: dict[str, Any] | None = None
+    if fix:
+        # A failed install is the one thing doctor does fail on: the caller asked for a
+        # change and must not read "FAIL axe" on the next line as the fix having been tried.
+        try:
+            fix_report = engine.platform.doctor_fix()
+        except AuaError as err:
+            emit_error(err)
+            raise typer.Exit(int(err.exit_code)) from err
+
     report = _build_doctor_report(engine)
+    if fix_report is not None:
+        report["fix"] = fix_report
     # Default to a readable report; emit machine JSON only when explicitly requested.
     explicit = (opts.format or "").lower()
     if explicit in {"json", "compact"}:
@@ -8658,6 +8694,16 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
 
     lines: list[str] = ["aua doctor", "=========="]
     checks = report.get("checks", {})
+
+    fix = report.get("fix")
+    if isinstance(fix, dict):
+        for item in fix.get("fixed") or []:
+            lines.append(f"[FIX ] installed {item.get('tool', '?')}")
+            for step in item.get("steps") or []:
+                outcome = "ok" if step.get("ok") else f"failed: {step.get('detail')}"
+                lines.append(f"               {step.get('command')} — {outcome}")
+        for reason in fix.get("skipped") or []:
+            lines.append(f"[FIX ] skipped: {reason}")
 
     platform = checks.get("platform", {})
     if platform:

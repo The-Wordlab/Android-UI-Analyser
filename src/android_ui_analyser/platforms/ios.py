@@ -399,6 +399,22 @@ class IOSPlatform(PlatformAdapter):
                 checks["simulators"] = {"ok": False, "detail": exc.message}
         return checks
 
+    def doctor_fix(self) -> dict[str, Any]:
+        """Install AXe when it is missing; Xcode is left to the person, doctor only says so."""
+
+        fixed: list[dict[str, Any]] = []
+        skipped: list[str] = []
+        try:
+            self.tools.resolve_axe()
+            skipped.append("axe is already installed")
+        except DeviceError:
+            fixed.append({"tool": "axe", "steps": self.tools.install_axe()})
+        try:
+            self.tools.resolve_xcrun()
+        except DeviceError as exc:
+            skipped.append(f"xcrun: {exc.hint}")
+        return {"fixed": fixed, "skipped": skipped}
+
 
 def _optional_str(value: Any) -> str | None:
     text = str(value).strip() if value is not None else ""

@@ -25,9 +25,21 @@ from typing import Any, Protocol
 from .. import read_budget
 from ..errors import DeviceError, UsageError
 
-AXE_INSTALL_HINT = (
-    "Install AXe: `brew tap cameroncooke/axe && brew install axe` (macOS with Xcode 26 or newer)."
+#: What installing AXe takes, one host command per step. ``brew trust`` exists only on a
+#: Homebrew new enough to refuse an untrusted tap; on an older one it is an unknown command,
+#: and the tap is loaded without it — so that step is allowed to fail, the other two are not.
+AXE_INSTALL_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("brew", "tap", "cameroncooke/axe"),
+    ("brew", "trust", "cameroncooke/axe"),
+    ("brew", "install", "axe"),
 )
+AXE_INSTALL_HINT = (
+    "Install AXe: `aua --platform ios doctor --fix`, or by hand "
+    "`brew tap cameroncooke/axe && brew trust cameroncooke/axe && brew install axe` "
+    "(macOS with Xcode 26 or newer; `brew trust` is what a current Homebrew needs before it "
+    "will load the tap)."
+)
+BREW_HINT = "Install Homebrew from https://brew.sh, then re-run `aua --platform ios doctor --fix`."
 XCRUN_HINT = "Install Xcode with an iOS simulator runtime so `xcrun simctl` is available."
 SPRINGBOARD_APP_ID = "com.apple.springboard"
 # Apps that own the screen between third-party apps: the home screen itself and its search.
@@ -155,6 +167,37 @@ class IOSTools:
                 "AXe (`axe`) was not found on PATH", code="ios_tool_missing", hint=AXE_INSTALL_HINT
             )
         return candidate
+
+    def install_axe(self) -> list[dict[str, Any]]:
+        """Install AXe through Homebrew, and say what each step did.
+
+        Host tooling only — nothing on a simulator changes — so this needs no device-ledger
+        entry. The tap has to be trusted before a current Homebrew will install from it, which
+        is the step the README's one-liner used to leave out and the reason a first
+        ``brew install axe`` failed on a fresh machine.
+        """
+
+        if not shutil.which("brew"):
+            raise DeviceError(
+                "Homebrew (`brew`) was not found on PATH", code="ios_tool_missing", hint=BREW_HINT
+            )
+        steps: list[dict[str, Any]] = []
+        for argv in AXE_INSTALL_COMMANDS:
+            result = self._runner.run(argv, timeout_s=900.0)
+            steps.append(
+                {
+                    "command": " ".join(argv),
+                    "ok": result.ok,
+                    "detail": None if result.ok else result.error_text,
+                }
+            )
+            if not result.ok and argv[1] != "trust":
+                raise DeviceError(
+                    f"`{' '.join(argv)}` failed: {result.error_text}",
+                    code="ios_tool_install_failed",
+                    hint=AXE_INSTALL_HINT,
+                )
+        return steps
 
     def resolve_xcrun(self) -> str:
         candidate = self._xcrun_path or shutil.which("xcrun")
