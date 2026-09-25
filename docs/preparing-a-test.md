@@ -157,6 +157,18 @@ to turn it on.
 to run yourself, with `why` naming what was missing. Not a degraded mode; it is how AUA has always
 worked.
 
+This can save the calling agent's context and model tokens on a repeated, multi-step check: AUA's
+controller handles the screen-by-screen decisions and returns one verdict with evidence. It still
+makes device and model calls. Fresh setup, recording, and judging can make a short check slower, so
+finish an exploratory run first and prepare the scenario only when the behavior will be checked
+again. Preparing does not require another device run.
+
+The default full controller run needs `controller.enabled: true`, a controller command (or the
+source checkout's bundled controller), and `OPEN_ROUTER_API_KEY` available to that process.
+`TYPESAFE_API_KEY` can serve optional Jev navigation or judging; it is not a substitute for the
+generative controller key. Check the returned `driven_by` and `why` rather than inferring readiness
+from a key name.
+
 Turn the controller on in config:
 
 ```yaml

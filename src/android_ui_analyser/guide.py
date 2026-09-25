@@ -699,6 +699,20 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`aua daemon status` lists every live daemon with the exact command that stops it, and "
         "`aua daemon stop --all` ends all of them at once.",
     ),
+    (
+        "Save a repeatable feature check after the first manual session",
+        "After `session_finish`, ask whether this was new or changed UI behavior that will be "
+        "checked again on another build. If so, use `aua prepare list --app <package>` to reuse "
+        "a scenario, or `aua prepare start --goal <claim> --app <package>` and answer its "
+        "build, setup, flags, scope, and observable success/repeat questions. Save the contract "
+        "for the next run; do not rerun the device merely to create it. `prepare_run` can reduce "
+        "calling-agent round trips and tokens when the journey has many steps, but it still "
+        "spends model tokens and setup/judging time, so a short check may be slower. The default "
+        "full driver needs `controller.enabled`, a controller command or source checkout, and "
+        "`OPEN_ROUTER_API_KEY` in its environment. `TYPESAFE_API_KEY` supports optional Jev "
+        "navigation/judging but cannot by itself drive a prepared scenario. Keep exploratory "
+        "debugging and checks without an observable oracle with the calling agent.",
+    ),
 ]
 
 # ``guide --brief`` is what a fresh agent can afford to read in the middle of a task. Keep this
@@ -707,9 +721,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
 BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Prepare new user-visible behavior before leasing a device",
-        "New/changed behavior with no scenario: `aua prepare start` or MCP "
-        "`prepare_start`; then `prepare_answer` and `prepare_run`. Returns AUA's contract "
-        "verdict, evidence, and `flow_repair`; list first to reuse. No device before run.",
+        "New/changed behavior: `aua prepare start` or MCP `prepare_start`; "
+        "`prepare_answer` then `prepare_run`. Returns contract verdict, evidence and "
+        "`flow_repair`; list first. After a manual finish, prepare repeats. No device until run.",
     ),
     (
         "Start from the user's goal",
@@ -2193,7 +2207,7 @@ def render_skill_markdown() -> str:
     """Compact triggered instructions; deeper guidance stays in the CLI manual."""
     return """# Android UI Analyser
 
-Use AUA MCP or CLI (plugin adds no `aua` to `PATH`). Act by ID, never raw `adb`.
+Use AUA MCP or CLI (plugin adds no `aua` to `PATH`). Act by ID; no `adb`.
 
 Secrets: CLI `aua config exec --env-file PATH --require NAME -- COMMAND ARGS`; MCP
 `credential_request`. Use private Save/Cancel; never expose values or shell-source .env.
@@ -2206,14 +2220,14 @@ No scenario: MCP `prepare_start` → `prepare_answer` → `prepare_run`; CLI
 ## Operating loop
 
 1. Start with MCP `session_start(goal="<what must be verified>")`, or
-   `aua session start --goal "<goal>"`. It leaves leased targets alone and
-   provisions a free instance. `--app` selects; `--apk` installs. Reuse observation
-   and `recommended_call`; `--contract` requires proof. Add `--helper` (MCP `helper:true`)
-   for one-call device run+finish with cleanup and no fallback.
+   `aua session start --goal "<goal>"`. It leaves leased targets alone; provisions a free one.
+   `--app` selects; `--apk` installs. Reuse observation
+   and `recommended_call`; `--contract` requires proof. `--helper` (MCP `helper:true`)
+   runs and cleans up in one call, no fallback.
 2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival needs
    matching `logical_name`, state and surface. Goals do not authorize side effects.
 3. Reuse observations; `--no-observe` is rejected. Send reusable `el:` IDs back directly.
-   For `id_reusable: false`, pass `selector` fields; `index` selects current position (`aua guide`).
+   For `id_reusable: false`, pass `selector` fields.
    Filter elements by `clickable`. `--submit` is IME-only:
    check `submitted`; if false, use its `recommended_call` or `--send rid:<control>`, never retype.
    Check `observation_contract`: `action_succeeded`, `evidence_fresh`, `elements_available`,
@@ -2227,13 +2241,14 @@ No scenario: MCP `prepare_start` → `prepare_answer` → `prepare_run`; CLI
    On `daemon_outcome_unknown`, wait and inspect; never repeat the action.
 7. End with MCP `session_finish` or CLI `aua session finish` (compact), attaching final
    `phase_done` / `--phase-done` facts; never analyze for bookkeeping.
-   Unattended cleanup: `retain_started_target=false` or `--stop-started-target` stops its exact boot.
+   `retain_started_target=false` or `--stop-started-target` stops its exact boot.
    Incomplete finish stays active; `--allow-incomplete` abandons; `--full` gives evidence.
    Use `review.accounting`, not estimates: `top_level_calls` counts caller-visible invocations =
    `lifecycle_calls` + `task_calls`; `journal_events` adds `folded_internal_events` (action-bound wait).
    `reporting_call_included` is false; `top_level_calls_including_reporting_call` adds this review/finish.
-8. `session candidate-flow NAME --save` requires a passed contract, explicit `--reset-flow`
-   and passing reset/replay.
+8. After a manual finish, prepare repeatable feature checks for later builds.
+   An enabled controller with `OPEN_ROUTER_API_KEY` can drive them;
+   `TYPESAFE_API_KEY` alone only helps Jev roles. Short checks may be slower.
 
 Flow previews expose `selector_resilience`; only a same-frame privacy-safe positive `--until`
 yields an unmapped `satisfied_action_until` arrival.

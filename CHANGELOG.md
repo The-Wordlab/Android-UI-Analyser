@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- The generated agent skill and `aua guide` now prompt agents after a completed manual feature
+  check to prepare repeatable contract proof for a later build, with accurate controller-key and
+  speed/cost boundaries.
 - Model calls take the cheapest route they have a key for. Every hosted model request (controller,
   judge, icon names, grounding) goes through `llm_route`: an OpenAI model is called on OpenAI
   directly when `OPENAI_API_KEY` is set, and through OpenRouter otherwise. A direct answer is priced
