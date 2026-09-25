@@ -13,6 +13,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Release verification reads the plugin's pinned version from `AUA_SPEC`, matching the new
+  MCP launcher.
 - CI resolves again. The `typesafe` extra was added without a relock, and it cannot share an
   environment with the `proxy` extra (`typesafe-sdk` pins pydantic to a `typing-extensions` and
   `h11` newer than `mitmproxy` accepts), so `uv sync --frozen` failed on every run since. The two

@@ -71,7 +71,7 @@ jobs:
           init = pathlib.Path("src/android_ui_analyser/__init__.py").read_text()
           match = re.search(r'^__version__ = "([^"]+)"', init, re.MULTILINE)
           mcp = json.loads(pathlib.Path(".mcp.json").read_text())
-          mcp_source = mcp["mcpServers"]["android-ui-analyser"]["args"][2]
+          mcp_source = mcp["mcpServers"]["android-ui-analyser"]["env"]["AUA_SPEC"]
           mcp_match = re.search(r"@v([^@\s]+)$", mcp_source)
 
           found = {
