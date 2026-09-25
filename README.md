@@ -123,7 +123,7 @@ Clone the repository and run the idempotent bootstrap:
 ```bash
 git clone https://github.com/The-Wordlab/Android-UI-Analyser.git
 cd Android-UI-Analyser
-./install.sh                       # add --with-web for browser support
+./install.sh                       # add --with-web for browser support, --with-ios for AXe (macOS)
                                    # add --with-policy for the optional local policy runtime
 ./install.sh --print-plan          # preview without changing anything
 ```
@@ -176,6 +176,7 @@ upgrade by checking out the newer tag and re-running `./install.sh`. See
 | Symptom | Fix |
 |---|---|
 | `uvx: command not found` | [Install `uv`](https://docs.astral.sh/uv/getting-started/installation/) (`brew install uv` on macOS), then open a new terminal. The plugin's MCP launcher also looks in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and `~/.cargo/bin`, so a `uv` installed there works even when the host's PATH does not list it. |
+| `brew install axe` refuses to load the untrusted tap `cameroncooke/axe` | A current Homebrew needs `brew trust cameroncooke/axe` first. `aua --platform ios doctor --fix` (or `./install.sh --with-ios`) runs the tap, trust and install steps for you. |
 | `adb: command not found` | Install Android platform-tools and follow [Installing `adb`](#installing-adb-platform-tools). |
 | `adb devices` is empty | Boot an emulator, or enable USB debugging on the phone and accept its authorization prompt. |
 | The plugin is installed but AUA is unavailable | Confirm `uvx --version` works, then open a new Claude Code or Codex session so the plugin's MCP server starts. |
@@ -1206,6 +1207,7 @@ aua --platform ios doctor --fix                 # installs AXe (tap, trust, inst
 aua --platform ios doctor                       # xcrun, axe, and which simulators are booted
 aua --platform ios --format compact analyze     # or: export AUA_PLATFORM=ios
 aua --platform ios tap-and-analyze --text "General"
+aua --platform ios app launch com.example.app --arg --uitesting --until rid:home   # launch flags + arrival
 ```
 
 Elements, ids, `has`/`wait`, flows and maps behave as on Android; `resource_id` is the
