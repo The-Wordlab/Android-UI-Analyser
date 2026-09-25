@@ -87,7 +87,16 @@ class FakeSimulatorHost:
         if tool == "ps":
             assert argv[1:] == ("-p", "1234", "-o", "lstart=")
             return self._ok(argv, b"Fri Sep 18 10:00:00 2026\n")
+        if tool == "brew":
+            return self._brew(argv)
         raise AssertionError(f"unexpected host tool {argv!r}")
+
+    #: What each `brew` step answers; a test flips one to model an older or a failing Homebrew.
+    brew_results: dict[str, tuple[int, str]] = {}
+
+    def _brew(self, argv: tuple[str, ...]) -> CommandResult:
+        code, message = self.brew_results.get(argv[1], (0, ""))
+        return self._ok(argv) if code == 0 else self._fail(argv, message, code)
 
     @staticmethod
     def _ok(argv: tuple[str, ...], stdout: bytes = b"") -> CommandResult:
@@ -742,3 +751,80 @@ def test_process_names_are_looked_up_once_per_pid(
     host.describe_override = roots
     assert runtime.current_app().app_id == "com.example.relaunched"
     assert len(host.argv_of("xcrun", "simctl", "spawn", UDID, "launchctl", "list")) == 2
+
+
+def test_launch_arguments_reach_the_app_through_simctl(
+    adapter: IOSPlatform, host: FakeSimulatorHost
+) -> None:
+    runtime = adapter.connect(UDID)
+    host.calls.clear()
+
+    runtime.launch_app(APP_ID, arguments=("--uitesting", "--feature-flag-x:on"))
+
+    launch = next(call for call in host.calls if call[1:3] == ("simctl", "launch"))
+    assert launch[3:] == (UDID, APP_ID, "--uitesting", "--feature-flag-x:on")
+
+
+def test_doctor_fix_installs_axe_when_it_is_missing(
+    tmp_path: Path, host: FakeSimulatorHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "shutil.which", lambda name: None if name == "axe" else f"/fake/bin/{name}"
+    )
+    platform = IOSPlatform(_config(tmp_path), runner=host)
+    platform.options = platform.validate_options({})
+
+    report = platform.doctor_fix()
+
+    brew = [call for call in host.calls if call[0] == "brew"]
+    assert brew == [
+        ("brew", "tap", "cameroncooke/axe"),
+        ("brew", "trust", "cameroncooke/axe"),
+        ("brew", "install", "axe"),
+    ]
+    assert [item["tool"] for item in report["fixed"]] == ["axe"]
+    assert all(step["ok"] for step in report["fixed"][0]["steps"])
+
+
+def test_doctor_fix_tolerates_a_homebrew_without_trust(
+    tmp_path: Path, host: FakeSimulatorHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older Homebrew has no `trust` subcommand and loads the tap regardless."""
+    monkeypatch.setattr(
+        "shutil.which", lambda name: None if name == "axe" else f"/fake/bin/{name}"
+    )
+    host.brew_results = {"trust": (1, "Error: Unknown command: trust")}
+    platform = IOSPlatform(_config(tmp_path), runner=host)
+    platform.options = platform.validate_options({})
+
+    report = platform.doctor_fix()
+
+    steps = report["fixed"][0]["steps"]
+    assert [step["ok"] for step in steps] == [True, False, True]
+    assert "Unknown command" in steps[1]["detail"]
+
+
+def test_doctor_fix_reports_a_failed_install_rather_than_a_missing_tool(
+    tmp_path: Path, host: FakeSimulatorHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "shutil.which", lambda name: None if name == "axe" else f"/fake/bin/{name}"
+    )
+    host.brew_results = {"install": (1, "Error: No available formula with the name axe")}
+    platform = IOSPlatform(_config(tmp_path), runner=host)
+    platform.options = platform.validate_options({})
+
+    with pytest.raises(DeviceError) as exc:
+        platform.doctor_fix()
+    assert exc.value.code == "ios_tool_install_failed"
+    assert "brew install axe" in exc.value.message
+
+
+def test_doctor_fix_leaves_an_installed_axe_alone(adapter: IOSPlatform, host: FakeSimulatorHost) -> None:
+    host.calls.clear()
+
+    report = adapter.doctor_fix()
+
+    assert report["fixed"] == []
+    assert "axe is already installed" in report["skipped"]
+    assert not [call for call in host.calls if call[0] == "brew"]

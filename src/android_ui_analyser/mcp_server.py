@@ -178,6 +178,12 @@ def _engine_method(engine: Engine, name: str) -> Any:
     return getattr(engine, name)
 
 
+_LAUNCH_ARGUMENTS_PROP: dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Process arguments for the launched app, in order (iOS simulators only; "
+    "Android has none and refuses them).",
+}
 _WITH_IMAGE_PROP: dict[str, Any] = {
     "type": ["boolean", "string"],
     "description": "Keep the returned frame (true or destination path); false disables output. Overrides configure default without another capture.",
@@ -2827,6 +2833,7 @@ def _tool_definitions() -> list[types.Tool]:
                     "activity": {"type": "string"},
                     "clear_state": {"type": "boolean", "default": False},
                     "confirmed": {"type": "boolean", "default": False},
+                    "arguments": _LAUNCH_ARGUMENTS_PROP,
                 },
                 "required": ["action"],
                 "additionalProperties": False,
@@ -2847,6 +2854,7 @@ def _tool_definitions() -> list[types.Tool]:
                         "default": False,
                         "description": "Required when clear_state=true because it wipes app data.",
                     },
+                    "arguments": _LAUNCH_ARGUMENTS_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                     **_UNTIL_PROPS,
                 },
@@ -4510,6 +4518,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 activity=args.get("activity"),
                 clear_state=args.get("clear_state", False),
                 confirmed=args.get("confirmed", False),
+                arguments=tuple(args.get("arguments") or ()),
             )
         )
     if name == "app_launch_and_analyze":
@@ -4524,6 +4533,7 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 confirmed=args.get("confirmed", False),
                 observe=True,
                 with_image=img,
+                arguments=tuple(args.get("arguments") or ()),
             )
         )
     if name == "app_status":

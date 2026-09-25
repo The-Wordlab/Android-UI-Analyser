@@ -26,7 +26,7 @@ platforms:
 | Requirement | Why |
 |---|---|
 | macOS with **Xcode 26 or newer** and at least one iOS simulator runtime | `xcrun simctl` owns simulator inventory, boot state, app lifecycle, screenshots, clipboard, links, permissions and location. |
-| **AXe** (`brew tap cameroncooke/axe && brew install axe`) | `axe describe-ui` reads the accessibility tree of a booted simulator; `axe tap/swipe/type/key/button` sends HID input. |
+| **AXe** (`aua --platform ios doctor --fix`, or `brew tap cameroncooke/axe && brew trust cameroncooke/axe && brew install axe`) | `axe describe-ui` reads the accessibility tree of a booted simulator; `axe tap/swipe/type/key/button` sends HID input. A current Homebrew refuses an untrusted tap, which is why the one-liner has the `trust` step. |
 | A **booted simulator**, or a simulator name/UDID to boot | `aua --platform ios doctor` shows what is available and booted. |
 
 Physical iPhones are not supported: AXe drives simulators only.
@@ -39,6 +39,11 @@ Physical iPhones are not supported: AXe drives simulators only.
   ids stay stable while the value moves. `resource_id` is the `accessibilityIdentifier`,
   so `--rid` and `has --by id` work when the app sets identifiers. Switches are `checkable` with
   `checked` read from their value. The keyboard is `window: ime`; the home screen is `system`.
+- **Bounds are accessibility frames.** They are what AXe reports for the element, which can be
+  larger than the view's layout frame: a decorative overlay that runs past the edge (a blurred
+  rim, artwork bleeding out of a card's corner) or a container that combines its children
+  widens the frame by a few points. Use them to locate and tap; for a pixel-exact layout
+  assertion, measure the screenshot.
 - **Coordinates.** AXe reports logical points; `aua` publishes screenshot pixels. The scale is
   measured once per connection from a screenshot and the accessibility root, so bounds, centers and
   taps line up with the PNG `analyze` returns.
@@ -57,6 +62,9 @@ Physical iPhones are not supported: AXe drives simulators only.
   need `--serial`. Naming a shut-down simulator boots it first (`boot_timeout_s`).
 - **Apps.** `aua install <Build.app>` installs an `iphonesimulator` `.app` bundle (not an
   `.ipa`); `aua app launch|stop|clear|grant|exists` map to `simctl launch|terminate|…`.
+  `aua app launch <bundle> --arg --uitesting --arg --feature-flag-x:on` hands the app its
+  process arguments, the way a test build reads launch flags; add the global `--until
+  rid:<landing>` to the same call to wait on the screen it opens instead of sleeping.
   `aua app uninstall <bundle-id> --yes` removes the app and its data.
   `clear` empties the app's data container and resets its permissions. Permission grants use
   `simctl privacy`, which covers calendar, contacts, photos, media library, microphone, motion,

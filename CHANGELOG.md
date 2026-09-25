@@ -11,11 +11,34 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Release verification reads the plugin's pinned version from `AUA_SPEC`, matching the new
+  MCP launcher.
+- CI resolves again. The `typesafe` extra was added without a relock, and it cannot share an
+  environment with the `proxy` extra (`typesafe-sdk` pins pydantic to a `typing-extensions` and
+  `h11` newer than `mitmproxy` accepts), so `uv sync --frozen` failed on every run since. The two
+  extras are now declared conflicting for uv and the lockfile is regenerated; nothing installs
+  both. CI and release test jobs now install `typesafe`, which the System One judge and navigator
+  suites import — 80 of their tests had been failing on a missing module.
+
 ### Added
 
 - The generated agent skill and `aua guide` now prompt agents after a completed manual feature
   check to prepare repeatable contract proof for a later build, with accurate controller-key and
   speed/cost boundaries.
+- `aua doctor --fix` installs the host tooling doctor found missing when the platform knows
+  how: on iOS, AXe through Homebrew — tap, `brew trust` (a current Homebrew refuses an
+  untrusted tap, which is where a by-hand `brew install axe` used to stop) and install.
+  `./install.sh --with-ios` does the same at setup. Nothing on a target is touched.
+- `aua app launch <bundle> --arg ARG` (repeatable) hands an iOS simulator app its process
+  arguments — how a test build reads launch flags — and MCP `app_launch_and_analyze` takes
+  `arguments`. Android has no process arguments and refuses them rather than dropping them.
+- The plugins' MCP server starts through a small shell launcher that looks for `uvx` in the
+  directories Homebrew and the uv installer use before giving up, and names what to install
+  when it is nowhere. An MCP host's PATH may not list those directories, and the plugin then
+  reported only the host's bare "command not found".
+
 - Model calls take the cheapest route they have a key for. Every hosted model request (controller,
   judge, icon names, grounding) goes through `llm_route`: an OpenAI model is called on OpenAI
   directly when `OPENAI_API_KEY` is set, and through OpenRouter otherwise. A direct answer is priced
@@ -207,6 +230,10 @@ notes, so you can check for a newer version — and read what changed — withou
   screen as it is now. The run summary reports `host_ignored_actions`.
 
 ### Changed
+
+- `docs/ios.md` says that element bounds are accessibility frames, which a rim or artwork
+  running past the view's edge widens by a few points, and what to measure instead for a
+  pixel-exact layout check.
 
 - Every model role now defaults to GPT-6 Luna: the controller (reasoning off, so it can use an
   OpenAI key directly), the judge (reasoning on; 96% pass/not-pass agreement with DeepSeek V4.1 over

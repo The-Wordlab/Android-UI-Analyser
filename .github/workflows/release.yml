@@ -71,7 +71,7 @@ jobs:
           init = pathlib.Path("src/android_ui_analyser/__init__.py").read_text()
           match = re.search(r'^__version__ = "([^"]+)"', init, re.MULTILINE)
           mcp = json.loads(pathlib.Path(".mcp.json").read_text())
-          mcp_source = mcp["mcpServers"]["android-ui-analyser"]["args"][2]
+          mcp_source = mcp["mcpServers"]["android-ui-analyser"]["env"]["AUA_SPEC"]
           mcp_match = re.search(r"@v([^@\s]+)$", mcp_source)
 
           found = {
@@ -148,7 +148,7 @@ jobs:
           enable-cache: true
       # Identical to ci.yml: exactly the extras the suite asserts against, because
       # tests/test_ocr.py requires paddleocr, tesseract and easyocr to report *unavailable*.
-      - run: uv sync --frozen --extra dev --extra apple --extra rapidocr --extra audio --extra web
+      - run: uv sync --frozen --extra dev --extra apple --extra rapidocr --extra audio --extra web --extra typesafe
       # ruff and mypy are platform-independent, so one runner is enough — no reason to pay for
       # them twice on a release.
       - if: runner.os == 'Linux'

@@ -1679,8 +1679,12 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("## iOS simulators (`--platform ios`)")
     p.append(
         "Same commands, same ids. Select once with `aua --platform ios …` or `AUA_PLATFORM=ios`; "
-        "`aua --platform ios doctor` checks `xcrun`, AXe (`brew install cameroncooke/axe/axe`) and "
-        "which simulators are booted. `resource_id` is the accessibilityIdentifier (use `--rid`), "
+        "`aua --platform ios doctor` checks `xcrun`, AXe and which simulators are booted, and "
+        "`doctor --fix` installs AXe through Homebrew (tap, trust, install) when it is missing. "
+        "`aua app launch <bundle> --arg <flag>` (repeatable) hands the app its process arguments "
+        "— how a test build reads launch flags — and a global `--until rid:<landing>` on the same "
+        "call waits on the screen it opens. `resource_id` is the accessibilityIdentifier (use "
+        "`--rid`), "
         "`screen.package` is the bundle id, `key back` performs the edge-swipe back gesture, "
         "`aua install` takes an iphonesimulator `.app`, and non-ASCII text is pasted for you. "
         "`has` and `scroll-to` exclude off-screen nodes retained by SwiftUI. "

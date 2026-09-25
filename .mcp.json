@@ -1,14 +1,14 @@
 {
   "mcpServers": {
     "android-ui-analyser": {
-      "command": "uvx",
+      "command": "sh",
       "args": [
-        "--quiet",
-        "--from",
-        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.30.0",
-        "aua",
-        "mcp"
-      ]
+        "-c",
+        "PATH=\"$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH\"; command -v uvx >/dev/null 2>&1 || { echo \"android-ui-analyser: uvx not found. Install uv (https://docs.astral.sh/uv/getting-started/installation/ or brew install uv), then start a new session.\" >&2; exit 127; }; exec uvx --quiet --from \"$AUA_SPEC\" aua mcp"
+      ],
+      "env": {
+        "AUA_SPEC": "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.30.0"
+      }
     }
   }
 }
