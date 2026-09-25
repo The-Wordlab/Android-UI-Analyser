@@ -84,6 +84,17 @@ lxml = ["lxml>=5.0"]
 [project.scripts]
 aua = "android_ui_analyser.cli:run"
 
+# `typesafe-sdk` pins pydantic to a `typing-extensions` newer than `mitmproxy` allows (and
+# `h11` newer than mitmproxy 11 accepts), so the judge extra and the proxy extra cannot share one
+# environment. Declared, uv locks each side on its own instead of refusing the whole project —
+# which it did from the day the extra was added without a relock, failing every CI run at
+# `uv sync --frozen`. Nothing installs both: `all` never included `typesafe`.
+[tool.uv]
+conflicts = [
+    [{ extra = "typesafe" }, { extra = "proxy" }],
+    [{ extra = "typesafe" }, { extra = "all" }],
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/android_ui_analyser"]
 
