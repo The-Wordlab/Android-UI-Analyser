@@ -83,7 +83,7 @@ def _observation_frame(value: Any, *, allow_loading: bool) -> dict | None:
             loading_capture = True
         # A press that changed nothing is not reusable for acting, but what it shows is real:
         # the dialog still open after Save on an empty name is the proof Save is disabled.
-        no_effect_capture = own_capture and meta.get("arrival_state") == "unconfirmed"
+        no_effect_capture = own_capture and meta.get("arrival_state") in {"unconfirmed", "no_change"}
         if ((item.get("stale_risk") is True and not loading_capture)
                 or item.get("stale") is True or item.get("fresh") is False
                 or item.get("observation_present") is False

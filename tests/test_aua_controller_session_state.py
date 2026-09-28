@@ -66,20 +66,24 @@ def test_judgement_loading_exception_rejects_stale_absent_or_ambiguous_captures(
     assert judgement_observation_frame(raw) is None
 
 
-def no_effect_capture():
+def no_effect_capture(arrival_state="unconfirmed"):
     """A press that changed nothing on screen: AUA marks it not reusable for acting."""
     return {"observation_present": True,
             "observation_contract": {"reusable": False, "analyze_needed": True,
                                      "fingerprint": "source-frame"},
-            "observation": frame("Rename item", arrival_state="unconfirmed",
+            "observation": frame("Rename item", arrival_state=arrival_state,
                                  stale_risk="no semantic destination beyond layout movement")}
 
 
-def test_a_press_that_changed_nothing_is_still_evidence_of_what_was_on_screen(tmp_path):
+# `unconfirmed` is a change AUA could not confirm; `no_change` is a settle wait that saw none.
+# Live, tapping the language that was already selected reported `no_change`, the judge was
+# told that step's screen was not shown, and the no-op the contract asked for went unverified.
+@pytest.mark.parametrize("arrival_state", ["unconfirmed", "no_change"])
+def test_a_press_that_changed_nothing_is_still_evidence_of_what_was_on_screen(tmp_path, arrival_state):
     """Live, pressing Save on an empty name left the dialog as it was, the one proof that Save
     is disabled while empty. Its capture was dropped from the judge's evidence because it was
     not reusable for acting, and the run was judged unverified."""
-    raw = no_effect_capture()
+    raw = no_effect_capture(arrival_state)
     assert judgement_observation_frame(raw) == raw["observation"]
     assert observation_frame(raw) is None, "still no authority to act on its ids"
     s = state(tmp_path)
