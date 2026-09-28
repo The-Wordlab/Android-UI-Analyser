@@ -92,6 +92,9 @@ SCROLL_TOOL = "scroll_and_analyze"
 BACK_TOOL = "back_gesture_and_analyze"
 FINISH_TOOL = "session_finish"
 WAIT_TOOL = "wait_and_analyze"
+INPUT_TOOL = "input_and_analyze"
+# "type exactly `Hi!`": text the author wrote into the step, so it is no secret and needs no model.
+EXACT_TEXT = re.compile(r"\btype\s+exactly\s+`([^`\n]{1,200})`", re.IGNORECASE)
 #: Every tool a navigator answer can become. A step that names any other tool asks for an action
 #: this navigator has no way to take.
 NAVIGATOR_TOOLS = frozenset({TAP_TOOL, SCROLL_TOOL, BACK_TOOL, FINISH_TOOL, WAIT_TOOL})
@@ -848,8 +851,18 @@ class TypeSafeNavigator:
             self._decline(f"kind:{kind}")
             return None, f"kind:{kind}"
         if kind == "type":
-            # A System One model returns a choice, never a string; the public harnesses call a
-            # small generative model here and so does this one, by handing the step back.
+            # A System One model returns a choice, never a string. When the step itself says
+            # what to type ("type exactly `Hi!`") the string is the author's, not the model's,
+            # so it is typed as written into the one field on the screen. Anything else goes
+            # back to the chat model, which writes its own text.
+            step = self.steps[self.step_index] if self.steps else self.goal
+            quoted = EXACT_TEXT.findall(step)
+            fields = [handle for handle, label in self._options.items() if label.endswith(FIELD_SUFFIX)]
+            if (len(quoted) == 1 and "${" not in quoted[0] and len(fields) == 1
+                    and INPUT_TOOL in self.offered):
+                field = self._options[fields[0]][: -len(FIELD_SUFFIX)]
+                return (INPUT_TOOL, {"id": fields[0], "text": quoted[0], "submit": False},
+                        f"type:{quoted[0]}", f"type '{quoted[0]}' into '{field}'"), None
             self._decline("kind:type")
             return None, "kind:type"
         if kind == "wait":

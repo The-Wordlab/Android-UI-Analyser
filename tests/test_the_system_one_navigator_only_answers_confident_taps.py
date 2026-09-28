@@ -1302,3 +1302,26 @@ def test_the_pointer_catches_up_when_the_chat_model_acts_on_a_later_steps_contro
     report = TypeSafeNavigator("Open notification settings", client=ScriptedClient([]), tools=WIDE_TOOLS)
     report.observed("tap_and_analyze", {"text": "Send"})
     assert report.step_index == 0, "a goal without steps has no pointer to move"
+
+
+def test_the_exact_text_a_step_quotes_is_typed_as_written() -> None:
+    """Jev returns a choice, never a string, so typing always went back to the chat model. A step
+    that says "type exactly `Hi`" already holds the string: it is the author's, typed as written
+    into the one field on the screen, and never sent from here."""
+    goal = "Tap the menu. Then type exactly `Hi there` into `Ask me anything` (submit=false). Then tap `Send`."
+    tools = [*WIDE_TOOLS, "input_and_analyze"]
+
+    def typed(goal=goal, tools=tools, screen=FIELD_SCREEN):
+        navigator = TypeSafeNavigator(goal, client=WideClient(kind="type"), tools=tools, action_space="full")
+        navigator.step_index = 1
+        return asyncio.run(navigator(screen)), navigator
+
+    action, _ = typed()
+    assert action["tool"] == "input_and_analyze"
+    assert action["arguments"] == {"id": "el:field", "text": "Hi there", "submit": False}
+    for refused in (typed(goal="Tap the menu. Then type a short greeting. Then tap `Send`."),  # no quote
+                    typed(tools=WIDE_TOOLS),                                                   # no input tool
+                    typed(goal=goal.replace("Hi there", "${PASSWORD}")),                       # a placeholder
+                    typed(screen=TWO_FIELDS_SCREEN)):                                          # which field?
+        action, navigator = refused
+        assert action is None and navigator.report()["declined"] == {"kind:type": 1}

@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- Jev types the text a step quotes after "type exactly", as written and with `submit=false`, into
+  the one text field on the screen. Every typing step used to go back to the chat model, although
+  the string was the author's and needed no model at all.
 - Every frame the controller judge reads carries `rendered`: the mean luminance of its screenshot
   and whether it reads as dark or light. Element text cannot say whether a screen is dark, and a
   judge sees at most five images, so a theme run left its dark-mode bullets unverified.
