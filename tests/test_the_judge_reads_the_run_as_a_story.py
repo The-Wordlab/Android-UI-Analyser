@@ -94,6 +94,19 @@ def test_the_screen_is_one_line_of_its_own_labels() -> None:
     assert story[4]["screen"] == "App language · [English] ✓ · [Spanish]"
 
 
+def test_an_icon_control_with_no_text_is_named_by_its_developer_id() -> None:
+    """A floating action button with no text or description was dropped from every entry, so the
+    judges could not verify a contract bullet about it on a screen that showed it (2026-09-28).
+    An unclickable decoration with no text still says nothing."""
+    raw = _raw("Home", "Chat", fp="fx")
+    raw["observation"]["elements"] += [
+        {"id": "el:fab", "resource_id": "example.app:id/composeFab", "clickable": True, "bounds": [80, 150, 96, 166]},
+        {"id": "el:bg", "resource_id": "example.app:id/backdrop", "bounds": [0, 0, 100, 200]},
+    ]
+    story = judge_story(annotate_judge_frames([{"tool": "app_launch_and_analyze", "ref": "E0", "step": None, "raw": raw}]))
+    assert story[0]["screen"] == "Home · [Chat] · [composeFab]"
+
+
 def test_extra_facts_appear_only_where_they_apply() -> None:
     story = judge_story(FRAMES, ACTIONS)
     assert story[1]["network"] == ["GET /v1/profile -> 200"]

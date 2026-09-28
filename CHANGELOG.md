@@ -36,6 +36,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The judge's story names an icon control that has no text by its developer id (`[bookingsFab]`).
+  Dropped, a floating action button a contract asserted was absent from every entry, and the judges
+  could not verify it on the screen that showed it.
 - The real-app runner sets feature flags once more when the first readback comes back with keys
   ignored. Right after a fresh install the set-flags link can reach an app that never stores it; one
   row of a 42-row sweep lost its whole run to one such read. A key the build no longer knows is

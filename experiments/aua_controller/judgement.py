@@ -1245,6 +1245,11 @@ def _screen_line(frame: Any) -> str:
     parts = []
     for element in observation.get("elements") or []:
         label = _label_of(element) if isinstance(element, dict) else ""
+        if not label and isinstance(element, dict) and element.get("clickable"):
+            # An icon control with no text is named only by its developer id. Dropped, a
+            # floating action button the contract asserts was absent from every entry, and the
+            # judges could not verify it on a screen that showed it (2026-09-28).
+            label = str(element.get("resource_id") or "").rsplit("/", 1)[-1][:MAX_STORY_LABEL]
         if not label:
             continue
         if element.get("clickable"):
