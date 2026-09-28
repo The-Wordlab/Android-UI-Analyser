@@ -44,6 +44,7 @@ from experiments.aua_controller.judgement import (
     judge_image_frames,
     judge_outcome_votes,
     judged_frame_sample,
+    rendered_appearance,
     screenshot_for,
     screenshot_index,
     summarize_route,
@@ -1909,6 +1910,11 @@ async def run_realapp(
                 # frame with the screenshot AUA already captured for it, oldest first, so the
                 # final screen is the last image the judge sees.
                 shot_index = screenshot_index(aua_artifacts_dir / "manifest.json")
+                for frame in [*judged_frames, final]:
+                    shot = screenshot_for(shot_index, frame_fingerprint(frame))
+                    rendered = rendered_appearance(shot) if shot else None
+                    if rendered and isinstance(frame.get("_judge_evidence"), dict):
+                        frame["_judge_evidence"]["rendered"] = rendered
                 image_frames = judge_image_frames(positioned_frames, final, shot_index,
                                                  limit=judge_images, actions=actions)
                 for frame in image_frames:

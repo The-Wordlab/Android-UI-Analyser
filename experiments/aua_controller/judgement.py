@@ -450,6 +450,26 @@ def encode_image(path: Any, *, max_width: int = MAX_IMAGE_WIDTH, quality: int = 
     return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def rendered_appearance(path: Any) -> dict[str, Any] | None:
+    """How a screenshot renders overall: mean luminance, 0 black to 1 white, and dark or light.
+
+    Element text cannot say whether a screen is dark, and a judge sees at most a few images, so
+    a theme run left most of its dark/light checkpoints unverified. One number per frame, taken
+    from a tiny greyscale copy, answers that for every frame at no model cost.
+    """
+    try:
+        from PIL import Image, ImageStat
+    except Exception:
+        return None
+    try:
+        with Image.open(str(path)) as image:
+            luminance = round(ImageStat.Stat(image.convert("L").resize((36, 64))).mean[0] / 255, 2)
+    except Exception:
+        return None
+    reads_as = "dark" if luminance < 0.35 else "light" if luminance > 0.65 else "mixed"
+    return {"luminance": luminance, "reads_as": reads_as}
+
+
 def judged_frame_sample(frames: Sequence[Any], limit: int = 8) -> list[Any]:
     """Pick evidence-bearing screen/state/checkpoint observations, in journey order.
 
@@ -1264,6 +1284,8 @@ def judge_story(frames: Sequence[Any], actions: Sequence[dict[str, Any]] = ()) -
         calls = _frame_network_calls(evidence_frame(frame))
         if calls:
             entry["network"] = calls
+        if isinstance(evidence.get("rendered"), dict):
+            entry["rendered"] = evidence["rendered"]
         epoch = evidence.get("lifecycle_epoch")
         if previous_epoch is not None and epoch is not None and epoch != previous_epoch:
             entry["app_restarted"] = True
@@ -1360,7 +1382,10 @@ async def judge_outcome(
             "`steps_not_shown` names actions whose resulting screens were captured but are not in "
             "this story, so nothing about them is in evidence, except what their `action` itself "
             "reports AUA did. `app_restarted: true` means AUA stopped or launched the app between "
-            "the previous entry and this one. `final` is the current screen."
+            "the previous entry and this one. `rendered` is AUA's measure of that entry's screenshot: "
+            "mean luminance from 0 (black) to 1 (white) and whether the screen reads as dark or "
+            "light; it answers whether a screen rendered dark or light when no image of it is "
+            "attached. `final` is the current screen."
         ),
     }
     transitions = order_transition_checkpoints(frames, actions)

@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- Every frame the controller judge reads carries `rendered`: the mean luminance of its screenshot
+  and whether it reads as dark or light. Element text cannot say whether a screen is dark, and a
+  judge sees at most five images, so a theme run left its dark-mode bullets unverified.
 - Claude Code and Codex user skills now discover Android, iOS simulator and web UI testing,
   with platform selection, agent-owned browser sessions and inline diagnostic guidance.
 - Installation covers Codex's current `~/.agents/skills` path and its legacy skill directory;
