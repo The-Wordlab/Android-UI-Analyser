@@ -30,15 +30,19 @@ def prime(s):
     s.observe("initial_observation", {}, frame(), "E0000")
 
 
-def loading_capture():
+def loading_capture(arrival_state="loading"):
     return {"observation_present": True,
             "observation_contract": {"reusable": False, "evidence_fresh": False,
                                      "fingerprint": "source-frame"},
-            "observation": frame("Working...", arrival_state="loading", stale_risk=True)}
+            "observation": frame("Working...", arrival_state=arrival_state, stale_risk=True)}
 
 
-def test_loading_is_assertion_evidence_not_selector_or_checkpoint_authority(tmp_path):
-    raw = loading_capture()
+# `transitioning` is a capture whose stability confirmation timed out. Live, an animated feed
+# tab did that on every visit: the judge was told the tab's screen was not shown, and a guest
+# cold start that opened it was judged unverified.
+@pytest.mark.parametrize("arrival_state", ["loading", "transitioning"])
+def test_loading_is_assertion_evidence_not_selector_or_checkpoint_authority(tmp_path, arrival_state):
+    raw = loading_capture(arrival_state)
     before = copy.deepcopy(raw)
     assert judgement_observation_frame(raw) == raw["observation"]
     assert observation_frame(raw) is None
@@ -60,8 +64,9 @@ def test_loading_is_assertion_evidence_not_selector_or_checkpoint_authority(tmp_
     lambda r: r["observation"]["screen"].update(width=0),
     lambda r: r.update(result=frame("Contradiction", fingerprint="other")),
 ])
-def test_judgement_loading_exception_rejects_stale_absent_or_ambiguous_captures(mutation):
-    raw = loading_capture()
+@pytest.mark.parametrize("arrival_state", ["loading", "transitioning"])
+def test_judgement_loading_exception_rejects_stale_absent_or_ambiguous_captures(mutation, arrival_state):
+    raw = loading_capture(arrival_state)
     mutation(raw)
     assert judgement_observation_frame(raw) is None
 
