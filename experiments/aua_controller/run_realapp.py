@@ -1607,8 +1607,29 @@ async def run_realapp(
         )
         result["setup_facts"] = list(setup_facts)
         claims: list[dict[str, Any]] = []
+        # Tools the goal names by name ("force-close with app_force_stop") are steps a claim of
+        # success has to have taken. On 2026-09-28 a cold-start row claimed `achieved` having
+        # never force-stopped or relaunched, and the judges rightly could not verify the restart.
+        offered = {str((tool.get("function") or tool).get("name") or "") for tool in tools}
+        named_tools = sorted(name for name in offered - {"session_finish"}
+                             if name and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", goal))
+        called: set[str] = set()
+        refused_finish: list[str] = []
+
+        def refuse_early_finish(name: str, arguments: Any) -> dict[str, Any] | None:
+            """Send an `achieved` claim back once when a step the goal names by tool was skipped."""
+            missing = [tool for tool in named_tools if tool not in called]
+            if (name != "session_finish" or refused_finish or not missing
+                    or (arguments or {}).get("outcome") not in {"achieved", "already_satisfied"}):
+                return None
+            refused_finish.extend(missing)
+            return {"ok": False, "error": {"code": "named_step_not_done", "executed": False, "message": (
+                "Not finished: the goal has steps done with " + ", ".join(missing) + ", and this run "
+                "has not called it. Do those steps and the checks that follow them, then finish. If "
+                "such a step was conditional and its condition did not hold, finish again.")}}
 
         async def controller_call(name: str, arguments: dict[str, Any]) -> Any:
+            called.add(name)
             arguments, repaired_id = normalize_element_id_argument(arguments)
             if repaired_id:
                 repair = (
@@ -1793,8 +1814,11 @@ async def run_realapp(
             model_observation_filter=compactor, request_timeout_s=request_timeout_s,
             tool_timeouts_s=controller_tool_timeouts(controller_capabilities),
             terminal_tools=frozenset({"session_finish"}), terminal_claim_limit=terminal_claim_limit,
-            no_progress_limit=no_progress_limit,
+            no_progress_limit=no_progress_limit, refuse=refuse_early_finish,
         )
+        if refused_finish:
+            result["warnings"].append("controller claimed success before a named step ("
+                                      + ", ".join(refused_finish) + "); it was sent back once")
         result["controller"] = {
             key: report.get(key) for key in (
                 "stop_reason", "error", "steps_consumed", "model_requests", "tool_calls_executed",

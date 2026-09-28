@@ -36,6 +36,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The real-app runner sends an `achieved` claim back once when the goal names a tool for a step
+  ("force-close with app_force_stop") that the run never called. A cold-start row claimed success
+  without force-stopping or relaunching, and its restart could not be judged. The agent loop takes
+  a `refuse` hook for it; a refused call is not executed and not counted as a claim.
 - The judge's story names an icon control that has no text by its developer id (`[bookingsFab]`).
   Dropped, a floating action button a contract asserted was absent from every entry, and the judges
   could not verify it on the screen that showed it.

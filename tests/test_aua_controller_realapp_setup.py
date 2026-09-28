@@ -481,6 +481,41 @@ def test_package_pinned_app_lifecycle_capability_maps_to_safe_aua_calls(tmp_path
     assert launches[-1] == {"package": "com.example.fictional"}
 
 
+def test_a_success_claim_that_skipped_a_step_named_by_its_tool_is_sent_back_once(tmp_path):
+    """A cold-start row claimed `achieved` having never force-stopped or relaunched (2026-09-28);
+    the judges rightly could not verify the restart. The claim goes back once, naming the tools."""
+    goal = ("Send a message. Then force-close the app with app_force_stop. Then relaunch it with "
+            "app_relaunch_and_analyze. Then check the chat is still listed.")
+    model = FakeModel(
+        controller=[
+            model_call("session_finish", {"outcome": "achieved", "note": "early"}, call_id="native-1"),
+            model_call("app_force_stop", {}, call_id="native-2"),
+            model_call("app_relaunch_and_analyze", {}, call_id="native-3"),
+            model_call("session_finish", {"outcome": "achieved", "note": "done"}, call_id="native-4"),
+        ],
+        judgements={"record_verdict": [verdict("pass", "listed"), verdict("pass", "listed after relaunch")]},
+    )
+    aua = SetupAua()
+    result = run(tmp_path, aua, model, goal=goal, controller_capabilities=["app-lifecycle"])
+    assert aua.named("app") == [{"action": "stop", "package": "com.example.fictional"}]
+    assert result["claim"] == {"outcome": "achieved", "note": "done"}
+    assert any("app_force_stop, app_relaunch_and_analyze" in w for w in result["warnings"])
+    # A claim of being blocked is not sent back, and a claim is sent back only once.
+    blocked = FakeModel(
+        controller=[model_call("session_finish", {"outcome": "blocked", "note": "no"}, call_id="native-1")],
+        judgements={"record_verdict": [verdict("blocked", "x"), verdict("blocked", "y")]},
+    )
+    result = run(tmp_path / "blocked", SetupAua(), blocked, goal=goal, controller_capabilities=["app-lifecycle"])
+    assert result["claim"] == {"outcome": "blocked", "note": "no"}
+    twice = FakeModel(
+        controller=[model_call("session_finish", {"outcome": "achieved"}, call_id="native-1"),
+                    model_call("session_finish", {"outcome": "achieved"}, call_id="native-2")],
+        judgements={"record_verdict": [verdict("pass", "x"), verdict("pass", "y")]},
+    )
+    result = run(tmp_path / "twice", SetupAua(), twice, goal=goal, controller_capabilities=["app-lifecycle"])
+    assert result["claim"] == {"outcome": "achieved"}
+
+
 def test_network_capability_maps_to_reversible_aua_calls(tmp_path):
     aua = SetupAua()
     neutral = verdict("pass", "retry worked")

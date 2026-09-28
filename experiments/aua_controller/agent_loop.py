@@ -180,6 +180,7 @@ async def run_agent(
     conversation: AgentConversation | None = None,
     terminal_claim_limit: int | None = None,
     no_progress_limit: int | None = None,
+    refuse: Callable[[str, Any], dict[str, Any] | None] | None = None,
     reobserve_tool: str = "analyze_screen",
 ) -> dict[str, Any]:
     """Return trace metadata and an untrusted report, never a scenario verdict.
@@ -650,6 +651,10 @@ async def run_agent(
                 timeout = remaining(resolved_tool_timeouts.get(name, request_timeout_s))
                 call["timeout_s"] = timeout
                 refusal = session_state.rejection(name, arguments) if session_state is not None and invalid is None else None
+                if refusal is None and refuse is not None and invalid is None:
+                    # The caller's own refusal: not sent, not executed, so a refused terminal
+                    # claim is not counted as one and the run goes on.
+                    refusal = refuse(name, arguments)
                 if invalid is not None:
                     result = feedback
                     call["executed"] = False
