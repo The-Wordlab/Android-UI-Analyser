@@ -33,6 +33,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A goal's steps are no longer cut inside a parenthesis or a backtick-quoted label. "Tap the menu
+  (`buttonNavBack`; not `User avatar`, …)" became a half step and a junk step, so Jev and the
+  session's goal progress counted steps the author never wrote.
 - Jev's step pointer catches up when the run acts on a control a later step names in backticks.
   It moved only on Jev's own confident "done", so after the chat model took a few steps every
   proposal was about a step that was over: one run sat on step 1 of 16 through twenty asks.

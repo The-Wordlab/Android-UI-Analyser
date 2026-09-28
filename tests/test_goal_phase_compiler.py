@@ -689,3 +689,19 @@ def test_manual_phase_completion_refuses_a_finished_session(tmp_path: Path) -> N
     persisted = load_session_state(tmp_path, session_id=state.session_id)
     assert persisted == finished
     assert persisted.phases[1].status == "active"
+
+
+def test_a_parenthesis_or_a_quoted_label_stays_inside_its_step() -> None:
+    """A brief naming the menu "(`buttonNavBack`; not `User avatar`, ...)" was cut at the
+    semicolon into a half step and a junk step, in every brief that used it (2026-09-28)."""
+    from android_ui_analyser.session import goal_phases
+
+    goal = ("Tap the menu (`buttonNavBack`; not `User avatar`, which opens the profile). "
+            "Then tap `Save. Then close` (e.g. the dialog's button). Then check the list.")
+    assert [phase.objective for phase in goal_phases(goal)] == [
+        "Tap the menu (`buttonNavBack`; not `User avatar`, which opens the profile)",
+        "tap `Save. Then close` (e.g. the dialog's button)",
+        "check the list",
+    ]
+    # An unclosed bracket protects nothing, so the rest of the goal still splits.
+    assert len(goal_phases("Open the menu (see note. Then tap Save. Then check it.")) == 3

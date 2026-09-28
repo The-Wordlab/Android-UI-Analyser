@@ -353,9 +353,28 @@ def _protect_conditional_branches(goal: str) -> str:
     return "".join(protected)
 
 
+_ASIDE = re.compile(r"\([^()]{0,240}\)|`[^`\n]{1,160}`")
+
+
+def _protect_asides(goal: str) -> str:
+    """Keep a parenthesis or a quoted label inside the step that contains it.
+
+    "Tap the menu (`buttonNavBack`; not `User avatar`, which opens the profile)" was cut at the
+    semicolon into "Tap the menu (`buttonNavBack`" and a step reading "not `User avatar` ...",
+    in every brief that named the menu that way (2026-09-28). Only closed spans are masked, so
+    an unbalanced bracket cannot swallow the rest of a goal.
+    """
+    protected = list(goal)
+    for match in _ASIDE.finditer(goal):
+        for offset in range(match.start() + 1, match.end() - 1):
+            if protected[offset] in ".;" or protected[offset].isalpha():
+                protected[offset] = _CONDITIONAL_MASK
+    return "".join(protected)
+
+
 def _goal_clauses(goal: str) -> list[_GoalClause]:
     """Split explicit sequencing while retaining source ownership for every checkpoint."""
-    protected = _protect_conditional_branches(goal)
+    protected = _protect_asides(_protect_conditional_branches(goal))
     boundaries = list(_SEQUENCE_BOUNDARY.finditer(protected))
     clauses: list[_GoalClause] = []
     start = 0
