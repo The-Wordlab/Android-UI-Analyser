@@ -266,10 +266,18 @@ async def run_async_ui_wait(
             remaining = host_deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("durable AUA UI wait did not reach a terminal status")
-            status = await asyncio.wait_for(
-                call("job_status", {"job_id": job_id}, "harness-ui-wait-status"),
-                timeout=min(ASYNC_UI_WAIT_STATUS_CALL_SECONDS, max(0.001, remaining)),
-            )
+            try:
+                status = await asyncio.wait_for(
+                    call("job_status", {"job_id": job_id}, "harness-ui-wait-status"),
+                    timeout=min(ASYNC_UI_WAIT_STATUS_CALL_SECONDS, max(0.001, remaining)),
+                )
+            except TimeoutError:
+                # A status read that misses its budget is no news: on a loaded host one took over
+                # 15 s mid-wait while the job ran fine. The host deadline still ends a wait whose
+                # status never comes back, and the handler below cancels the job.
+                receipt["slow_status_polls"] = int(receipt.get("slow_status_polls") or 0) + 1
+                persist()
+                continue
             receipt["status"] = status.get("status")
             receipt["progress_percent"] = status.get("progress_percent")
             persist()

@@ -30,6 +30,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The controller's durable UI wait treats a status poll that misses its 15 s budget as no news and
+  keeps polling to the wait's own deadline. On a loaded host one slow read ended a 120 s image-edit
+  wait after 20 s, and the row lost its verdict.
 - Attached Electron screenshots preserve embedded guest previews on Retina displays. Native
   captures are resized to CSS pixels without asking Chromium to rescale guest surfaces.
 - `proxy start`'s relaunch after the CA install brings the app back on the Activity that was in

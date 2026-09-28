@@ -622,7 +622,8 @@ def test_async_ui_wait_cancels_its_owned_job_when_the_controller_is_cancelled(
     assert result["deferred_waits"][0]["cancelled"] is True
 
 
-def test_async_ui_wait_cancels_its_owned_job_when_status_poll_times_out(tmp_path):
+def test_async_ui_wait_cancels_its_owned_job_when_status_never_answers(tmp_path, monkeypatch):
+    monkeypatch.setattr("experiments.aua_controller.run_realapp.ASYNC_UI_WAIT_GRACE_SECONDS", 0)
     output = tmp_path / "run"
     output.mkdir()
     calls = []
@@ -632,6 +633,7 @@ def test_async_ui_wait_cancels_its_owned_job_when_status_poll_times_out(tmp_path
         if name == "job_start":
             return {"ok": True, "job_id": "job-timeout", "status": "running", "terminal": False}
         if name == "job_status":
+            await asyncio.sleep(0.2)
             raise TimeoutError("status deadline")
         if name == "job_cancel":
             return {
@@ -643,23 +645,55 @@ def test_async_ui_wait_cancels_its_owned_job_when_status_poll_times_out(tmp_path
         raise AssertionError(name)
 
     result = {"deferred_waits": []}
-    with pytest.raises(TimeoutError, match="status deadline"):
+    with pytest.raises(TimeoutError, match="did not reach a terminal status"):
         asyncio.run(
             run_async_ui_wait(
                 call=call,
                 arguments={
                     "anchor": "desc:Result ready",
                     "pending_text": "Still processing",
-                    "timeout_seconds": 30,
+                    "timeout_seconds": 1,
                 },
                 result=result,
                 output=output,
             )
         )
 
-    assert [name for name, _, _ in calls] == ["job_start", "job_status", "job_cancel"]
+    names = [name for name, _, _ in calls]
+    assert names[0] == "job_start" and names[-1] == "job_cancel"
+    assert set(names[1:-1]) == {"job_status"} and len(names) > 3, "a slow poll is retried to the deadline"
     assert calls[-1][1] == {"job_id": "job-timeout", "wait_ms": 10_000}
     assert result["deferred_waits"][0]["cancelled"] is True
+
+
+def test_async_ui_wait_survives_one_slow_status_poll(tmp_path):
+    output = tmp_path / "run"
+    output.mkdir()
+    statuses = iter([TimeoutError("slow host"),
+                     {"ok": True, "job_id": "job-slow", "status": "succeeded", "terminal": True,
+                      "result": {"ok": True, "matched": True}}])
+
+    async def call(name, arguments, actor):
+        if name == "job_start":
+            return {"ok": True, "job_id": "job-slow", "status": "running", "terminal": False}
+        if name == "job_status":
+            reply = next(statuses)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        raise AssertionError(name)
+
+    result = {"deferred_waits": []}
+    asyncio.run(
+        run_async_ui_wait(
+            call=call,
+            arguments={"anchor": "desc:Result ready", "pending_text": "Still processing", "timeout_seconds": 30},
+            result=result,
+            output=output,
+        )
+    )
+    receipt = result["deferred_waits"][0]
+    assert receipt["status"] == "succeeded" and receipt["slow_status_polls"] == 1
 
 
 def test_realapp_claim_stops_the_loop_and_two_judges_decide(tmp_path):
