@@ -30,6 +30,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Electron navigation no longer waits on a swapped guest frame's missing execution context;
+  attached hierarchy reads skip unsupported webview frames while retaining normal iframes.
 - Concurrent workers sharing an agent process now have separate target-selection locks,
   matching their scoped leases, so a blocked worker does not stall its siblings.
 - Reconnecting a reclaimed browser or Electron attachment through a warm daemon reuses its

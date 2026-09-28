@@ -114,6 +114,14 @@ class CdpConnection(PlaywrightConnection):
         size = _read(self._page, "evaluate", "() => ({width: innerWidth, height: innerHeight})")
         return {"width": int(size["width"]), "height": int(size["height"])}
 
+    def _include_frame_element(self, handle: Any) -> bool:
+        # Electron's webview leaves a shadow iframe in the host frame tree after
+        # its execution context moves to a separate guest target. Guest control
+        # is unsupported; do not wait for that orphan context to reappear.
+        return not bool(_read(handle, "evaluate", """element => Boolean(
+            element.closest('webview') || element.getRootNode().host?.closest('webview')
+        )"""))
+
     def screenshot_png(self) -> bytes:
         def capture() -> bytes:
             data = _read(self._page, "screenshot", type="png", scale="css", animations="allow")

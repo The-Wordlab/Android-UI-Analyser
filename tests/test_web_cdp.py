@@ -1,5 +1,6 @@
 """Existing desktop sessions stay owned by the user through attach, actions and teardown."""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -314,3 +315,65 @@ def test_launcher_disconnects_on_finish_and_failed_selection(monkeypatch, fail):
     assert calls == [(ENDPOINT, {"timeout": 30_000, "no_defaults": True})]
     assert stopped == [True]
     assert not page.closed
+
+
+@pytest.mark.parametrize("has_owner", [False, True])
+def test_snapshot_skips_a_swapped_guest_before_evaluating_its_dead_context(attached, has_owner):
+    conn, page, _ = attached
+    conn.initialize_attached(FILE_URL)
+    evaluated_guest = []
+
+    class SwappedGuest:
+        url = "about:blank"
+
+        def frame_element(self):
+            if not has_owner:
+                raise RuntimeError("Frame has been detached")
+            return SimpleNamespace(
+                evaluate=lambda _script: True,
+                bounding_box=lambda: pytest.fail("unsupported guest must be skipped"),
+                dispose=lambda: None,
+            )
+
+        def evaluate(self, _script):
+            evaluated_guest.append(True)
+            return {"nodes": []}
+
+    page.wait_for_timeout = lambda _timeout: None
+    page.frames = [page, SwappedGuest()]
+    page.evaluate = lambda script: (
+        {"width": 800, "height": 600} if script == "() => ({width: innerWidth, height: innerHeight})"
+        else {"nodes": [{"text": "Ready", "bounds": [0, 0, 30, 20]}]}
+    )
+
+    payload = json.loads(conn.snapshot())
+
+    assert not evaluated_guest, "a swapped guest has no execution context to evaluate"
+    assert payload["nodes"][0]["text"] == "Ready"
+
+
+def test_snapshot_still_reads_live_child_frames_at_their_page_offset(attached):
+    conn, page, _ = attached
+    conn.initialize_attached(FILE_URL)
+    disposed = []
+    handle = SimpleNamespace(
+        evaluate=lambda _script: False,
+        bounding_box=lambda: {"x": 10, "y": 20},
+        dispose=lambda: disposed.append(True),
+    )
+    child = SimpleNamespace(
+        url="https://fixture.test/frame",
+        frame_element=lambda: handle,
+        evaluate=lambda _script: {"nodes": [{"text": "Child", "bounds": [1, 2, 3, 4]}]},
+    )
+    page.wait_for_timeout = lambda _timeout: None
+    page.frames = [page, child]
+    page.evaluate = lambda script: (
+        {"width": 800, "height": 600} if script == "() => ({width: innerWidth, height: innerHeight})" else {"nodes": []}
+    )
+
+    payload = json.loads(conn.snapshot())
+
+    assert payload["nodes"][0]["text"] == "Child"
+    assert payload["nodes"][0]["bounds"] == [11, 22, 13, 24]
+    assert disposed == [True]

@@ -734,12 +734,16 @@ class PlaywrightConnection:
             top = self._page
             for frame in list(top.frames):
                 try:
-                    payload = dict(_read(frame, "evaluate", _DOM_SNAPSHOT_SCRIPT))
                     offset_x = 0.0
                     offset_y = 0.0
                     if frame is not top.main_frame:
+                        # A swapped Electron guest can remain in frames without a live
+                        # execution context. Resolve its embedding element before evaluate,
+                        # which would otherwise wait indefinitely for that context to return.
                         handle = _read(frame, "frame_element")
                         try:
+                            if not self._include_frame_element(handle):
+                                continue
                             box = _read(handle, "bounding_box")
                         finally:
                             _read(handle, "dispose")
@@ -747,6 +751,7 @@ class PlaywrightConnection:
                             continue
                         offset_x = float(box["x"])
                         offset_y = float(box["y"])
+                    payload = dict(_read(frame, "evaluate", _DOM_SNAPSHOT_SCRIPT))
                     base = len(merged)
                     for node in payload.get("nodes") or []:
                         item = dict(node)
@@ -781,6 +786,9 @@ class PlaywrightConnection:
             return json.dumps(payload, ensure_ascii=False)
 
         return self._call(capture)
+
+    def _include_frame_element(self, handle: Any) -> bool:
+        return True
 
     def _snapshot_viewport(self) -> dict[str, int]:
         return {"width": self._options.viewport_width, "height": self._options.viewport_height}
