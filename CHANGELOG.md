@@ -30,6 +30,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Reconnecting a reclaimed browser or Electron attachment through a warm daemon reuses its
+  validated target instead of failing with a device-use lock upgrade error.
 - Session startup on a warm web daemon no longer attempts to upgrade its device-use lock while
   selecting the target. Failed startup releases a newly claimed lease, including errors during
   the initial storage snapshot, while retaining a lease already held before startup.

@@ -478,6 +478,9 @@ class Engine:
                 self._device.close()
                 self._device = None
                 self._claimed_instance_token = None
+                # Reconnecting under this fence must reuse the validated target. Selecting
+                # it again would try to acquire an exclusive lease inside a shared command.
+                self._leased_serial_resolved = (True, target)
                 from uuid import uuid4
 
                 self._element_identity_lifetime = uuid4().hex

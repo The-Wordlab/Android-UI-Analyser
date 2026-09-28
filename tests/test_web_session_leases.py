@@ -156,6 +156,38 @@ def test_refused_owner_cannot_close_the_current_agents_browser(tmp_path):
         engine.close()
 
 
+@pytest.mark.parametrize("next_owner", ["agent-a", "agent-b"])
+def test_daemon_reconnects_reclaimed_context_without_reacquiring_under_its_fence(
+    tmp_path, next_owner,
+):
+    old = FakeConnection()
+    new = FakeConnection()
+    engine = engine_for(tmp_path, "agent-a", slots=1, connection=old)
+    try:
+        engine.session_start("Inspect first fixture")
+        target = engine.device.serial
+        engine.release_device_use()
+        assert leases.release(
+            engine.config.lease.registry_dir, target,
+            owner=engine._lease_owner_resolved, platform="web",
+        )
+        engine.platform._launcher.connection = new
+        if next_owner == "agent-a":
+            engine._lease_device()
+        result = daemon.dispatch(engine, {
+            "cmd": "analyze", "owner": next_owner,
+            "args": {"source": "hierarchy", "with_ocr": False},
+        })
+        assert result["ok"], result
+        assert old.closed
+        assert engine.device._connection is new
+        assert leases.holder(
+            engine.config.lease.registry_dir, target, platform="web",
+        ) == next_owner
+    finally:
+        engine.close()
+
+
 def test_adapter_can_keep_native_runtime_across_a_validated_lease_change(tmp_path, monkeypatch):
     from android_ui_analyser.platforms.base import PlatformAdapter
 
