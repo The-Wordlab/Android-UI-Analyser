@@ -24,6 +24,17 @@ def test_a_selector_miss_with_the_screen_it_read_is_a_no_action_miss() -> None:
     assert definitive_selector_miss(miss("element_not_found", "No action was sent: the target moved"))
 
 
+def test_a_gesture_aua_declined_to_retarget_is_a_no_action_miss() -> None:
+    """A long-press on a label that sits over a sibling control is declined, and AUA says no gesture
+    was sent. It reads no screen for it, and the Friend row's pass was voided by it (2026-09-29)."""
+    declined = {"error": {"code": "unsafe_action_target",
+                          "message": "long-press will not retarget a label into a sibling control subtree",
+                          "hint": "No gesture was sent. Inspect the acting candidates with `aua target`."}}
+    assert definitive_selector_miss(declined)
+    declined["error"]["action_sent"] = True
+    assert not definitive_selector_miss(declined)
+
+
 def test_anything_that_may_have_pressed_or_lacks_the_screen_is_not() -> None:
     assert not definitive_selector_miss(miss("selector_not_found", "nearest: x", action_sent=True))
     assert not definitive_selector_miss(miss("element_not_found", "stale"))

@@ -69,6 +69,11 @@ def definitive_selector_miss(result: Any) -> bool:
     error = result.get("error")
     if not isinstance(error, dict):
         return False
+    if (error.get("code") == "unsafe_action_target" and error.get("action_sent") is not True
+            and str(error.get("hint") or "").startswith("No gesture was sent")):
+        # AUA declined to retarget a label into a sibling control and says so; it reads no screen
+        # for this refusal. Treated as a failed action, it voided a pass both judges had given.
+        return True
     observation = error.get("observation")
     refused = ((error.get("code") == "element_not_found"
                 and str(error.get("hint") or "").startswith("No action was sent"))

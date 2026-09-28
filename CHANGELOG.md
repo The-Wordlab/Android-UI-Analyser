@@ -36,6 +36,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A gesture AUA declined as `unsafe_action_target` ("No gesture was sent") also counts as a no-action
+  miss. It carries no screen, so the classifier refused it, and one declined long-press voided a pass
+  both judges had given.
 - A text or resource-id selector that matched nothing (`selector_not_found`, raised before any
   press, with the screen it read) counts as a no-action miss, like a stale target. Counted as a failed
   action, one tap on a prompt that had not appeared turned a run both judges passed into QA_ERROR at
