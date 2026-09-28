@@ -789,10 +789,14 @@ def host_transaction(cache_dir: str | Path, key: str) -> Iterator[None]:
 
 @contextlib.contextmanager
 def _owner_guard(cache_dir: str | Path, owner: str) -> Iterator[None]:
-    """Serialize target selection for one process-bound owner."""
+    """Serialize target selection for one process-bound worker."""
 
     process = owner_caller(owner) or {}
     identity = f"{owner}|{process.get('pid')}|{process.get('started')}"
+    # Lease matching already separates sibling workers. Their selection locks must
+    # use the same scope so one blocked target cannot stall every sibling agent.
+    if scope := _worker_scope():
+        identity += f"|{scope}"
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     active = getattr(_OWNER_GUARD_STATE, "digests", None)
     if active is None:

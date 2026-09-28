@@ -30,6 +30,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Concurrent workers sharing an agent process now have separate target-selection locks,
+  matching their scoped leases, so a blocked worker does not stall its siblings.
 - Reconnecting a reclaimed browser or Electron attachment through a warm daemon reuses its
   validated target instead of failing with a device-use lock upgrade error.
 - Session startup on a warm web daemon no longer attempts to upgrade its device-use lock while
