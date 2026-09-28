@@ -36,6 +36,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The real-app runner sets feature flags once more when the first readback comes back with keys
+  ignored. Right after a fresh install the set-flags link can reach an app that never stores it; one
+  row of a 42-row sweep lost its whole run to one such read. A key the build no longer knows is
+  ignored again and still fails the run.
 - Jev no longer declares a step that says to act ("tap", "type", "long-press", "relaunch", …)
   done before anything was done on it. Asked on the screen before the tap, it said yes to "tap
   `Images` again" at 0.89 and to "type exactly `Before the wait`" at 0.97; the steps were never

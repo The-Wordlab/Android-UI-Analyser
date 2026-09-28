@@ -692,6 +692,33 @@ def test_an_ignored_flag_fails_the_run_instead_of_judging_the_wrong_arm(tmp_path
     assert result["verdict"]["verdict"] == "unverified"
 
 
+def test_an_ignored_flag_is_set_once_more_before_the_run_fails(tmp_path):
+    """Right after a fresh install the set-flags link can reach an app that never stores it. The
+    same key applied on every other row of the sweep; one retry separates that race from a key
+    the build no longer knows, which is ignored again and still fails the run."""
+    class RacyFlagsAua(SetupAua):
+        def __init__(self, answers):
+            super().__init__()
+            self.answers = list(answers)
+
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "flags_apply_and_analyze":
+                self.calls.append((name, arguments))
+                return self.answers.pop(0)
+            return await SetupAua.call_tool(self, name, arguments)
+
+    ignored = {"ok": False, "verified": True, "applied": {}, "ignored": ["experiment"]}
+    aua = RacyFlagsAua([ignored, {"ok": True, "verified": True, "applied": {"experiment": "a"}}])
+    result = run(tmp_path / "race", aua, two_step_model(), flags={"experiment": "a"})
+    assert result["error"] is None and len(aua.named("flags_apply_and_analyze")) == 2
+    aua = RacyFlagsAua([ignored, ignored])
+    result = run(tmp_path / "gone", aua, two_step_model(), flags={"experiment": "a"})
+    assert "feature flags not applied" in result["error"] and len(aua.named("flags_apply_and_analyze")) == 2
+    aua = RacyFlagsAua([{"ok": False, "error": {"code": "usage"}}])
+    run(tmp_path / "usage", aua, two_step_model(), flags={"experiment": "a"})
+    assert len(aua.named("flags_apply_and_analyze")) == 1, "only an ignored key is worth a second set"
+
+
 def test_no_flags_means_no_flag_call_at_all(tmp_path):
     aua = SetupAua()
     result = run(tmp_path, aua, two_step_model(), setup_flows=[("steps: [login]", {})])

@@ -1501,9 +1501,16 @@ async def run_realapp(
             # The tool is `flags_apply_and_analyze`; `flags_apply` was its name before the rename
             # and now fails with a usage error, which arrives here as "flags not applied and
             # verified" - a precondition failure that reads like a product one.
-            applied = await call("flags_apply_and_analyze",
-                                 {"path": str(flag_file.resolve()), "package": package,
-                                  "restart": True, "verify": True}, "setup")
+            flag_call = {"path": str(flag_file.resolve()), "package": package,
+                         "restart": True, "verify": True}
+            applied = await call("flags_apply_and_analyze", flag_call, "setup")
+            if applied.get("ok") is not True and applied.get("ignored"):
+                # An ignored key right after a fresh install can be a race, not a dead key: the
+                # set-flags link reached an app that never stored it. Retried once, as the QA
+                # lessons say; a key the build no longer knows is ignored again and still fails.
+                # On 2026-09-28 one row of a 42-row sweep lost its whole run to one such read.
+                result["setup"].append({"flags": dict(flags), "flags_ok": False, "ignored": applied["ignored"]})
+                applied = await call("flags_apply_and_analyze", flag_call, "setup")
             result["setup"].append({"flags": dict(flags), "flags_ok": applied.get("ok")})
             result["flag_context"] = dict(flags)
             if applied.get("ok") is not True or applied.get("verified") is not True:
