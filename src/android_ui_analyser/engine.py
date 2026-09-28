@@ -860,12 +860,14 @@ class Engine:
                 info.serial for info in self._list_targets() if info.state == "device" and info.serial
             }
             booted_at = time.time()
+            # A need is a boot requirement however it arrived: `--needs audio` alone once booted
+            # a -no-audio emulator that could never satisfy the session asking for it.
             boot = self.virtual_target_provision(
                 requested_definition,
                 needs=list(self._lease_needs or []),
-                headless=not headed,
+                headless=not (headed or "headed" in requested_needs),
                 animations=animations,
-                audio=audio,
+                audio=audio or "audio" in requested_needs,
                 owner=boot_owner,
                 parallel=True,
             )

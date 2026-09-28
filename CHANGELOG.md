@@ -30,6 +30,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A session that needs `audio` or `headed` only through `--needs` now boots a target with it.
+  The flag became a need, but not the need a flag, so AUA booted a `-no-audio` emulator that
+  could never satisfy the session asking for it.
 - Flag read-back retries a `run-as` call once when the transport fails. One empty `adb shell`
   reply had reported a landed write as unverified; a `run-as` refusal is still returned at once.
 - The controller judge is told when AUA reported a force-stop. The step leaves no screen, so a
