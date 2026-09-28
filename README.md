@@ -129,7 +129,9 @@ cd Android-UI-Analyser
 ```
 
 The script installs `aua` globally through `uv tool` or `pipx` (with a project-venv fallback),
-installs equivalent user-level Claude Code and Codex skills, and runs `aua doctor`.
+installs equivalent user-level Claude Code and Codex skills, and runs `aua doctor`. Codex uses
+`~/.agents/skills/android-ui-analyser`; the older `${CODEX_HOME:-~/.codex}/skills` copy remains
+synchronized for existing clients. Both locations are generated from the same source.
 
 ### Connect and verify
 
@@ -680,7 +682,7 @@ The reset and candidate must both pass; an existing saved flow is never overwrit
 
 The SKILL.md and Codex `agents/openai.yaml` are **generated** from the same source as `aua guide`,
 so they do not drift from the CLI/MCP capability contract. After upgrading, re-run `./install.sh`;
-`aua doctor` reports Claude and Codex skill drift separately. Use the
+`aua doctor` reports Claude, current Codex and legacy Codex skill drift separately. Use the
 [release flow](#releases-and-updating) to choose the version before reinstalling.
 
 ### Prefer a different MCP client?

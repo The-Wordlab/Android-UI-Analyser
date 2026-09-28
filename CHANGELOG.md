@@ -15,6 +15,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 - Claude Code and Codex user skills now discover Android, iOS simulator and web UI testing,
   with platform selection, agent-owned browser sessions and inline diagnostic guidance.
+- Installation covers Codex's current `~/.agents/skills` path and its legacy skill directory;
+  `doctor` checks both for stale guidance.
 - Web observations now include bounded console, JavaScript error and network summaries in
   `meta.browser_diagnostics`, including action-bound waits. Error events survive noisy windows;
   counts report omitted events. The existing `logs.enabled` setting controls inclusion.

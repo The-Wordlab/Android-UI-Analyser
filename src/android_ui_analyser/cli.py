@@ -8636,11 +8636,12 @@ def _build_doctor_report(engine: Engine) -> dict[str, Any]:
 
 
 # Where `install.sh` puts the user-level skill. Checked rather than rewritten: doctor
-# reports, it does not mutate the user's Claude Code config.
+# reports, it does not mutate the user's agent configuration.
 _CLAUDE_USER_SKILL = Path.home() / ".claude" / "skills" / "android-ui-analyser" / "SKILL.md"
 # Backward-compatible test/extension seam for the original single-skill check.
 _USER_SKILL = _CLAUDE_USER_SKILL
-_CODEX_USER_SKILL = (
+_CODEX_USER_SKILL = Path.home() / ".agents" / "skills" / "android-ui-analyser" / "SKILL.md"
+_CODEX_LEGACY_USER_SKILL = (
     Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
     / "skills"
     / "android-ui-analyser"
@@ -8691,6 +8692,7 @@ def _installed_skill_checks() -> dict[str, Any]:
     checks: dict[str, Any] = {
         "claude": _installed_skill_check(_CLAUDE_USER_SKILL),
         "codex": _installed_skill_check(_CODEX_USER_SKILL),
+        "codex_legacy": _installed_skill_check(_CODEX_LEGACY_USER_SKILL),
     }
     checks["ok"] = all(bool(value.get("ok")) for value in checks.values())
     return checks
@@ -8755,7 +8757,7 @@ def _render_doctor_pretty(report: dict[str, Any]) -> str:
     skills = checks.get("skills", {})
     if not skills and checks.get("skill"):
         skills = {"claude": checks["skill"]}
-    for name in ("claude", "codex"):
+    for name in ("claude", "codex", "codex_legacy"):
         skill = skills.get(name, {}) if isinstance(skills, dict) else {}
         if skill:
             lines.append(

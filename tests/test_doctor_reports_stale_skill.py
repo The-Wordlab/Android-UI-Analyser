@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import android_ui_analyser.cli as cli
 from android_ui_analyser import guide as guide_mod
 
@@ -43,21 +45,35 @@ def test_absent_skill_is_not_a_failure(monkeypatch, tmp_path):
     assert cli._installed_skill_check()["ok"] is True
 
 
-def test_doctor_checks_claude_and_codex_install_targets(monkeypatch, tmp_path):
-    claude = tmp_path / "claude" / "SKILL.md"
-    codex = tmp_path / "codex" / "SKILL.md"
-    claude.parent.mkdir(parents=True)
-    codex.parent.mkdir(parents=True)
-    claude.write_text(guide_mod.render_skill(), encoding="utf-8")
-    codex.write_text(guide_mod.render_skill() + "\nold", encoding="utf-8")
-    monkeypatch.setattr(cli, "_CLAUDE_USER_SKILL", claude)
-    monkeypatch.setattr(cli, "_CODEX_USER_SKILL", codex)
+@pytest.mark.parametrize("stale", ["claude", "codex", "codex_legacy"])
+def test_doctor_checks_all_installed_skill_locations(monkeypatch, tmp_path, stale):
+    for name, attr in (
+        ("claude", "_CLAUDE_USER_SKILL"),
+        ("codex", "_CODEX_USER_SKILL"),
+        ("codex_legacy", "_CODEX_LEGACY_USER_SKILL"),
+    ):
+        path = tmp_path / name / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(guide_mod.render_skill() + ("\nold" if name == stale else ""))
+        monkeypatch.setattr(cli, attr, path)
 
     checks = cli._installed_skill_checks()
 
-    assert checks["claude"]["ok"] is True
-    assert checks["codex"]["ok"] is False
+    for name in ("claude", "codex", "codex_legacy"):
+        assert checks[name]["ok"] is (name != stale)
     assert checks["ok"] is False
+    rendered = cli._render_doctor_pretty({"checks": {"skills": checks}})
+    assert f"skill:{stale}" in rendered
+    assert "emit-skill" in rendered
+
+
+def test_doctor_follows_symlinked_skill_locations(tmp_path):
+    actual = tmp_path / "source" / "SKILL.md"
+    actual.parent.mkdir()
+    actual.write_text(guide_mod.render_skill())
+    linked = tmp_path / "discovered"
+    linked.symlink_to(actual.parent, target_is_directory=True)
+    assert cli._installed_skill_check(linked / "SKILL.md")["ok"] is True
 
 
 def test_check_is_wired_into_the_pretty_report():
