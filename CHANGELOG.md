@@ -33,6 +33,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Jev's step pointer catches up when the run acts on a control a later step names in backticks.
+  It moved only on Jev's own confident "done", so after the chat model took a few steps every
+  proposal was about a step that was over: one run sat on step 1 of 16 through twenty asks.
 - A bounded Android UI read retries one failed reply while its budget allows, and the error now
   names the server's reason. A wait lost its whole 60 s budget to a single bad read twice in one
   evening, while the next read would have worked.

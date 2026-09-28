@@ -1276,3 +1276,29 @@ def test_a_step_that_names_a_tool_the_navigator_cannot_call_goes_to_the_chat_mod
     navigator = TypeSafeNavigator("Do the back gesture with back_gesture_and_analyze. Then open the menu.",
                                   client=client, tools=WIDE_TOOLS, action_space="full")
     assert asyncio.run(navigator(FIELD_SCREEN)) is not None
+
+
+BACKTICKED = ("Tap the top-left hamburger menu. Then check that the menu lists no chats. "
+              "Then close the menu. Then tap `Ask me anything` and type exactly `Hi` (submit=false). "
+              "Then tap `Send`. Then open the menu again.")
+
+
+def test_the_pointer_catches_up_when_the_chat_model_acts_on_a_later_steps_control() -> None:
+    """The pointer moved only on the navigator's own confident "done". After the chat model took
+    a few steps it stayed behind for good: one N-06 run sat on step 1 of 16 through all twenty
+    asks (2026-09-28). An action on a control a later step names in backticks moves it there."""
+    navigator = TypeSafeNavigator(BACKTICKED, client=ScriptedClient([]), tools=WIDE_TOOLS, action_space="full")
+    assert navigator.step_index == 0 and len(navigator.steps) == 6
+    navigator.observed("tap_and_analyze", {"id": "el:menu"})  # step 1's own control: no jump
+    assert navigator.step_index == 0
+    navigator.observed("tap_and_analyze", {"text": "Ask me anything"})
+    assert navigator.step_index == 3, "the run is on the step that names the field"
+    navigator.observed("input_and_analyze", {"id": "el:field", "text": "Hi", "submit": False})
+    assert navigator.step_index == 3, "the step it is on is not moved past; only later ones pull"
+    navigator.observed("tap_and_analyze", {"text": "Send"})
+    assert navigator.step_index == 4
+    navigator.observed("tap_and_analyze", {"text": "Ask me anything"})
+    assert navigator.step_index == 4, "never backwards"
+    report = TypeSafeNavigator("Open notification settings", client=ScriptedClient([]), tools=WIDE_TOOLS)
+    report.observed("tap_and_analyze", {"text": "Send"})
+    assert report.step_index == 0, "a goal without steps has no pointer to move"

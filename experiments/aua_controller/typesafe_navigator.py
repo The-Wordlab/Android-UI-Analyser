@@ -535,13 +535,14 @@ class TypeSafeNavigator:
         to translate before it can read what it did. Steps the chat model took are named the same
         way, because the journey is one story.
         """
+        handle = (arguments or {}).get("id")
+        label = self._options.get(handle) if isinstance(handle, str) else None
+        self._catch_up(label, arguments)
         if self._pending is None:
             return
         if self.steps:
             # The step the run is on when it acts; a step declared done on this screen moved it.
             self._pending["step"] = self.steps[self.step_index]
-        handle = (arguments or {}).get("id")
-        label = self._options.get(handle) if isinstance(handle, str) else None
         if tool == "input_and_analyze" and label and label.endswith(FIELD_SUFFIX):
             # Named after the field's tap line, typing read "tap the text field so text can be
             # typed into it", and the model asked to type again on every later screen. The text
@@ -553,6 +554,28 @@ class TypeSafeNavigator:
             self._pending["you_chose"] = phrase[0].lower() + phrase[1:]
         else:
             self._pending["you_chose"] = TOOL_WORDS.get(tool, tool)
+
+    def _catch_up(self, label: str | None, arguments: Mapping[str, Any] | None) -> None:
+        """Move the pointer to a later step when the run acted on a control that step names.
+
+        The pointer moved only on this navigator's own confident "done". Once the chat model took
+        a step the pointer stayed behind, and every later proposal was about a step that was over:
+        one N-06 run sat on step 1 of 16 for all twenty asks and was declined twenty times.
+        Briefs name each control in backticks, so an action on one a later step names says the run
+        has reached that step. Only forward, and only to that step: whether it is done is still
+        this navigator's own question.
+        """
+        if not self.steps:
+            return
+        said = [str(value).casefold() for value in
+                (label, *((arguments or {}).get(key) for key in ("text", "desc", "rid"))) if value]
+        if not said:
+            return
+        for index in range(self.step_index + 1, len(self.steps)):
+            names = [name.casefold() for name in re.findall(r"`([^`]{3,})`", self.steps[index])]
+            if any(name in words for name in names for words in said):
+                self.step_index = index
+                return
 
     def forget(self) -> None:
         """Drop the open turn: its action was never sent.
