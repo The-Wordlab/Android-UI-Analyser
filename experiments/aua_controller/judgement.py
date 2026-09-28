@@ -1122,6 +1122,7 @@ _STORY_VERBS = {
     "wait_stable_and_analyze": "wait", "await_and_analyze": "wait", "analyze_screen": "look again",
     "app_launch_and_analyze": "open the app", "app_relaunch_and_analyze": "relaunch the app",
     "app_restart_and_analyze": "restart the app", "hide_keyboard_and_analyze": "hide the keyboard",
+    "app_force_stop": "force-stop the app",
 }
 MAX_STORY_LABEL = 100
 
@@ -1171,6 +1172,12 @@ def _story_action(action: dict[str, Any] | None, tool: str | None, chosen_on: An
         told = _story_action({key: value for key, value in action.items() if key != "not_sent"},
                              tool, chosen_on)
         return f"{told} -- AUA refused it before sending, so nothing was pressed"
+    if action is not None and action.get("app_stopped"):
+        # A force-stop leaves no screen of its own, so it is usually in steps_not_shown; without
+        # this the judge read a real cold restart as unproven.
+        told = _story_action({key: value for key, value in action.items() if key != "app_stopped"},
+                             tool, chosen_on)
+        return f"{told} -- AUA reported it force-stopped the app"
     if action is None:
         return _STORY_VERBS.get(str(tool), "open the app") if tool else "open the app"
     name = str(action.get("tool") or tool or "")
@@ -1351,7 +1358,9 @@ async def judge_outcome(
             "`step` numbers the action that produced it. `changed: false` means the screen was "
             "identical to the previous entry. `loading: true` means it was captured mid-transition. "
             "`steps_not_shown` names actions whose resulting screens were captured but are not in "
-            "this story, so nothing about them is in evidence. `final` is the current screen."
+            "this story, so nothing about them is in evidence, except what their `action` itself "
+            "reports AUA did. `app_restarted: true` means AUA stopped or launched the app between "
+            "the previous entry and this one. `final` is the current screen."
         ),
     }
     transitions = order_transition_checkpoints(frames, actions)

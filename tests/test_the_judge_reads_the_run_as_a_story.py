@@ -134,6 +134,16 @@ def test_the_question_speaks_in_the_storys_own_terms() -> None:
         assert stale not in question, stale
 
 
+def test_a_force_stop_aua_reported_is_told_even_when_its_screen_is_not_shown() -> None:
+    actions = [dict(action) for action in ACTIONS]
+    actions[4] = {"step": actions[4]["step"], "tool": "app_force_stop", "arguments": {},
+                  "app_stopped": True}
+    story = judge_story(FRAMES, actions)
+    told = [entry["action"] for entry in story] + [
+        missing["action"] for entry in story for missing in entry.get("steps_not_shown", [])]
+    assert "force-stop the app -- AUA reported it force-stopped the app" in told
+
+
 def test_a_press_that_was_never_sent_says_so() -> None:
     actions = [dict(action) for action in ACTIONS]
     actions[4] = {**actions[4], "not_sent": True}

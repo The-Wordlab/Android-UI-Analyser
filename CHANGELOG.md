@@ -30,6 +30,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The controller judge is told when AUA reported a force-stop. The step leaves no screen, so a
+  skeptical vote read a real cold restart as unproven; the journey note now also explains
+  `app_restarted`.
 - Android recording inspection reads each process's command line with one bounded read. Toybox
   `tr` spun forever on a process that exited mid-read, leaving an orphan that used most of a CPU,
   and a shell exiting mid-check could fail `record stop` as "ambiguous", which left cleanup

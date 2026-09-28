@@ -55,6 +55,12 @@ def resolved_action_target(
     return target
 
 
+def reported_app_stop(tool: Any, result: Any) -> bool:
+    """AUA's own receipt that it force-stopped the app, which leaves no screen of its own."""
+    return (tool == "app_force_stop" and isinstance(result, dict) and result.get("ok") is True
+            and result.get("action") == "app-stop")
+
+
 def definitive_selector_miss(result: Any) -> bool:
     """Recognize only AUA's pre-dispatch addressing refusal with a recovery observation."""
     if (not isinstance(result, dict) or result.get("ok") is True or result.get("mcp_is_error")
@@ -100,6 +106,8 @@ def judge_action_history(
             if definitive_selector_miss(record.get("result")):
                 # Dispatched to AUA, which refused it before sending: nothing was pressed.
                 action["not_sent"] = True
+            if reported_app_stop(record.get("tool"), record.get("result")):
+                action["app_stopped"] = True
             actions.append(action)
         previous = record.get("result")
         previous_ref = record.get("evidence_ref")

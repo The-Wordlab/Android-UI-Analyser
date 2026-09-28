@@ -86,3 +86,18 @@ def test_a_press_aua_refused_before_sending_is_marked_not_sent():
     ]
     actions = judge_action_history(records, frame("Launchpad"))
     assert [action.get("not_sent") for action in actions] == [True, None]
+
+
+def test_a_force_stop_aua_reported_is_marked_app_stopped():
+    """A force-stop leaves no screen, so the judge only learns of it from the action. Live, a
+    skeptical vote read a real cold restart as unproven because step 13 was "not shown"."""
+    records = [
+        {"step": 0, "tool": "app_force_stop", "executed": True, "arguments": {},
+         "result": {"ok": True, "action": "app-stop", "detail": "com.example"}, "evidence_ref": None},
+        {"step": 1, "tool": "app_force_stop", "executed": True, "arguments": {},
+         "result": {"ok": False, "error": {"code": "device"}}, "evidence_ref": None},
+        {"step": 2, "tool": "tap_and_analyze", "executed": True, "arguments": {"text": "Grid"},
+         "result": {"ok": True, "action": "app-stop"}, "evidence_ref": "E0002"},
+    ]
+    actions = judge_action_history(records, frame("Launchpad"))
+    assert [action.get("app_stopped") for action in actions] == [True, None, None]
