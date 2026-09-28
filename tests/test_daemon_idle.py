@@ -223,6 +223,8 @@ def test_busy_live_pid_counts_as_running_without_spawning_a_competitor(
         daemon=SimpleNamespace(socket=str(cache / "daemon.sock")),
         device=SimpleNamespace(serial="fictional-5554"),
     )
+    # This is a PID-policy fixture, not a live Unix socket; keep it out of host temp state.
+    monkeypatch.setattr(daemon_mod, "socket_path", lambda *_a, **_k: str(cache / "daemon.sock"))
     sock = daemon_mod.socket_path(cfg)
     Path(sock).touch()
     Path(sock + ".pid").write_text(
