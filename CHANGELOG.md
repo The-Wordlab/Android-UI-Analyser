@@ -32,6 +32,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 - Attached Electron screenshots preserve embedded guest previews on Retina displays. Native
   captures are resized to CSS pixels without asking Chromium to rescale guest surfaces.
+- `proxy start`'s relaunch after the CA install brings the app back on the Activity that was in
+  front, falling back to the default launcher only when Android refuses it. On a dev build with a
+  second launcher it reopened the product instead, and that launch's splash covered the next
+  explicit launch of the tools screen.
 - A session that needs `audio` or `headed` only through `--needs` now boots a target with it.
   The flag became a need, but not the need a flag, so AUA booted a `-no-audio` emulator that
   could never satisfy the session asking for it.

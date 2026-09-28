@@ -949,17 +949,23 @@ def proxy_start(
                 "cache_dir": str(cache),
             },
         )
-    # Relaunching the foreground app makes it inherit Zygote CA mounts.
-    pkg = None
+    # Relaunching the foreground app makes it inherit Zygote CA mounts. It comes back on the
+    # Activity that was in front: a dev build's second launcher (Dev Tools) relaunched through
+    # the default one put the product's splash on top of the next Dev Tools launch.
+    foreground = AppContext()
     with contextlib.suppress(Exception):
         tree = self.platform.runtime_capability("ui.tree", device)
-        pkg = AppContext.coerce(tree.current_app()).app_id
+        foreground = AppContext.coerce(tree.current_app())
+    pkg = foreground.app_id
     if pkg and ca_info and ca_info.get("ok"):
         with contextlib.suppress(Exception):
             self._app_process_replaced(pkg)
             lifecycle = self.platform.runtime_capability("app.lifecycle", device)
             lifecycle.stop_app(pkg)
-            lifecycle.launch_app(pkg)
+            try:
+                lifecycle.launch_app(pkg, activity=foreground.activity)
+            except DeviceError:  # a non-exported Activity cannot be started from the shell
+                lifecycle.launch_app(pkg)
     out: dict[str, Any] = {
         "ok": True,
         "action": "proxy-start",
