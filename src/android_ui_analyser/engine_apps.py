@@ -54,7 +54,11 @@ def _same_tag_family(one: str, other: str) -> bool:
     return _tag_hides(one, other) or _tag_hides(other, one)
 
 
-_FLAGS_VERIFY_DEADLINE_S = 2.0  # how long a flag write gets to reach the app's prefs file
+# How long a flag write gets to reach the app's prefs file. The read-back returns as soon as
+# every key is there, so only a genuinely dropped key waits it out. It must cover a first launch:
+# when the set-flags link is what starts the process after a fresh install, a large debug build
+# needed 2.9 s just to attach, and the restart after a 2 s window killed it before it wrote.
+_FLAGS_VERIFY_DEADLINE_S = 15.0
 
 
 _FLAGS_ENTRY_TIMEOUT_S = 3.0  # how long a pinned entry Activity gets before the default one

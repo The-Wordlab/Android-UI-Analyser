@@ -30,6 +30,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- `flags set` and `flags apply` no longer lose every flag when the set-flags deeplink is the
+  app's first launch after a fresh install. The read-back now waits up to 15 s instead of 2 s
+  before the restart, so a slow first cold start can write first; it still returns as soon as
+  every key is present.
 - Electron navigation no longer waits on a swapped guest frame's missing execution context;
   attached hierarchy reads skip unsupported webview frames while retaining normal iframes.
 - Concurrent workers sharing an agent process now have separate target-selection locks,
