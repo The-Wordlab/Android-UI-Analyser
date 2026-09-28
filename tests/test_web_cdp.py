@@ -1,10 +1,13 @@
 """Existing desktop sessions stay owned by the user through attach, actions and teardown."""
 
+import base64
 import json
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image, ImageDraw
 
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import ConfigError, DeviceError, UnsupportedPlatformCapabilityError
@@ -38,10 +41,13 @@ class Page:
         self.handlers = {}
         self.frames = []
         self.main_frame = self
-        self.context = SimpleNamespace(pages=[self])
+        self.context = SimpleNamespace(pages=[self], new_cdp_session=self.new_cdp_session)
         self.viewport_size = None
         self.input = []
         self.mouse = SimpleNamespace(click=lambda x, y: self.input.append((x, y)))
+        self.pixel_ratio = 1
+        self.captured_png = None
+        self.detached_captures = 0
 
     def is_closed(self):
         return self.closed
@@ -61,9 +67,24 @@ class Page:
     def evaluate(self, script):
         return {"width": 800, "height": 600}
 
-    def screenshot(self, **options):
-        assert options == {"type": "png", "scale": "css", "animations": "allow"}
-        return b"png"
+    def new_cdp_session(self, page):
+        assert page is self
+        def detach():
+            self.detached_captures += 1
+        return SimpleNamespace(send=self.capture, detach=detach)
+
+    def capture(self, method, options):
+        assert method == "Page.captureScreenshot"
+        assert options == {"format": "png"}
+        ratio = self.pixel_ratio
+        image = Image.new("RGB", (800 * ratio, 600 * ratio), "white")
+        ImageDraw.Draw(image).rectangle(
+            (500 * ratio, 100 * ratio, 700 * ratio, 500 * ratio), fill="blue"
+        )
+        output = BytesIO()
+        image.save(output, format="PNG")
+        self.captured_png = output.getvalue()
+        return {"data": base64.b64encode(self.captured_png).decode()}
 
     def title(self):
         return "Desktop fixture"
@@ -90,7 +111,7 @@ def test_attach_actions_and_finish_preserve_the_existing_context(attached):
     assert conn._context is page.context
     assert conn.viewport_size() == (800, 600)
     assert conn._call(conn._snapshot_viewport) == {"width": 800, "height": 600}
-    assert conn.screenshot_png() == b"png"
+    assert conn.screenshot_png() == page.captured_png
     conn.click(42, 51)
     assert page.input == [(42, 51)]
     assert conn.session_begin("s1")["captured"] == []
@@ -100,6 +121,46 @@ def test_attach_actions_and_finish_preserve_the_existing_context(attached):
     assert conn._context is page.context
     conn.close()
     assert stopped == [True]
+
+
+@pytest.mark.parametrize("ratio", [1, 2, 3])
+def test_attached_capture_preserves_content_at_css_coordinates(attached, ratio):
+    conn, page, _ = attached
+    conn.initialize_attached(FILE_URL)
+    page.pixel_ratio = ratio
+    png = conn.screenshot_png()
+    with Image.open(BytesIO(png)) as image:
+        assert image.size == (800, 600)
+        assert image.getpixel((600, 300)) == (0, 0, 255)
+        assert image.getpixel((400, 300)) == (255, 255, 255)
+        assert image.getpixel((750, 300)) == (255, 255, 255)
+    assert page.viewport_size is None
+    assert not page.input
+    assert page.detached_captures == 1
+    if ratio == 1:
+        assert png == page.captured_png
+
+
+@pytest.mark.parametrize("payload", [None, {"data": "not base64"}, {"data": "aW52YWxpZA=="}])
+def test_attached_capture_rejects_invalid_image(attached, payload):
+    conn, page, _ = attached
+    conn.initialize_attached(FILE_URL)
+    page.capture = lambda *args: payload
+    with pytest.raises(DeviceError) as error:
+        conn.screenshot_png()
+    assert error.value.code == "screencap_failed"
+    assert page.detached_captures == 1
+
+
+def test_attached_capture_detaches_on_transport_failure(attached):
+    conn, page, _ = attached
+    conn.initialize_attached(FILE_URL)
+    def fail(*args):
+        raise TimeoutError("capture expired")
+    page.capture = fail
+    with pytest.raises(DeviceError, match="capture expired"):
+        conn.screenshot_png()
+    assert page.detached_captures == 1
 
 
 @pytest.mark.parametrize("use_mark", [True, False])

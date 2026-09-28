@@ -30,6 +30,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Attached Electron screenshots preserve embedded guest previews on Retina displays. Native
+  captures are resized to CSS pixels without asking Chromium to rescale guest surfaces.
 - A session that needs `audio` or `headed` only through `--needs` now boots a target with it.
   The flag became a need, but not the need a flag, so AUA booted a `-no-audio` emulator that
   could never satisfy the session asking for it.

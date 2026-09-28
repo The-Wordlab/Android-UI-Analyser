@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any
 from urllib.parse import urlsplit
+
+from PIL import Image
 
 from ..errors import ConfigError, DeviceError, UnsupportedPlatformCapabilityError
 from .web_bounded_reads import read as _read
@@ -124,10 +128,30 @@ class CdpConnection(PlaywrightConnection):
 
     def screenshot_png(self) -> bytes:
         def capture() -> bytes:
-            data = _read(self._page, "screenshot", type="png", scale="css", animations="allow")
-            if not isinstance(data, bytes):
+            viewport = self._snapshot_viewport()
+            # Chromium's CSS-scale capture misplaces Electron guest surfaces on Retina.
+            # Capture native pixels first, then match the CSS coordinates used by the tree.
+            session = _read(self._context, "new_cdp_session", self._page)
+            try:
+                result = _read(session, "send", "Page.captureScreenshot", {"format": "png"})
+            finally:
+                # Detach even if the read budget expired during capture.
+                session.detach()
+            if not isinstance(result, dict) or not isinstance(result.get("data"), str):
                 raise DeviceError("browser returned no PNG screenshot", code="screencap_failed")
-            return data
+            try:
+                data = base64.b64decode(result["data"], validate=True)
+                with Image.open(BytesIO(data)) as image:
+                    target = (viewport["width"], viewport["height"])
+                    if image.size == target:
+                        return data
+                    output = BytesIO()
+                    image.resize(target, Image.Resampling.LANCZOS).save(output, format="PNG")
+                    return output.getvalue()
+            except (OSError, ValueError) as error:
+                raise DeviceError(
+                    "browser returned an invalid PNG screenshot", code="screencap_failed"
+                ) from error
 
         return self._call(capture)
 
