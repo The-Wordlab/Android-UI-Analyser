@@ -126,6 +126,10 @@ def _write_state(dev: Uiautomator2Device, state: dict[str, Any]) -> None:
 def _process_table(dev: Uiautomator2Device) -> list[tuple[int, str]]:
     # Toybox can truncate ARGS even in a pipe. Request wide output, then resolve every
     # shell/encoder candidate from /proc in ONE batched transport call, never per PID.
+    # Each cmdline is read with ONE read (dd count=1): toybox `tr` reading the cmdline of a
+    # process that exits after the open spins forever, and the orphaned shell outlives the
+    # transport timeout on the device. Stderr is silenced because shell v2 merges it into
+    # the output, where a candidate that exits mid-check would leave a malformed line.
     output = dev.shell("ps -A -w -o PID,ARGS")
     lines = output.splitlines()
     if not lines or lines[0].split() != ["PID", "ARGS"]:
@@ -147,10 +151,11 @@ def _process_table(dev: Uiautomator2Device) -> list[tuple[int, str]]:
             "# AUA_RECORDING_CMDLINES\n"
             f"for pid in {pids}; do "
             'if [ -r /proc/$pid/cmdline ]; then '
-            'command=$(tr "\\000\\n" "  " < /proc/$pid/cmdline) || '
+            'command=$(dd if=/proc/$pid/cmdline bs=65536 count=1 2>/dev/null | tr "\\000\\n" "  ") || '
             '{ echo "$pid AUA_UNKNOWN"; continue; }; '
             'if [ -n "$command" ]; then printf "%s %s\\n" "$pid" "$command"; '
-            'else stat=$(cat /proc/$pid/stat) || { echo "$pid AUA_UNKNOWN"; continue; }; '
+            'else stat=$(cat /proc/$pid/stat 2>/dev/null) || '
+            '{ if [ -d /proc/$pid ]; then echo "$pid AUA_UNKNOWN"; else echo "$pid AUA_GONE"; fi; continue; }; '
             'printf "%s AUA_EMPTY %s\\n" "$pid" "$stat"; fi; '
             'elif [ ! -d /proc/$pid ]; then echo "$pid AUA_GONE"; '
             'else echo "$pid AUA_UNKNOWN"; fi; done; echo AUA_CMDLINES_COMPLETE'
@@ -162,7 +167,9 @@ def _process_table(dev: Uiautomator2Device) -> list[tuple[int, str]]:
         for line in resolved[:-1]:
             fields = line.split(None, 1)
             if (len(fields) != 2 or not fields[0].isdigit() or int(fields[0]) not in candidates
-                    or int(fields[0]) in seen or "AUA_UNKNOWN" in fields[1]):
+                    or int(fields[0]) in seen or fields[1].strip() == "AUA_UNKNOWN"):
+                # Exact match: an earlier inspection shell still on the device carries this
+                # script, marker text included, as its own command line.
                 raise DeviceError("ambiguous recording command line", code="recording_status_unknown")
             pid, command = int(fields[0]), fields[1].strip()
             seen.add(pid)

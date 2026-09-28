@@ -30,6 +30,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Android recording inspection reads each process's command line with one bounded read. Toybox
+  `tr` spun forever on a process that exited mid-read, leaving an orphan that used most of a CPU,
+  and a shell exiting mid-check could fail `record stop` as "ambiguous", which left cleanup
+  pending and blocked every later recording on that emulator.
 - `flags set` and `flags apply` no longer lose every flag when the set-flags deeplink is the
   app's first launch after a fresh install. The read-back now waits up to 15 s instead of 2 s
   before the restart, so a slow first cold start can write first; it still returns as soon as
