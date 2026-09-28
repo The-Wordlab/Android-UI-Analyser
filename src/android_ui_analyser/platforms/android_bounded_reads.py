@@ -97,7 +97,11 @@ def rpc(
             raise DeviceError("bounded Android read returned an invalid response")
         data = json.loads(raw)
         if not isinstance(data, dict) or "error" in data or "result" not in data:
-            raise DeviceError("bounded Android UI read failed; no reconnect attempted")
+            error = data.get("error") if isinstance(data, dict) else None
+            reason = (error.get("message") if isinstance(error, dict) else error) or "no result"
+            raise DeviceError(
+                f"bounded Android UI read failed ({str(reason)[:160]}); no reconnect attempted"
+            )
         return data["result"]
     except (OSError, http.client.HTTPException) as exc:
         if budget.clock() >= budget.deadline:

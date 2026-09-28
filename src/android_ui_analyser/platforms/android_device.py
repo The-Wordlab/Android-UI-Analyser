@@ -969,15 +969,30 @@ class Uiautomator2Device(AndroidRuntimeBase):
 
         budget = read_budget.current()
         assert budget is not None
-        return rpc(
-            self._d._dev._client.host,
-            self._d._dev._client.port,
-            self.serial,
-            self._d._device_server_port,
-            method,
-            params,
-            budget,
-        )
+
+        def call() -> Any:
+            return rpc(
+                self._d._dev._client.host,
+                self._d._dev._client.port,
+                self.serial,
+                self._d._device_server_port,
+                method,
+                params,
+                budget,
+            )
+
+        try:
+            return call()
+        except read_budget.ReadDeadlineExceeded:
+            raise
+        except DeviceError:
+            # One bad reply is not a broken device. A wait's poll lost its whole 60 s budget to
+            # a single failed read twice on 2026-09-28, while the next read would have worked.
+            # Retry once while the budget allows; a second failure is the answer.
+            if budget.remaining() < 0.5:
+                raise
+            time.sleep(0.2)
+            return call()
 
     def _bounded_shell(self, command: str) -> str:
         return self._bounded_command(["shell", command])

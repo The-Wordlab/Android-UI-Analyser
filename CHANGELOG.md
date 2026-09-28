@@ -33,6 +33,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A bounded Android UI read retries one failed reply while its budget allows, and the error now
+  names the server's reason. A wait lost its whole 60 s budget to a single bad read twice in one
+  evening, while the next read would have worked.
 - The controller judge pairs each frame with its own screenshot (`meta.raw_image`) before falling
   back to the fingerprint index. A theme change leaves the element tree, and so the fingerprint,
   identical, so the light Chats home was shown to the judges as the dark one.

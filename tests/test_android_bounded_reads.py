@@ -55,7 +55,9 @@ def server(stage):
                     elif stage == "body":
                         connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n")
                     else:
-                        payload = b'{"result": {"displayWidth": 320, "displayHeight": 640}}'
+                        payload = (b'{"error": {"code": -32001, "message": "UiAutomation busy"}}'
+                                   if stage == "error" else
+                                   b'{"result": {"displayWidth": 320, "displayHeight": 640}}')
                         connection.sendall(
                             f"HTTP/1.1 200 OK\r\nContent-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
@@ -170,3 +172,60 @@ def test_wait_observation_rechecks_android_boot_identity_before_publishing_ids(m
     assert first.observation is not None and second.observation is not None
     assert first.observation.elements[0].published_id != second.observation.elements[0].published_id
     assert sum(args[-1] == "cat /proc/sys/kernel/random/boot_id" for args in reads) >= 2
+
+
+def _rpc_device():
+    runtime = device()
+    client = SimpleNamespace(host="127.0.0.1", port=5037)
+    runtime._d = SimpleNamespace(_dev=SimpleNamespace(_client=client), _device_server_port=9008)
+    return runtime
+
+
+def test_one_failed_reply_is_read_again_within_the_budget(monkeypatch):
+    from android_ui_analyser import read_budget
+    from android_ui_analyser.errors import DeviceError
+    from android_ui_analyser.platforms import android_bounded_reads
+
+    replies = [DeviceError("bounded Android UI read failed (UiAutomation busy); no reconnect attempted"),
+               {"displayWidth": 320}]
+
+    def fake_rpc(*_args):
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(android_bounded_reads, "rpc", fake_rpc)
+    with read_budget.activate(ReadBudget(time.monotonic() + 5, time.monotonic)):
+        assert _rpc_device()._bounded_rpc("deviceInfo", []) == {"displayWidth": 320}
+    assert replies == []
+
+
+def test_a_second_failure_and_an_exhausted_budget_are_not_retried(monkeypatch):
+    from android_ui_analyser import read_budget
+    from android_ui_analyser.errors import DeviceError
+    from android_ui_analyser.platforms import android_bounded_reads
+
+    calls = []
+
+    def always_fails(*_args):
+        calls.append(1)
+        raise DeviceError("bounded Android read transport unavailable")
+
+    monkeypatch.setattr(android_bounded_reads, "rpc", always_fails)
+    with read_budget.activate(ReadBudget(time.monotonic() + 5, time.monotonic)), pytest.raises(DeviceError):
+        _rpc_device()._bounded_rpc("deviceInfo", [])
+    assert len(calls) == 2, "one retry, then the failure is the answer"
+    calls.clear()
+    with read_budget.activate(ReadBudget(time.monotonic() + 0.2, time.monotonic)), pytest.raises(DeviceError):
+        _rpc_device()._bounded_rpc("deviceInfo", [])
+    assert len(calls) == 1, "no retry once the budget cannot hold one"
+
+
+def test_a_server_error_reply_keeps_its_reason():
+    from android_ui_analyser.errors import DeviceError
+
+    with server("error") as (port, _commands):
+        budget = ReadBudget(time.monotonic() + 1, time.monotonic)
+        with pytest.raises(DeviceError, match=r"\(UiAutomation busy\); no reconnect attempted"):
+            rpc("127.0.0.1", port, "fictional-target", 9008, "dumpWindowHierarchy", [], budget)
