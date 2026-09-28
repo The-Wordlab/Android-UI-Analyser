@@ -143,13 +143,22 @@ def _run_as_failure(output: str) -> str | None:
 
 
 def _run_as(device: Shell, package: str, argv: list[str]) -> tuple[str, str | None]:
-    """Run *argv* as the app; return its output plus a reason when it could not run."""
+    """Run *argv* as the app; return its output plus a reason when it could not run.
+
+    A transport failure is retried once: a first-launch read-back once got no bytes at all from
+    `adb shell` ("shell output invalid") while the write had landed. A refusal is an answer and
+    is never retried.
+    """
     command = f"run-as {quote(package)} " + " ".join(quote(a) for a in argv)
-    try:
-        out = device.shell(command)
-    except Exception as exc:  # noqa: BLE001 — every shell failure means "cannot verify"
-        return "", f"{type(exc).__name__}: {exc}"
-    return out, _run_as_failure(out)
+    for attempt in (1, 2):
+        try:
+            out = device.shell(command)
+        except Exception as exc:  # noqa: BLE001 — every shell failure means "cannot verify"
+            if attempt == 1:
+                continue
+            return "", f"{type(exc).__name__}: {exc}"
+        return out, _run_as_failure(out)
+    raise AssertionError("unreachable")
 
 
 def _candidate_files(device: Shell, package: str, keys: set[str], names: list[str]) -> list[str]:

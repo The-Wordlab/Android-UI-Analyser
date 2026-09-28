@@ -524,3 +524,33 @@ def test_cli_flags_set_without_a_template_is_a_usage_error(
 
     assert res.exit_code == 2
     assert "no flags deeplink template" in res.stderr
+
+
+def test_one_transport_failure_during_read_back_is_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live on 2026-09-28 one read-back `adb shell` returned no bytes ("shell output invalid"):
+    the write had landed, and the whole four-arm matrix was reported unverified for it."""
+    device = device_with({"hub": "a"})
+    serve = device._run_as
+    failures = [RuntimeError("('shell output invalid', 'run-as ls', b'')")]
+
+    def run_as(command: str) -> str:
+        if failures:
+            raise failures.pop()
+        return serve(command)
+
+    monkeypatch.setattr(device, "_run_as", run_as)
+    result = make_flags_engine(tmp_path, device).flags_set(PKG, ["hub=a"], observe=False)
+    assert result["verified"] is True, result.get("verify_error")
+    assert result["applied"] == {"hub": "a"}
+
+
+def test_a_transport_failure_that_persists_still_reads_as_unverified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    device = device_with({"hub": "a"})
+
+    def run_as(command: str) -> str:
+        raise RuntimeError("('shell output invalid', 'run-as ls', b'')")
+
+    monkeypatch.setattr(device, "_run_as", run_as)
+    result = make_flags_engine(tmp_path, device).flags_set(PKG, ["hub=a"], observe=False)
+    assert result["verified"] is False
+    assert "shell output invalid" in result["verify_error"]

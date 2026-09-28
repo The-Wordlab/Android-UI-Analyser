@@ -30,6 +30,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Flag read-back retries a `run-as` call once when the transport fails. One empty `adb shell`
+  reply had reported a landed write as unverified; a `run-as` refusal is still returned at once.
 - The controller judge is told when AUA reported a force-stop. The step leaves no screen, so a
   skeptical vote read a real cold restart as unproven; the journey note now also explains
   `app_restarted`.
