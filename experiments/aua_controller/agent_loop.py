@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 import jsonschema
-from experiments.aua_controller.action_evidence import resolved_action_target
+from experiments.aua_controller.action_evidence import (
+    definitive_selector_miss,
+    resolved_action_target,
+)
 from experiments.aua_controller.hosted import (
     BACKENDS,
     CostGuard,
@@ -146,25 +149,6 @@ def _multiple_calls(response: dict[str, Any]) -> tuple[dict[str, Any], list[dict
         ids.add(native["id"])
         native_calls.append(native)
     return message, native_calls
-
-
-def definitive_selector_miss(result: Any) -> bool:
-    """Recognize only AUA's pre-dispatch addressing refusal with a recovery observation."""
-    if (not isinstance(result, dict) or result.get("ok") is True or result.get("mcp_is_error")
-            or result.get("action") or result.get("capture_evidence") or result.get("action_sent") is True):
-        return False
-    error = result.get("error")
-    if not isinstance(error, dict):
-        return False
-    observation = error.get("observation")
-    return (error.get("code") == "element_not_found"
-            and error.get("action_sent") is not True
-            and str(error.get("hint") or "").startswith("No action was sent")
-            and error.get("observation_present") is True and isinstance(observation, dict)
-            and isinstance(observation.get("screen"), dict)
-            and isinstance(observation.get("elements"), list)
-            and isinstance(observation.get("meta"), dict)
-            and bool(observation["meta"].get("fingerprint")))
 
 
 async def run_agent(

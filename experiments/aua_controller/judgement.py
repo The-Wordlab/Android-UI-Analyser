@@ -1167,6 +1167,10 @@ def _target_label(action: dict[str, Any], chosen_on: Any) -> str:
 
 
 def _story_action(action: dict[str, Any] | None, tool: str | None, chosen_on: Any) -> str:
+    if action is not None and action.get("not_sent"):
+        told = _story_action({key: value for key, value in action.items() if key != "not_sent"},
+                             tool, chosen_on)
+        return f"{told} -- AUA refused it before sending, so nothing was pressed"
     if action is None:
         return _STORY_VERBS.get(str(tool), "open the app") if tool else "open the app"
     name = str(action.get("tool") or tool or "")

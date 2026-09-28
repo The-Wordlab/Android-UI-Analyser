@@ -55,6 +55,25 @@ def resolved_action_target(
     return target
 
 
+def definitive_selector_miss(result: Any) -> bool:
+    """Recognize only AUA's pre-dispatch addressing refusal with a recovery observation."""
+    if (not isinstance(result, dict) or result.get("ok") is True or result.get("mcp_is_error")
+            or result.get("action") or result.get("capture_evidence") or result.get("action_sent") is True):
+        return False
+    error = result.get("error")
+    if not isinstance(error, dict):
+        return False
+    observation = error.get("observation")
+    return (error.get("code") == "element_not_found"
+            and error.get("action_sent") is not True
+            and str(error.get("hint") or "").startswith("No action was sent")
+            and error.get("observation_present") is True and isinstance(observation, dict)
+            and isinstance(observation.get("screen"), dict)
+            and isinstance(observation.get("elements"), list)
+            and isinstance(observation.get("meta"), dict)
+            and bool(observation["meta"].get("fingerprint")))
+
+
 def judge_action_history(
     records: Sequence[dict[str, Any]],
     initial_observation: Any,
@@ -78,6 +97,9 @@ def judge_action_history(
             )
             if target is not None:
                 action["resolved_target"] = target
+            if definitive_selector_miss(record.get("result")):
+                # Dispatched to AUA, which refused it before sending: nothing was pressed.
+                action["not_sent"] = True
             actions.append(action)
         previous = record.get("result")
         previous_ref = record.get("evidence_ref")

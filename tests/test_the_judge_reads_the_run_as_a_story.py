@@ -132,3 +132,11 @@ def test_the_question_speaks_in_the_storys_own_terms() -> None:
     assert "journey" in question and "steps_not_shown" in question
     for stale in ("evidence_position", "intermediate_frames", "final frame is the current screen"):
         assert stale not in question, stale
+
+
+def test_a_press_that_was_never_sent_says_so() -> None:
+    actions = [dict(action) for action in ACTIONS]
+    actions[4] = {**actions[4], "not_sent": True}
+    story = judge_story(FRAMES, actions)
+    assert "nothing was pressed" in story[5]["action"]
+    assert "nothing was pressed" not in story[4]["action"]

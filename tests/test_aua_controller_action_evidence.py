@@ -66,3 +66,23 @@ def test_password_text_is_not_copied_and_semantics_are_bounded():
     target = resolved_action_target("input", {"id": "el:reused"}, previous)
     assert "text" not in target
     assert len(target["content_desc"]) == 200
+
+
+def test_a_press_aua_refused_before_sending_is_marked_not_sent():
+    """Live, a launchpad's rotating subtitle expired the back arrow's id between the read and
+    the press. AUA sent nothing (`element_not_found`, "No action was sent") and the next press
+    by resource id left the tool. The journal still said `executed`, so the judge was told
+    back had been pressed and the launchpad stayed, and one vote failed a working back."""
+    refused = {"ok": False, "error": {
+        "code": "element_not_found",
+        "message": "could not establish a unique current element for handle 'el:reused'",
+        "hint": "No action was sent. The element may be absent or changed.",
+        "observation_present": True, "observation": frame("Launchpad")}}
+    records = [
+        {"step": 0, "tool": "tap_and_analyze", "executed": True, "arguments": {"id": "el:reused"},
+         "result": refused, "evidence_ref": "E0001"},
+        {"step": 1, "tool": "tap_and_analyze", "executed": True, "arguments": {"id": "el:reused"},
+         "result": frame("Grid"), "evidence_ref": "E0002"},
+    ]
+    actions = judge_action_history(records, frame("Launchpad"))
+    assert [action.get("not_sent") for action in actions] == [True, None]
