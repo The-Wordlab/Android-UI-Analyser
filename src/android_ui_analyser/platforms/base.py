@@ -132,6 +132,16 @@ class PlatformAdapter(ABC):
 
         return None
 
+    def retain_runtime_on_lease_change(self) -> bool:
+        """Whether a connected runtime may be reused after a validated lease transition.
+
+        Native devices keep their transport and use the normal device cleanup ledger. Adapters
+        whose runtime contains agent-owned state can request a fresh connection; the core only
+        closes that runtime after the incoming owner has proved its current lease.
+        """
+
+        return True
+
     @abstractmethod
     def connect(self, target_id: str | None = None) -> TargetRuntime:
         """Connect to a target, or choose the sole available target."""

@@ -27,8 +27,15 @@ notes, so you can check for a newer version — and read what changed — withou
 ### Fixed
 
 - Session startup on a warm web daemon no longer attempts to upgrade its device-use lock while
-  selecting the target. Failed attachment releases a lease newly claimed by that CLI call while
-  retaining a lease that was already held before startup.
+  selecting the target. Failed startup releases a newly claimed lease, including errors during
+  the initial storage snapshot, while retaining a lease already held before startup.
+- WebKit goal sessions no longer fail while snapshotting storage on ordinary pages. Ephemeral
+  WebKit contexts omit unsupported OPFS capture; cookies, local/session storage and IndexedDB
+  remain included. Chromium and Firefox retain OPFS capture.
+- Reassigned browser slots discard the previous agent's runtime and diagnostics after validating
+  the new lease. Attached sessions detach their old transport while leaving the user's app open.
+- Existing Chrome attachment includes structured network status/method metadata and sanitizes
+  network URLs before returning inline diagnostics, matching isolated browser observations.
 
 - Release verification reads the plugin's pinned version from `AUA_SPEC`, matching the new
   MCP launcher.

@@ -1217,8 +1217,9 @@ and troubleshooting: [docs/ios.md](docs/ios.md).
 
 ## Web browsers
 
-The built-in `web` platform launches an isolated Playwright browser and keeps the same AUA
-commands and element schema:
+The built-in `web` platform tests websites and web apps across Chromium, Firefox and WebKit,
+and can attach to supported existing browser/desktop windows. All connections use the same AUA
+commands and element schema, independent of the application's frontend framework:
 
 ```bash
 uv pip install -e '.[web]'
@@ -1247,9 +1248,17 @@ aua browser extension install
 ```
 
 It preserves the personal profile and detaches automatically; profile-wide storage, network,
-proxy/CORS, tracing, tab closing, and access to unapproved tabs are disabled. Device-style app
-and database controls remain unsupported. Configuration, the exact capability boundary, and
-troubleshooting: [docs/web.md](docs/web.md).
+proxy/CORS, tracing, tab closing, and access to unapproved tabs are disabled. For a running Chromium
+or Electron app exposing a local debugging endpoint, `connection: existing-cdp` attaches to one
+HTTP(S)/file page and leaves the app running at finish.
+
+For parallel testing, configure `platforms.web.url` and omit `--serial`; `context_slots` provides
+independently leased browser contexts, with sticky agent ownership across commands. Console logs,
+JavaScript errors and network metadata arrive in `meta.browser_diagnostics` with each analysis
+and action observation. These features apply across the web platform.
+
+Device-style app and database controls remain unsupported. Configuration, the exact capability
+boundary, and troubleshooting: [docs/web.md](docs/web.md).
 
 ## Adding a platform adapter
 

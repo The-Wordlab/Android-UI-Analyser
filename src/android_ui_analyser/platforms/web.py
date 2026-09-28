@@ -368,6 +368,11 @@ class WebPlatform(PlatformAdapter):
             "and omit --serial to claim a separate browser. Inspect `aua lease list`."
         )
 
+    def retain_runtime_on_lease_change(self) -> bool:
+        # Isolated runtimes discard the old agent's cookies, controls and buffered events.
+        # Attached runtimes only detach their transport, preserving the user's app/profile.
+        return False
+
     def connect(self, target_id: str | None = None) -> TargetRuntime:
         if self._connection_mode() == "existing-cdp":
             endpoint = str(self.options["cdp_endpoint"])

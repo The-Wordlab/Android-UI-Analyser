@@ -6,6 +6,7 @@ let nativePort = null;
 let nativeReady = null;
 let resolveNativeReady = null;
 let rejectNativeReady = null;
+const pendingRequests = new Map();
 
 function debuggee() {
   if (attachedTabId === null) throw new Error("No tab is attached");
@@ -62,6 +63,7 @@ function sendHello() {
 async function detachCurrent() {
   const tabId = attachedTabId;
   attachedTabId = null;
+  pendingRequests.clear();
   if (tabId !== null) {
     try {
       await chrome.debugger.detach({tabId});
@@ -251,37 +253,86 @@ async function handleAuaMessage(message) {
   sendToAua({reply_to: id, ok: true, result});
 }
 
-function diagnosticEvent(kind, level, message, url = "") {
+function diagnosticUrl(value) {
+  if (!value) return "";
+  try {
+    const url = new URL(String(value));
+    // Opaque URLs can contain a whole document rather than a network address.
+    if (!["http:", "https:", "ws:", "wss:", "file:"].includes(url.protocol)) return url.protocol;
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.href;
+  } catch (_error) {
+    return "";
+  }
+}
+
+function diagnosticEvent(kind, level, message, url = "", fields = {}) {
   sendToAua({
     type: "event",
-    event: {kind, level, message: String(message || ""), url: String(url || ""), timestamp_ms: Date.now()}
+    event: {
+      kind, level, message: String(message || "").slice(0, 2000),
+      url: diagnosticUrl(url), timestamp_ms: Date.now(), ...fields
+    }
   });
 }
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
-  if (source.tabId !== attachedTabId) return;
+  if (attachedTabId === null || source.tabId !== attachedTabId) return;
   if (method === "Runtime.consoleAPICalled") {
     const message = (params.args || []).map(arg => arg.value ?? arg.description ?? arg.type).join(" ");
     diagnosticEvent("console", params.type === "error" ? "error" : params.type, message);
   } else if (method === "Runtime.exceptionThrown") {
     diagnosticEvent("page_error", "error", params.exceptionDetails?.exception?.description || params.exceptionDetails?.text);
   } else if (method === "Network.loadingFailed") {
-    diagnosticEvent("request_failed", "error", params.errorText || "request failed");
+    const request = pendingRequests.get(params.requestId) || {};
+    diagnosticEvent("request_failed", "error", params.errorText || "request failed", request.url, {
+      method: request.method,
+      resource_type: String(params.type || request.resource_type || "").toLowerCase()
+    });
+    pendingRequests.delete(params.requestId);
+  } else if (method === "Network.loadingFinished") {
+    pendingRequests.delete(params.requestId);
   } else if (method === "Network.requestWillBeSent") {
-    diagnosticEvent("request", "info", `${params.request?.method || "GET"} ${params.request?.url || ""}`, params.request?.url);
+    const request = {
+      url: diagnosticUrl(params.request?.url),
+      method: String(params.request?.method || "GET"),
+      resource_type: String(params.type || "").toLowerCase()
+    };
+    // Correlation must remain bounded even for requests that never finish.
+    pendingRequests.delete(params.requestId);
+    pendingRequests.set(params.requestId, request);
+    if (pendingRequests.size > 2000) pendingRequests.delete(pendingRequests.keys().next().value);
+    diagnosticEvent("request", "debug", `${request.method} ${request.url}`, request.url, {
+      method: request.method, resource_type: request.resource_type
+    });
   } else if (method === "Network.responseReceived") {
-    diagnosticEvent("response", Number(params.response?.status) >= 400 ? "warning" : "info", `${params.response?.status || ""} ${params.response?.url || ""}`, params.response?.url);
+    const request = pendingRequests.get(params.requestId) || {};
+    const url = diagnosticUrl(params.response?.url || request.url);
+    const status = Number(params.response?.status);
+    diagnosticEvent("response", status >= 500 ? "error" : status >= 400 ? "warning" : "debug", `${status} ${url}`, url, {
+      status, method: request.method,
+      resource_type: String(params.type || request.resource_type || "").toLowerCase()
+    });
   } else if (method === "Network.webSocketCreated") {
-    diagnosticEvent("websocket", "info", `opened ${params.url || ""}`, params.url);
+    diagnosticEvent("websocket", "info", "websocket opened", params.url);
   }
 });
 
 chrome.debugger.onDetach.addListener(source => {
-  if (source.tabId === attachedTabId) attachedTabId = null;
+  if (source.tabId === attachedTabId) {
+    attachedTabId = null;
+    pendingRequests.clear();
+  }
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {
-  if (tabId === attachedTabId) attachedTabId = null;
+  if (tabId === attachedTabId) {
+    attachedTabId = null;
+    pendingRequests.clear();
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

@@ -24,7 +24,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from PIL import Image
 
@@ -34,6 +34,47 @@ from .web_tools import _DOM_SNAPSHOT_SCRIPT
 BRIDGE_PROTOCOL = 1
 BRIDGE_HOST_NAME = "com.aua.chrome_bridge"
 ATTACHED_TARGET_ID = "existing-chrome"
+
+
+def _diagnostic_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep older, already-loaded extension workers inside the URL privacy contract."""
+    result = dict(event)
+    raw_url = str(result.get("url") or "")
+    safe_url = ""
+    if raw_url:
+        try:
+            parsed = urlsplit(raw_url)
+            if parsed.scheme in {"http", "https", "ws", "wss", "file"}:
+                host = parsed.hostname or ""
+                if ":" in host:
+                    host = f"[{host}]"
+                if parsed.port is not None:
+                    host = f"{host}:{parsed.port}"
+                safe_url = urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+            elif parsed.scheme:
+                safe_url = f"{parsed.scheme}:"
+        except ValueError:
+            pass
+    result["url"] = safe_url
+    message = str(result.get("message") or "")
+    kind = result.get("kind")
+    # Reconstruct generated messages instead of replacing the URL: an older worker may
+    # already have truncated the message partway through a credential or query string.
+    if kind == "request":
+        method = str(result.get("method") or message.partition(" ")[0])
+        if not (method.isascii() and method.isalpha() and method.isupper()):
+            method = "request"
+        result["message"] = f"{method} {safe_url}".strip()
+    elif kind == "response":
+        status = str(result.get("status") or message.partition(" ")[0])
+        if not (status.isascii() and status.isdigit() and 100 <= int(status) <= 599):
+            status = "response"
+        result["message"] = f"{status} {safe_url}".strip()
+    elif kind == "websocket":
+        result["message"] = "websocket opened"
+    elif raw_url and kind == "request_failed":
+        result["message"] = message.replace(raw_url, safe_url)
+    return result
 
 
 def bridge_config_path() -> Path:
@@ -69,6 +110,8 @@ class ChromeBridge(Protocol):
 
     def event_snapshot(self) -> list[dict[str, Any]]: ...
 
+    def events_overflowed(self, since_ms: int | None) -> bool: ...
+
     def clear_events(self) -> int: ...
 
     def close(self) -> None: ...
@@ -100,6 +143,8 @@ class ChromeBridgeServer:
         self._pending_lock = threading.Lock()
         self._pending: dict[str, _PendingReply] = {}
         self._events: deque[dict[str, Any]] = deque(maxlen=2000)
+        self._events_lock = threading.Lock()
+        self._last_evicted_event_ms: int | None = None
         self._hello = threading.Event()
         self._disconnected = threading.Event()
         self._next_id = 1
@@ -245,7 +290,12 @@ class ChromeBridgeServer:
                         self._hello.set()
                     continue
                 if kind == "event" and isinstance(message.get("event"), dict):
-                    self._events.append(dict(message["event"]))
+                    with self._events_lock:
+                        if len(self._events) == self._events.maxlen:
+                            self._last_evicted_event_ms = int(
+                                self._events[0].get("timestamp_ms") or 0
+                            )
+                        self._events.append(_diagnostic_event(message["event"]))
         except (EOFError, OSError, DeviceError):
             pass
         finally:
@@ -315,12 +365,21 @@ class ChromeBridgeServer:
                 self._pending.pop(request_id, None)
 
     def event_snapshot(self) -> list[dict[str, Any]]:
-        return [dict(event) for event in self._events]
+        with self._events_lock:
+            return [dict(event) for event in self._events]
+
+    def events_overflowed(self, since_ms: int | None) -> bool:
+        with self._events_lock:
+            return self._last_evicted_event_ms is not None and (
+                since_ms is None or self._last_evicted_event_ms >= since_ms
+            )
 
     def clear_events(self) -> int:
-        count = len(self._events)
-        self._events.clear()
-        return count
+        with self._events_lock:
+            count = len(self._events)
+            self._events.clear()
+            self._last_evicted_event_ms = None
+            return count
 
     def close(self) -> None:
         peer = self._peer
@@ -386,9 +445,7 @@ class ChromeExtensionConnection:
 
     @staticmethod
     def _unsupported(capability: str) -> Any:
-        raise UnsupportedPlatformCapabilityError(
-            "web existing-chrome", capability
-        )
+        raise UnsupportedPlatformCapabilityError("web existing-chrome", capability)
 
     def _state(self) -> dict[str, Any]:
         value = self._request("page_state")
@@ -421,7 +478,9 @@ class ChromeExtensionConnection:
         try:
             png = base64.b64decode(encoded, validate=True)
         except ValueError:
-            raise DeviceError("Chrome returned an invalid PNG screenshot", code="screencap_failed") from None
+            raise DeviceError(
+                "Chrome returned an invalid PNG screenshot", code="screencap_failed"
+            ) from None
         viewport = value.get("viewport") if isinstance(value, dict) else None
         if isinstance(viewport, dict):
             expected = (int(viewport.get("width") or 0), int(viewport.get("height") or 0))
@@ -462,9 +521,7 @@ class ChromeExtensionConnection:
         self._request("reload")
 
     def scroll(self, x: int, y: int, delta_x: int, delta_y: int) -> None:
-        self._request(
-            "scroll", {"x": x, "y": y, "delta_x": delta_x, "delta_y": delta_y}
-        )
+        self._request("scroll", {"x": x, "y": y, "delta_x": delta_x, "delta_y": delta_y})
 
     def goto(self, url: str) -> None:
         parsed = urlsplit(url)
@@ -546,9 +603,7 @@ class ChromeExtensionConnection:
     def har_stop(self) -> dict[str, Any]:
         return self._unsupported("browser.network")
 
-    def har_replay(
-        self, path: str, *, url: str | None, not_found: str
-    ) -> dict[str, Any]:
+    def har_replay(self, path: str, *, url: str | None, not_found: str) -> dict[str, Any]:
         del path, url, not_found
         return self._unsupported("browser.network")
 
@@ -589,6 +644,7 @@ class ChromeExtensionConnection:
             "count": len(bounded),
             "total_count": len(events),
             "truncated": len(bounded) < len(events),
+            "buffer_overflow": self._bridge.events_overflowed(since_ms),
             "events": bounded,
         }
 

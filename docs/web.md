@@ -1,10 +1,23 @@
-# Web browsers
+# Web app testing
 
-`aua` can launch an isolated Playwright browser page or attach to one user-approved tab in an
-existing Chrome profile, then drive it through the same semantic surface as Android and iOS:
-`analyze`, `has`, waits, stable-id actions, screenshots, flows, maps, and goal sessions. The
-browser DOM is normalized to AUA `Element` rows; callers do not need a second selector or
-response format.
+The `web` platform tests websites, web apps and supported browser-based desktop surfaces through
+the same semantic interface as Android and iOS: `analyze`, `has`, waits, stable-id actions,
+screenshots, flows, maps and goal sessions. It uses the rendered DOM and accessibility semantics,
+so application frameworks do not need a dedicated AUA integration. Console/network diagnostics
+and agent-owned sessions belong to this shared web platform.
+
+Choose a connection for the surface under test:
+
+| Surface | Connection | Session behavior |
+|---|---|---|
+| HTTP(S) websites, local development apps, SPAs and PWA pages | `isolated`, with `browser: chromium`, `firefox` or `webkit` | Separate leased contexts for concurrent agents; storage/network controls and traces |
+| An existing logged-in Chrome/Chromium tab | `existing-chrome` | One user-approved tab, preserving its profile |
+| An existing Chromium browser or Electron window exposing local CDP | `existing-cdp` | One exact HTTP(S)/file page, preserving the running app |
+
+All three paths return the same AUA elements and action observations. CDP attachment is one
+transport within web support. Other desktop wrappers and embedded WebViews need a compatible
+automation adapter; rendering HTML alone does not make them attachable. Native dialogs, custom
+app URL schemes and guest WebView targets are outside the current CDP contract.
 
 ## Install and start
 
@@ -82,6 +95,11 @@ Increase `context_slots` if the pool is full, or wait for a session to finish. S
 stable for a configured URL, even when the page navigates. A URL passed as `--serial` remains an
 explicit, exclusive target for backward compatibility. Attached modes below are also exclusive;
 they never create a replacement window when the configured target is leased.
+
+When an isolated slot is reclaimed after an abandoned session, AUA creates a fresh runtime before
+the new agent's first observation. The previous agent's storage, network controls and diagnostic
+buffer do not carry over. Attached modes reconnect their transport while preserving the user's
+existing app or browser profile.
 
 ### Extension attachment
 
@@ -221,6 +239,10 @@ device teardown ledger entry. A goal session snapshots cookies, local/IndexedDB 
 sessionStorage, the current URL, and AUA browser controls; `session finish` recreates the context
 from that baseline, which also clears HTTP cache. Browser state remains process-local, so use the
 default warm daemon for a session spanning several CLI calls.
+
+Snapshots also preserve the origin-private file system (OPFS) in Chromium and Firefox. Playwright's
+ephemeral WebKit contexts do not support OPFS; AUA omits it there while preserving cookies,
+local/session storage and IndexedDB. Tests that require OPFS need a browser that provides it.
 
 ## Browser lab controls
 

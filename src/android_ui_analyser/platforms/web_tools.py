@@ -467,7 +467,9 @@ class PlaywrightConnection:
             return dict(
                 self._context.storage_state(
                     indexed_db=True,
-                    opfs=True,
+                    # Playwright's ephemeral WebKit contexts cannot access OPFS. Asking
+                    # to serialize it fails even on an ordinary page with no stored files.
+                    opfs=self._options.browser != "webkit",
                     credentials=False,
                 )
             )

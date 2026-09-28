@@ -80,10 +80,13 @@ def _recover_pending_boot(self: Engine, prepared: dict[str, Any]) -> dict[str, A
 
 def _release_new_bootstrap_lease(self: Engine) -> None:
     """Release a reused target claimed by a session start that never returned a session."""
+    preexisting = getattr(self, "_session_bootstrap_lease_preexisting", None)
+    if preexisting is None:
+        preexisting = getattr(self, "_lease_was_preexisting", False)
     if (
         not getattr(self, "_lease_serial", None)
         or not getattr(self, "_lease_owner_resolved", None)
-        or getattr(self, "_lease_was_preexisting", False)
+        or preexisting
     ):
         return
     self.release_device_use()
@@ -354,6 +357,10 @@ def _session_start_impl(
             else None
         )
         self._session_bootstrap_prepared = dict(prepared)
+        if self._session_bootstrap_lease_preexisting is None:
+            # Connecting and collecting the first observation may resolve the lease again.
+            # Keep its original provenance until the entire bootstrap has succeeded.
+            self._session_bootstrap_lease_preexisting = self._lease_was_preexisting
         self._lease_waited_ms = int(prepared.get("lease_waited_ms") or 0)
     installed_bundle: dict[str, Any] | None = None
     animation_backup_path: Path | None = None
@@ -773,6 +780,7 @@ def session_start(self: Engine, *args: Any, **kwargs: Any) -> dict[str, Any]:
     """Start a session and never leak a lease when bootstrap fails before returning its ID."""
     previous_session_id = getattr(self, "_session_id", None)
     bootstrap_new_lease = kwargs.pop("_bootstrap_new_lease", False) is True
+    self._session_bootstrap_lease_preexisting = False if bootstrap_new_lease else None
     try:
         result = _session_start_impl(self, *args, **kwargs)
         self._session_bootstrap_prepared = None
@@ -785,8 +793,6 @@ def session_start(self: Engine, *args: Any, **kwargs: Any) -> dict[str, Any]:
         failed_session_id = (
             current_session_id if current_session_id != previous_session_id else None
         )
-        if bootstrap_new_lease:
-            self._lease_was_preexisting = False
         _rollback_new_bootstrap(self)
         if failed_session_id:
             from .session import finish_session_state, load_session_state
@@ -800,6 +806,8 @@ def session_start(self: Engine, *args: Any, **kwargs: Any) -> dict[str, Any]:
                 finish_session_state(self.config.cache.dir, state)
             self._session_id = previous_session_id
         raise
+    finally:
+        self._session_bootstrap_lease_preexisting = None
 
 
 def _helper_contract_checkpoints(contract: Any) -> list[dict[str, Any]]:

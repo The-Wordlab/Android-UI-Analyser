@@ -100,6 +100,85 @@ def test_android_keeps_its_existing_lease_recovery_advice(tmp_path):
     from android_ui_analyser.platforms.android import AndroidPlatform
 
     assert AndroidPlatform(Config()).lease_conflict_hint() is None
+    assert AndroidPlatform(Config()).retain_runtime_on_lease_change()
+
+
+@pytest.mark.parametrize("next_owner", ["agent-a", "agent-b"])
+def test_reclaimed_warm_context_is_fresh_before_the_next_owners_observation(tmp_path, next_owner):
+    from test_browser_observation_diagnostics import Connection
+
+    old = Connection()
+    new = Connection()
+    engine = engine_for(tmp_path, "agent-a", slots=1, connection=old)
+    launcher = engine.platform._launcher
+    try:
+        started = engine.session_start("Inspect first fixture")
+        target = engine.device.serial
+        old.emit("console", "Previous agent content", level="log")
+        engine.release_device_use()
+        assert leases.release(
+            engine.config.lease.registry_dir, target,
+            owner=engine._lease_owner_resolved, platform="web",
+        )
+        launcher.connection = new
+        daemon._adopt_client_owner(engine, next_owner)
+        if next_owner == "agent-a":
+            # Owner adoption intentionally skips work for an unchanged identity; the new lease
+            # generation must still invalidate its previous runtime.
+            engine._lease_device()
+        observed = engine.analyze(source="hierarchy", with_ocr=False)
+        assert old.closed
+        assert engine.device._connection is new
+        assert observed.meta.browser_diagnostics["events"] == []
+        resumed = engine.session_start("Inspect new fixture")
+        assert resumed["session_id"] != started["session_id"]
+        assert engine._session_state(resumed["session_id"]).owner == next_owner
+    finally:
+        engine.close()
+
+
+def test_refused_owner_cannot_close_the_current_agents_browser(tmp_path):
+    old = FakeConnection()
+    engine = engine_for(tmp_path, "agent-a", slots=1, connection=old)
+    try:
+        engine.session_start("Inspect fixture")
+        target = engine.device.serial
+        engine.release_device_use()
+        with pytest.raises(DeviceLeasedError):
+            daemon._adopt_client_owner(engine, "agent-b")
+        assert not old.closed
+        assert engine._device._connection is old
+        assert leases.holder(engine.config.lease.registry_dir, target, platform="web") == "agent-a"
+        daemon._adopt_client_owner(engine, "agent-a")
+        engine.analyze(source="hierarchy", with_ocr=False)
+        assert not old.closed
+    finally:
+        engine.close()
+
+
+def test_adapter_can_keep_native_runtime_across_a_validated_lease_change(tmp_path, monkeypatch):
+    from android_ui_analyser.platforms.base import PlatformAdapter
+
+    connection = FakeConnection()
+    engine = engine_for(tmp_path, "agent-a", slots=1, connection=connection)
+    monkeypatch.setattr(
+        engine.platform, "retain_runtime_on_lease_change",
+        lambda: PlatformAdapter.retain_runtime_on_lease_change(engine.platform),
+    )
+    try:
+        engine.session_start("Inspect fixture")
+        target = engine.device.serial
+        engine.release_device_use()
+        assert leases.release(
+            engine.config.lease.registry_dir, target,
+            owner=engine._lease_owner_resolved, platform="web",
+        )
+        daemon._adopt_client_owner(engine, "agent-b")
+        engine.analyze(source="hierarchy", with_ocr=False)
+        assert not connection.closed
+        assert engine.device._connection is connection
+    finally:
+        engine.close()
 
 
 def test_explicit_url_remains_one_exclusive_target(tmp_path):
@@ -141,6 +220,29 @@ def test_failed_attachment_releases_only_the_callers_new_claim(tmp_path, new_cla
             engine.session_start("Inspect fixture", _bootstrap_new_lease=new_claim)
         holder = leases.holder(engine.config.lease.registry_dir, target, platform="web")
         assert holder == (None if new_claim else "agent-a")
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("preexisting", [True, False])
+def test_late_bootstrap_failure_keeps_the_original_claim_provenance(tmp_path, preexisting):
+    class FailingBaselineConnection(FakeConnection):
+        def session_begin(self, session_id):
+            raise DeviceError("fixture baseline failed after observation")
+
+    connection = FailingBaselineConnection()
+    engine = engine_for(tmp_path, "agent-a", slots=1, connection=connection)
+    target = engine.platform.list_targets()[0].target_id
+    if preexisting:
+        engine._lease_device()
+    try:
+        with pytest.raises(DeviceError, match="fixture baseline failed after observation"):
+            engine.session_start("Inspect fixture")
+        assert connection.calls, "bootstrap reached the first observation"
+        holder = leases.holder(engine.config.lease.registry_dir, target, platform="web")
+        assert holder == ("agent-a" if preexisting else None)
+        assert connection.closed is (not preexisting)
+        assert engine._session_bootstrap_lease_preexisting is None
     finally:
         engine.close()
 

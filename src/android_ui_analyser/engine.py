@@ -290,6 +290,9 @@ class Engine:
         # Generation fences cached observations even when a lease leaves and later returns to
         # the same long-lived process identity (so owner equality alone cannot detect the gap).
         self._lease_generation_resolved: str | None = None
+        # Unlike caller lease metadata, this survives release/reclaim and owner adoption while
+        # a warm runtime remains connected. Browser contexts must not cross that boundary.
+        self._runtime_lease_generation: str | None = None
         # True only inside the explicit `lease acquire --replace` reservation. Normal device
         # commands may never leave one owner holding more than one sticky target.
         self._lease_allow_replacement = False
@@ -362,6 +365,7 @@ class Engine:
         self._claimed_instance_token: str | None = None
         # Transient rollback context exists only until session_start returns a persisted session.
         self._session_bootstrap_prepared: dict[str, Any] | None = None
+        self._session_bootstrap_lease_preexisting: bool | None = None
         self._session_unclaimed_boot: dict[str, Any] | None = None
         self._session_bootstrap_animation: tuple[Path, str] | None = None
         self._action_recording_suppression = 0
@@ -458,9 +462,27 @@ class Engine:
                 platform=platform_name,
             )
             previous_generation = self._lease_generation_resolved
-            if previous_generation is not None and generation != previous_generation:
+            runtime_changed = (
+                self._device is not None
+                and self._runtime_lease_generation is not None
+                and generation != self._runtime_lease_generation
+            )
+            if runtime_changed or (
+                previous_generation is not None and generation != previous_generation
+            ):
                 self._reset_owner_transient_state()
+            if runtime_changed and not self.platform.retain_runtime_on_lease_change():
+                # validate_use already proved the incoming lease under this command's fence.
+                # A refused takeover must never close the current owner's runtime.
+                assert self._device is not None
+                self._device.close()
+                self._device = None
+                self._claimed_instance_token = None
+                from uuid import uuid4
+
+                self._element_identity_lifetime = uuid4().hex
             self._lease_generation_resolved = generation
+            self._runtime_lease_generation = generation
         except BaseException:
             guard.__exit__(*sys.exc_info())
             raise

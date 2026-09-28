@@ -89,6 +89,9 @@ class FakeBridge:
     def event_snapshot(self):
         return [dict(event) for event in self.events]
 
+    def events_overflowed(self, since_ms):
+        return False
+
     def clear_events(self):
         count = len(self.events)
         self.events.clear()
