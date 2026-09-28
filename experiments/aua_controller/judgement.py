@@ -671,7 +671,7 @@ def judge_image_frames(frames: Sequence[Any], final: Any, index: Mapping[str, st
         return []
 
     def signature(frame):
-        path = screenshot_for(index, frame_fingerprint(frame))
+        path = frame_screenshot(frame, index)
         try:
             with Image.open(str(path)) as image:
                 return image.convert("RGB").resize((24, 48))
@@ -786,6 +786,23 @@ def screenshot_for(index: Mapping[str, str], fingerprint: str | None) -> str | N
         if key and fingerprint.startswith(key):
             return shot
     return None
+
+
+def frame_screenshot(frame: Any, index: Mapping[str, str]) -> str | None:
+    """The screenshot of this very capture, else the one recorded with its fingerprint.
+
+    The fingerprint hashes the element tree, and a theme change leaves that tree identical: the
+    light and the dark Chats home shared one, so a light frame was paired with the dark image and
+    both judges failed a theme that had switched correctly (settings-app-theme, 2026-09-28). Each
+    observation names its own image in ``meta.raw_image``; the index is the fallback.
+    """
+    if isinstance(frame, dict):
+        for candidate in (frame, frame.get("observation") if isinstance(frame.get("observation"), dict) else None):
+            meta = candidate.get("meta") if isinstance(candidate, dict) else None
+            raw = meta.get("raw_image") if isinstance(meta, dict) else None
+            if isinstance(raw, str) and raw and Path(raw).is_file():
+                return raw
+    return screenshot_for(index, frame_fingerprint(frame))
 
 
 def frame_fingerprint(frame: Any) -> str | None:

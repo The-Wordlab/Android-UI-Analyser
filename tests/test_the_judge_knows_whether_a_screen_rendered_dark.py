@@ -51,3 +51,15 @@ def test_the_story_carries_the_measure_only_where_it_was_taken() -> None:
                                  {"step": 1, "tool": "tap_and_analyze", "arguments": {"text": "Theme"}}])
     assert story[0]["rendered"] == {"luminance": 0.08, "reads_as": "dark"}
     assert "rendered" not in story[1]
+
+
+def test_a_frame_is_paired_with_its_own_screenshot_not_its_twins(tmp_path: Path) -> None:
+    from experiments.aua_controller.judgement import frame_screenshot
+
+    light, dark = _png(tmp_path, "light-home", 245), _png(tmp_path, "dark-home", 18)
+    index = {"samefingerprint": str(dark)}  # the index keeps one image per element tree
+    frame = {"observation": {"meta": {"fingerprint": "samefingerprint", "raw_image": str(light)}}}
+    assert frame_screenshot(frame, index) == str(light)
+    assert rendered_appearance(frame_screenshot(frame, index))["reads_as"] == "light"
+    gone = {"observation": {"meta": {"fingerprint": "samefingerprint", "raw_image": str(tmp_path / "pruned.png")}}}
+    assert frame_screenshot(gone, index) == str(dark), "a pruned capture falls back to the index"

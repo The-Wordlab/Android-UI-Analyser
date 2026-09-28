@@ -33,6 +33,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The controller judge pairs each frame with its own screenshot (`meta.raw_image`) before falling
+  back to the fingerprint index. A theme change leaves the element tree, and so the fingerprint,
+  identical, so the light Chats home was shown to the judges as the dark one.
 - The controller's durable UI wait treats a status poll that misses its 15 s budget as no news and
   keeps polling to the wait's own deadline. On a loaded host one slow read ended a 120 s image-edit
   wait after 20 s, and the row lost its verdict.

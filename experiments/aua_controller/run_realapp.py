@@ -40,12 +40,11 @@ from experiments.aua_controller.judgement import (
     annotate_judge_frames,
     contract_criteria,
     encode_image,
-    frame_fingerprint,
+    frame_screenshot,
     judge_image_frames,
     judge_outcome_votes,
     judged_frame_sample,
     rendered_appearance,
-    screenshot_for,
     screenshot_index,
     summarize_route,
 )
@@ -1911,14 +1910,14 @@ async def run_realapp(
                 # final screen is the last image the judge sees.
                 shot_index = screenshot_index(aua_artifacts_dir / "manifest.json")
                 for frame in [*judged_frames, final]:
-                    shot = screenshot_for(shot_index, frame_fingerprint(frame))
+                    shot = frame_screenshot(frame, shot_index)
                     rendered = rendered_appearance(shot) if shot else None
                     if rendered and isinstance(frame.get("_judge_evidence"), dict):
                         frame["_judge_evidence"]["rendered"] = rendered
                 image_frames = judge_image_frames(positioned_frames, final, shot_index,
                                                  limit=judge_images, actions=actions)
                 for frame in image_frames:
-                    shot = screenshot_for(shot_index, frame_fingerprint(frame))
+                    shot = frame_screenshot(frame, shot_index)
                     encoded = encode_image(shot) if shot else None
                     if encoded:
                         images.append(encoded)
