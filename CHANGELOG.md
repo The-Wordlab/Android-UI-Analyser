@@ -36,6 +36,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A text or resource-id selector that matched nothing (`selector_not_found`, raised before any
+  press, with the screen it read) counts as a no-action miss, like a stale target. Counted as a failed
+  action, one tap on a prompt that had not appeared turned a run both judges passed into QA_ERROR at
+  flow export.
 - The real-app runner sends an `achieved` claim back once when the goal names a tool for a step
   ("force-close with app_force_stop") that the run never called. A cold-start row claimed success
   without force-stopping or relaunching, and its restart could not be judged. The agent loop takes

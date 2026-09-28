@@ -70,9 +70,14 @@ def definitive_selector_miss(result: Any) -> bool:
     if not isinstance(error, dict):
         return False
     observation = error.get("observation")
-    return (error.get("code") == "element_not_found"
+    refused = ((error.get("code") == "element_not_found"
+                and str(error.get("hint") or "").startswith("No action was sent"))
+               # A text or resource-id selector that matched nothing is refused while it is
+               # resolved, before any press. Counted as a failed action, one miss on a prompt
+               # that was not there turned a judged pass into QA_ERROR (2026-09-28).
+               or error.get("code") == "selector_not_found")
+    return (refused
             and error.get("action_sent") is not True
-            and str(error.get("hint") or "").startswith("No action was sent")
             and error.get("observation_present") is True and isinstance(observation, dict)
             and isinstance(observation.get("screen"), dict)
             and isinstance(observation.get("elements"), list)
