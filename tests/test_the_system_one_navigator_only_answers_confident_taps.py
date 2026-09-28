@@ -1304,6 +1304,26 @@ def test_the_pointer_catches_up_when_the_chat_model_acts_on_a_later_steps_contro
     assert report.step_index == 0, "a goal without steps has no pointer to move"
 
 
+COLD_START = ("Then tap the `Start a chat` card. "
+              "Then type exactly `Restart check: what is seven plus five?` into `Ask me anything` (submit=false). "
+              "Then tap the send arrow. Then force-close the app with app_force_stop. "
+              "Then check that the chat shows `Restart check: what is seven plus five?` once. "
+              "Then type exactly `ok` into `Ask me anything` (submit=false).")
+
+
+def test_typing_moves_the_pointer_only_to_the_step_that_quotes_the_typed_text() -> None:
+    """A cold start typed its first question and the pointer jumped past the force-stop to the
+    check that quotes the question after relaunch, then to the last step, which names the same
+    field (2026-09-28). The controller finished there with the restart never done."""
+    navigator = TypeSafeNavigator(COLD_START, client=ScriptedClient([]), tools=WIDE_TOOLS, action_space="full")
+    navigator.observed("input_and_analyze", {"text": "Restart check: what is seven plus five?", "submit": False})
+    assert navigator.step_index == 1, "the typing step quotes it; the later check only mentions it"
+    navigator.observed("input_and_analyze", {"id": "el:field", "text": "Restart check: what is seven plus five?"})
+    assert navigator.step_index == 1, "the field's name is in the last step too, and does not pull"
+    navigator.observed("input_and_analyze", {"id": "el:field", "text": "ok", "submit": False})
+    assert navigator.step_index == 5, "typing the last step's own text is that step"
+
+
 def test_the_exact_text_a_step_quotes_is_typed_as_written() -> None:
     """Jev returns a choice, never a string, so typing always went back to the chat model. A step
     that says "type exactly `Hi`" already holds the string: it is the author's, typed as written

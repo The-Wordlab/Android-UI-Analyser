@@ -540,7 +540,7 @@ class TypeSafeNavigator:
         """
         handle = (arguments or {}).get("id")
         label = self._options.get(handle) if isinstance(handle, str) else None
-        self._catch_up(label, arguments)
+        self._catch_up(tool, label, arguments)
         if self._pending is None:
             return
         if self.steps:
@@ -558,7 +558,7 @@ class TypeSafeNavigator:
         else:
             self._pending["you_chose"] = TOOL_WORDS.get(tool, tool)
 
-    def _catch_up(self, label: str | None, arguments: Mapping[str, Any] | None) -> None:
+    def _catch_up(self, tool: str, label: str | None, arguments: Mapping[str, Any] | None) -> None:
         """Move the pointer to a later step when the run acted on a control that step names.
 
         The pointer moved only on this navigator's own confident "done". Once the chat model took
@@ -567,8 +567,20 @@ class TypeSafeNavigator:
         Briefs name each control in backticks, so an action on one a later step names says the run
         has reached that step. Only forward, and only to that step: whether it is done is still
         this navigator's own question.
+
+        Typing says which step it is only by the text it typed, and only to a step that quotes that
+        text to type. Matched like a tap, the field's name and the typed words pulled the pointer to
+        whichever later step mentioned either: a cold start that typed its first question jumped
+        eighteen steps, past the force-stop, to the check that quotes the question after relaunch.
         """
         if not self.steps:
+            return
+        if tool == "input_and_analyze":
+            typed = str((arguments or {}).get("text") or "").casefold()
+            for index in range(self.step_index + 1, len(self.steps)):
+                if typed and typed in (quote.casefold() for quote in EXACT_TEXT.findall(self.steps[index])):
+                    self.step_index = index
+                    return
             return
         said = [str(value).casefold() for value in
                 (label, *((arguments or {}).get(key) for key in ("text", "desc", "rid"))) if value]

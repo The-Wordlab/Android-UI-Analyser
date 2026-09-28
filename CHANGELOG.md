@@ -36,6 +36,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Typing moves Jev's step pointer only to a later step that quotes the typed text after "type
+  exactly". Matched like a tap, the field's name and the typed words pulled it to any later step
+  that mentioned either: a cold start typed its first question and jumped past the force-stop to
+  the post-relaunch check, and the run finished with the restart never done.
+
 - A goal's steps are no longer cut inside a parenthesis or a backtick-quoted label. "Tap the menu
   (`buttonNavBack`; not `User avatar`, …)" became a half step and a junk step, so Jev and the
   session's goal progress counted steps the author never wrote.
