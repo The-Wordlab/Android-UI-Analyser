@@ -95,6 +95,12 @@ WAIT_TOOL = "wait_and_analyze"
 INPUT_TOOL = "input_and_analyze"
 # "type exactly `Hi!`": text the author wrote into the step, so it is no secret and needs no model.
 EXACT_TEXT = re.compile(r"\btype\s+exactly\s+`([^`\n]{1,200})`", re.IGNORECASE)
+#: A step that tells the run to do something, rather than to look. Such a step is over only once
+#: something was done on it: asked "is this step done?" on the screen before the tap, the model
+#: said yes to "tap `Images` again" at 0.89 and to "type exactly `Before the wait`" at 0.97,
+#: the steps were never taken, and both runs finished with a contract bullet unobserved.
+ACTION_STEP = re.compile(r"^\s*(?:then\s+)?(?:tap|long-press|double-tap|type|scroll|swipe|press|"
+                         r"force-close|relaunch|open|close|select|clear|send|paste|copy)\b", re.IGNORECASE)
 #: Every tool a navigator answer can become. A step that names any other tool asks for an action
 #: this navigator has no way to take.
 NAVIGATOR_TOOLS = frozenset({TAP_TOOL, SCROLL_TOOL, BACK_TOOL, FINISH_TOOL, WAIT_TOOL})
@@ -515,6 +521,7 @@ class TypeSafeNavigator:
         # keyed on the activity instead, or waiting would never be bounded at all.
         self._seen: set[tuple[str, str]] = set()
         self._second_looks: set[str] = set()
+        self._acted = False
         self._previous_screen = ""
         # One number per screen this navigator was shown; every ask about that screen carries it,
         # so a reader can pair a step's several asks (a step declared done is re-asked) with the step.
@@ -541,6 +548,7 @@ class TypeSafeNavigator:
         handle = (arguments or {}).get("id")
         label = self._options.get(handle) if isinstance(handle, str) else None
         self._catch_up(tool, label, arguments)
+        self._acted = True
         if self._pending is None:
             return
         if self.steps:
@@ -683,7 +691,8 @@ class TypeSafeNavigator:
                 verdict = {"kind": "phase_done", "via": "step_question", "choice": "done",
                            "confidence": round(step.confidence, 4), "step": self.step_index + 1,
                            "options": len(self._options)}
-                if self._gate(step, verdict):
+                unacted = self._unacted()
+                if self._gate(step, verdict) and not unacted:
                     verdict["accepted"] = True
                     self.proposals.append(verdict)
                     turn["verdict"] = dict(verdict)
@@ -694,14 +703,19 @@ class TypeSafeNavigator:
                     # An unsure one leaves the pointer, but its move was still chosen for a step
                     # that may be over. Live, that move pressed a confirm dialog's destructive
                     # button while the next step said to cancel.
-                    self._decline("step_may_be_done")
-                    settle(False, "step_may_be_done")
+                    why = "step_not_acted" if unacted else "step_may_be_done"
+                    self._decline(why)
+                    settle(False, why)
                     return None
             if steps_remain and move.choice in FINISH_KINDS:
                 # "Done" with steps still to go is a claim about the current step, not the run.
                 record["kind"] = "phase_done"
                 record["via"] = "move"
                 record["step"] = self.step_index + 1
+                if self._unacted():
+                    self._decline("step_not_acted")
+                    settle(False, "step_not_acted")
+                    return None
                 if not self._gate(move, record):
                     self._decline("below_confidence")
                     settle(False, "below_confidence")
@@ -778,8 +792,13 @@ class TypeSafeNavigator:
         state["this_is_the_new_screen"] = screen_for_model(compact)
         return state
 
+    def _unacted(self) -> bool:
+        """The current step says to act, and nothing has been done since the run reached it."""
+        return bool(self.steps) and not self._acted and ACTION_STEP.match(self.steps[self.step_index]) is not None
+
     def _advance(self) -> None:
         """The current step is done: move the pointer and say so in the journey."""
+        self._acted = False
         done, self.step_index = self.steps[self.step_index], self.step_index + 1
         self._journey.append({"n": len(self._journey) + 1, "step": done, "you_chose": "said this step was done"})
         if self._pending is not None:
@@ -907,6 +926,9 @@ class TypeSafeNavigator:
             # No note: it is free text, and a fabricated one would reach the judge as evidence.
             # The enum the model answered is the whole claim, and the gate above applies to it
             # exactly as to a press -- ending a run early is this model's worst measured skill.
+            if self._unacted():
+                self._decline("step_not_acted")
+                return None, "step_not_acted"
             return (FINISH_TOOL, {"outcome": kind}, kind, f"finish as {kind}"), None
         self._decline(f"kind:{kind}")
         return None, f"kind:{kind}"

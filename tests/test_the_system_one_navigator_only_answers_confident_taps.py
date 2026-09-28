@@ -1053,6 +1053,10 @@ TWO_FIELDS_SCREEN = {
 }
 SCRIPT = ("Tap the top-left menu and look at it, then close it. "
           "Send one short message and wait for the reply, then open the menu and look again.")
+#: The same four steps, each one a look: a step that says to act is not done until something was
+#: done on it, and these tests are about the pointer, not about acting.
+LOOKS = ("Look at the top-left menu, then check that the menu is closed. "
+         "Check that one short message has a reply, then look at the menu again.")
 
 
 class ScriptedClient(FakeClient):
@@ -1092,10 +1096,10 @@ def test_a_lone_text_field_is_offered_once_as_typing_not_twice() -> None:
 
 def test_jev_is_asked_about_the_current_phase_not_the_whole_script() -> None:
     client = ScriptedClient([("1", 0.95)])
-    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    navigator = TypeSafeNavigator(LOOKS, client=client, tools=WIDE_TOOLS, action_space="full")
     asyncio.run(navigator(FIELD_SCREEN))
     state = client.states[0]
-    assert state["goal"] == "Tap the top-left menu and look at it"
+    assert state["goal"] == "Look at the top-left menu"
     assert state["done_before_this"] == []
     # One step at a time: the rest of the script is not listed. Offered at the bottom, the next
     # step was *done* instead of the current one: on replayed asks Jev pressed the menu at
@@ -1109,7 +1113,7 @@ def test_jev_is_asked_about_the_current_phase_not_the_whole_script() -> None:
     assert criteria["already_satisfied"].startswith("This step was already true")
     # On the last step, and on a goal with no steps, finishing means what it always meant.
     last = ScriptedClient([("achieved", 0.95)] * 4)
-    asyncio.run(TypeSafeNavigator(SCRIPT, client=last, tools=WIDE_TOOLS, action_space="full")(FIELD_SCREEN))
+    asyncio.run(TypeSafeNavigator(LOOKS, client=last, tools=WIDE_TOOLS, action_space="full")(FIELD_SCREEN))
     assert last.questions[-1]["move"].criteria["achieved"].startswith("The goal was carried out")
 
 
@@ -1125,12 +1129,12 @@ def test_a_goal_without_sequence_words_is_sent_whole() -> None:
 
 def test_saying_a_phase_is_done_moves_on_and_asks_again_about_the_same_screen() -> None:
     client = ScriptedClient([("achieved", 0.95), ("back", 0.93)])
-    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    navigator = TypeSafeNavigator(LOOKS, client=client, tools=WIDE_TOOLS, action_space="full")
     action = asyncio.run(navigator(FIELD_SCREEN))
 
     assert client.calls == 2, "the done phase costs a second ask, never a device step"
-    assert client.states[1]["goal"] == "close it"
-    assert client.states[1]["done_before_this"] == ["Tap the top-left menu and look at it"]
+    assert client.states[1]["goal"] == "check that the menu is closed"
+    assert client.states[1]["done_before_this"] == ["Look at the top-left menu"]
     assert action["tool"] == "back_gesture_and_analyze"
     report = navigator.report()
     assert report["phase"] == {"current": 2, "of": 4}
@@ -1148,18 +1152,18 @@ def test_a_direct_yes_to_is_this_step_done_moves_the_pointer_without_a_device_st
     saved screens, it said done at up to 0.86. So while steps remain the request carries a second
     question about the step, judged on its own and never mixed into the move's gate."""
     client = ScriptedClient([("5", 0.30), ("back", 0.93)], step_answers=[("done", 0.90), ("not_yet", 0.95)])
-    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    navigator = TypeSafeNavigator(LOOKS, client=client, tools=WIDE_TOOLS, action_space="full")
     action = asyncio.run(navigator(FIELD_SCREEN))
 
     assert "step" in client.questions[0], "asked about the step while steps remain"
-    assert client.calls == 2 and client.states[1]["goal"] == "close it"
+    assert client.calls == 2 and client.states[1]["goal"] == "check that the menu is closed"
     assert action["tool"] == "back_gesture_and_analyze"
     detail = navigator.report()["proposals_detail"]
     assert [p["kind"] for p in detail] == ["phase_done", "back"]
     assert detail[0]["via"] == "step_question" and detail[0]["confidence"] == 0.9
     # On the last step there is nothing to move on to, so the question is not asked.
     last = ScriptedClient([("achieved", 0.95)] * 4)
-    asyncio.run(TypeSafeNavigator(SCRIPT, client=last, tools=WIDE_TOOLS, action_space="full")(FIELD_SCREEN))
+    asyncio.run(TypeSafeNavigator(LOOKS, client=last, tools=WIDE_TOOLS, action_space="full")(FIELD_SCREEN))
     assert "step" not in last.questions[-1] and "step" in last.questions[0]
     # A goal with no steps never asks it.
     plain_client = ScriptedClient([("1", 0.95)])
@@ -1193,12 +1197,13 @@ def test_an_unsure_yes_to_is_this_step_done_stops_the_move_that_came_with_it() -
     client = ScriptedClient([(remove, 0.90)], step_answers=[("done", 0.30)])
     navigator = TypeSafeNavigator("Tap Remove item. Then tap Cancel.", client=client, tools=WIDE_TOOLS,
                                   action_space="full", min_confidence=0.80)
+    navigator.observed("tap_and_analyze", {"text": "Remove item"})  # the press that opened the dialog
     assert asyncio.run(navigator(CONFIRM_SCREEN)) is None, "the chat model has the turn"
     assert navigator.report()["phase"] == {"current": 1, "of": 2}
     assert navigator.report()["declined"] == {"step_may_be_done": 1}
     # A back gesture chosen for a step that may be over is just as stale as a press.
     back = ScriptedClient([("back", 0.93)], step_answers=[("done", 0.55)])
-    navigator = TypeSafeNavigator(SCRIPT, client=back, tools=WIDE_TOOLS, action_space="full",
+    navigator = TypeSafeNavigator(LOOKS, client=back, tools=WIDE_TOOLS, action_space="full",
                                   min_confidence=0.80)
     assert asyncio.run(navigator(FIELD_SCREEN)) is None
     assert navigator.report()["phase"] == {"current": 1, "of": 4}
@@ -1207,7 +1212,7 @@ def test_an_unsure_yes_to_is_this_step_done_stops_the_move_that_came_with_it() -
 def test_a_move_that_says_the_step_is_done_still_moves_on_beside_an_unsure_done() -> None:
     """Both answers say the step is over; the move clears the gate on its own, as it always did."""
     client = ScriptedClient([("achieved", 0.95), ("back", 0.93)], step_answers=[("done", 0.30)])
-    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full",
+    navigator = TypeSafeNavigator(LOOKS, client=client, tools=WIDE_TOOLS, action_space="full",
                                   min_confidence=0.80)
     action = asyncio.run(navigator(FIELD_SCREEN))
     assert action["tool"] == "back_gesture_and_analyze"
@@ -1216,7 +1221,7 @@ def test_a_move_that_says_the_step_is_done_still_moves_on_beside_an_unsure_done(
 
 def test_an_unsure_phase_done_is_declined_and_the_pointer_stays() -> None:
     client = ScriptedClient([("achieved", 0.50)])
-    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full",
+    navigator = TypeSafeNavigator(LOOKS, client=client, tools=WIDE_TOOLS, action_space="full",
                                   min_confidence=0.80)
     assert asyncio.run(navigator(FIELD_SCREEN)) is None
     assert navigator.report()["phase"] == {"current": 1, "of": 4}
@@ -1225,7 +1230,7 @@ def test_an_unsure_phase_done_is_declined_and_the_pointer_stays() -> None:
 
 def test_the_last_phase_done_finishes_the_run() -> None:
     client = ScriptedClient([("achieved", 0.95)] * 4)
-    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    navigator = TypeSafeNavigator(LOOKS, client=client, tools=WIDE_TOOLS, action_space="full")
     action = asyncio.run(navigator(FIELD_SCREEN))
     assert client.calls == 4
     assert action["tool"] == "session_finish" and action["arguments"] == {"outcome": "achieved"}
@@ -1236,7 +1241,7 @@ def test_every_ask_in_the_transcript_names_the_screen_it_was_about(tmp_path: Pat
     """A step may cost several asks (a step declared done is re-asked on the same screen), and a
     reader pairing the transcript with the run's steps has to know which asks belong together."""
     client = ScriptedClient([("achieved", 0.95), ("back", 0.93), ("1", 0.95)])
-    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full",
+    navigator = TypeSafeNavigator(LOOKS, client=client, tools=WIDE_TOOLS, action_space="full",
                                   transcript_path=tmp_path / "jev.jsonl")
     asyncio.run(navigator(FIELD_SCREEN))
     asyncio.run(navigator(SCREEN))
@@ -1322,6 +1327,29 @@ def test_typing_moves_the_pointer_only_to_the_step_that_quotes_the_typed_text() 
     assert navigator.step_index == 1, "the field's name is in the last step too, and does not pull"
     navigator.observed("input_and_analyze", {"id": "el:field", "text": "ok", "submit": False})
     assert navigator.step_index == 5, "typing the last step's own text is that step"
+
+
+def test_a_step_that_says_to_act_is_not_done_before_anything_was_done_on_it() -> None:
+    """Asked "is this step done?" on the screen before the tap, the model said yes to "tap
+    `Images` again" at 0.89 and to "type exactly `Before the wait`" at 0.97 (2026-09-28). The
+    steps were never taken and both runs finished with a contract bullet unobserved."""
+    client = ScriptedClient([("achieved", 0.95)])
+    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    assert asyncio.run(navigator(FIELD_SCREEN)) is None
+    assert navigator.report()["phase"] == {"current": 1, "of": 4}
+    assert navigator.report()["declined"] == {"step_not_acted": 1}
+    # Once something was done on it, the same answer moves the pointer.
+    client = ScriptedClient([("achieved", 0.95), ("back", 0.93)])
+    navigator = TypeSafeNavigator(SCRIPT, client=client, tools=WIDE_TOOLS, action_space="full")
+    navigator.observed("tap_and_analyze", {"id": "el:menu"})
+    asyncio.run(navigator(FIELD_SCREEN))
+    assert navigator.report()["phase"] == {"current": 2, "of": 4}
+    # A step that only says to look is done whenever the screen shows it.
+    client = ScriptedClient([("achieved", 0.95), ("1", 0.95)])
+    navigator = TypeSafeNavigator("Check that the menu is open. Then tap the first chat.", client=client,
+                                  tools=WIDE_TOOLS, action_space="full")
+    asyncio.run(navigator(FIELD_SCREEN))
+    assert navigator.report()["phase"] == {"current": 2, "of": 2}
 
 
 def test_the_exact_text_a_step_quotes_is_typed_as_written() -> None:

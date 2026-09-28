@@ -36,6 +36,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Jev no longer declares a step that says to act ("tap", "type", "long-press", "relaunch", …)
+  done before anything was done on it. Asked on the screen before the tap, it said yes to "tap
+  `Images` again" at 0.89 and to "type exactly `Before the wait`" at 0.97; the steps were never
+  taken and the runs finished with contract bullets unobserved. Such a step now goes to the chat
+  model instead (`step_not_acted`). A step that only says to look is unaffected.
 - Typing moves Jev's step pointer only to a later step that quotes the typed text after "type
   exactly". Matched like a tap, the field's name and the typed words pulled it to any later step
   that mentioned either: a cold start typed its first question and jumped past the force-stop to
