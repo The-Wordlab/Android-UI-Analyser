@@ -176,6 +176,7 @@ OBSERVATION_META_PRESETS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             # the button it already pressed. Same bargain as the warnings above — absent unless
             # it fires, and absent entirely unless `network.app_hosts` names a backend.
             "network_calls",
+            "browser_diagnostics",
             "lossy_text",
             "lossy_hint",
             "known_screen",

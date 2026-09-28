@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 from collections.abc import Mapping, Sequence
@@ -30,12 +31,13 @@ from .geometry import DisplayGeometry
 from .identity import TargetRef
 from .registry import register_platform
 from .runtime import TargetRuntime
+from .web_cdp import CdpAttachOptions, CdpLauncher, cdp_endpoint, cdp_page_url, cdp_target_id
 from .web_runtime import KEY_NAMES, WebRuntime
 from .web_tools import PlaywrightLauncher, WebLauncher, WebLaunchOptions
 
 _BROWSERS = frozenset({"chromium", "firefox", "webkit"})
 _SERVICE_WORKERS = frozenset({"allow", "block"})
-_CONNECTIONS = frozenset({"isolated", "existing-chrome"})
+_CONNECTIONS = frozenset({"isolated", "existing-chrome", "existing-cdp"})
 _ATTACHED_UNSAFE_CAPABILITIES = frozenset(
     {"browser.network", "browser.storage", "browser.trace"}
 )
@@ -98,10 +100,13 @@ class WebPlatform(PlatformAdapter):
         config: Config,
         launcher: WebLauncher | None = None,
         extension_launcher: Any | None = None,
+        cdp_launcher: CdpLauncher | None = None,
     ) -> None:
         super().__init__(config)
         self._launcher = launcher or PlaywrightLauncher()
         self._extension_launcher = extension_launcher or ChromeExtensionLauncher()
+        self._cdp_launcher = cdp_launcher or CdpLauncher()
+        self._uses_default_cdp_launcher = cdp_launcher is None
         self._uses_default_launcher = launcher is None
         self._runtimes: dict[str, WebRuntime] = {}
         self._diagnostic_marks: dict[tuple[str, str], int] = {}
@@ -115,7 +120,7 @@ class WebPlatform(PlatformAdapter):
     def supports(self, capability: str) -> bool:
         key = normalize_capability(capability)
         if (
-            self._connection_mode() == "existing-chrome"
+            self._connection_mode() in {"existing-chrome", "existing-cdp"}
             and key in _ATTACHED_UNSAFE_CAPABILITIES
         ):
             return False
@@ -142,6 +147,9 @@ class WebPlatform(PlatformAdapter):
             "proxy_username",
             "proxy_password_env",
             "attach_timeout_ms",
+            "cdp_endpoint",
+            "page_url",
+            "context_slots",
         }
         unknown = sorted(str(key) for key in options if key not in known)
         if unknown:
@@ -154,9 +162,15 @@ class WebPlatform(PlatformAdapter):
         if connection not in _CONNECTIONS:
             raise ConfigError(
                 f"unknown web connection {connection!r}",
-                hint="Choose isolated or existing-chrome.",
+                hint="Choose isolated, existing-chrome, or existing-cdp.",
             )
         normalized["connection"] = connection
+        if connection == "existing-cdp":
+            normalized["cdp_endpoint"] = cdp_endpoint(options.get("cdp_endpoint"))
+            if "page_url" in options:
+                normalized["page_url"] = cdp_page_url(options["page_url"])
+        elif "cdp_endpoint" in options or "page_url" in options:
+            raise ConfigError("cdp_endpoint and page_url require connection: existing-cdp")
         if "url" in options:
             normalized["url"] = _url(options["url"])
         browser = str(options.get("browser", "chromium")).strip().casefold()
@@ -177,6 +191,7 @@ class WebPlatform(PlatformAdapter):
             ("navigation_timeout_ms", 30_000),
             ("action_timeout_ms", 5_000),
             ("attach_timeout_ms", 30_000),
+            ("context_slots", 4),
         ):
             normalized[field] = _positive_int(options.get(field, default), field=field)
         for field in (
@@ -210,11 +225,12 @@ class WebPlatform(PlatformAdapter):
                 )
         if browser != "chromium" and "channel" in normalized:
             raise ConfigError("web option channel is supported only by chromium")
-        if connection == "existing-chrome":
+        if connection in {"existing-chrome", "existing-cdp"}:
             incompatible = sorted(
                 field
                 for field in (
                     "url",
+                    "context_slots",
                     "browser",
                     "headless",
                     "channel",
@@ -235,7 +251,7 @@ class WebPlatform(PlatformAdapter):
             )
             if incompatible:
                 raise ConfigError(
-                    "existing-chrome does not accept isolated-browser options: "
+                    f"{connection} does not accept isolated-browser options: "
                     + ", ".join(incompatible),
                     hint="Use browser lab controls only with connection: isolated.",
                 )
@@ -246,6 +262,7 @@ class WebPlatform(PlatformAdapter):
         values.pop("url", None)
         values.pop("connection", None)
         values.pop("attach_timeout_ms", None)
+        values.pop("context_slots", None)
         password_env = values.pop("proxy_password_env", None)
         if password_env is not None:
             password = os.environ.get(str(password_env))
@@ -263,9 +280,13 @@ class WebPlatform(PlatformAdapter):
         )
 
     def prepare_host(self) -> None:
+        uses_playwright = (
+            self._uses_default_cdp_launcher if self._connection_mode() == "existing-cdp"
+            else self._uses_default_launcher
+        )
         if (
             self._connection_mode() != "existing-chrome"
-            and self._uses_default_launcher
+            and uses_playwright
             and importlib.util.find_spec("playwright") is None
         ):
             raise DeviceError(
@@ -275,6 +296,16 @@ class WebPlatform(PlatformAdapter):
             )
 
     def list_targets(self) -> list[DiscoveredTarget]:
+        if self._connection_mode() == "existing-cdp":
+            return [
+                TargetInfo(
+                    target_id=cdp_target_id(str(self.options["cdp_endpoint"])),
+                    platform=self.name,
+                    status=TargetStatus.online,
+                    model="Existing Chromium/Electron",
+                    os_name="web",
+                )
+            ]
         if self._connection_mode() == "existing-chrome":
             return [
                 TargetInfo(
@@ -289,6 +320,21 @@ class WebPlatform(PlatformAdapter):
         if not candidate:
             return []
         target = _url(candidate, field="target")
+        # A configured URL is a launch destination, not a shared physical browser. Each slot
+        # gets an independent warm daemon/context and uses the same owner fencing as devices.
+        if self.options.get("url") and not str(self.config.device.serial or "").startswith(
+            ("http://", "https://")
+        ):
+            return [
+                TargetInfo(
+                    target_id=identity,
+                    platform=self.name,
+                    status=TargetStatus.online,
+                    model=str(self.options.get("browser", "chromium")),
+                    os_name="web",
+                )
+                for identity in self._context_targets(target)
+            ]
         return [
             TargetInfo(
                 target_id=target,
@@ -299,7 +345,51 @@ class WebPlatform(PlatformAdapter):
             )
         ]
 
+    def _context_targets(self, url: str) -> list[str]:
+        key = hashlib.sha256(url.encode()).hexdigest()[:16]
+        return [
+            f"browser:{key}:{index}" for index in range(int(self.options.get("context_slots", 4)))
+        ]
+
+    def probe_target_capabilities(self, target_id: str) -> dict[str, Any]:
+        return {
+            "headed": self._connection_mode() != "isolated"
+            or not self.options.get("headless", True)
+        }
+
+    def lease_conflict_hint(self) -> str:
+        if self._connection_mode() != "isolated":
+            return (
+                "This existing browser is exclusive to its owning agent. Let that agent finish "
+                "its session, or configure a different browser attachment. Inspect `aua lease list`."
+            )
+        return (
+            "Finish an owned session, or configure platforms.web.url with more context_slots "
+            "and omit --serial to claim a separate browser. Inspect `aua lease list`."
+        )
+
     def connect(self, target_id: str | None = None) -> TargetRuntime:
+        if self._connection_mode() == "existing-cdp":
+            endpoint = str(self.options["cdp_endpoint"])
+            identity = cdp_target_id(endpoint)
+            if (target_id or self.config.device.serial or identity) != identity:
+                raise DeviceError(
+                    "CDP target does not match the configured endpoint",
+                    code="no_target",
+                    hint="Omit --serial; the endpoint identifies this target.",
+                )
+            self.prepare_host()
+            cdp_connection = self._cdp_launcher.launch(
+                CdpAttachOptions(
+                    endpoint=endpoint,
+                    page_url=self.options.get("page_url"),
+                    attach_timeout_ms=int(self.options["attach_timeout_ms"]),
+                    action_timeout_ms=int(self.options["action_timeout_ms"]),
+                )
+            )
+            runtime = WebRuntime(cdp_connection, identity, home_url=cdp_connection.url)
+            self._runtimes[identity] = runtime
+            return runtime
         if self._connection_mode() == "existing-chrome":
             requested = target_id or self.config.device.serial or ATTACHED_TARGET_ID
             if requested != ATTACHED_TARGET_ID:
@@ -308,9 +398,7 @@ class WebPlatform(PlatformAdapter):
                     code="no_target",
                 )
             self.prepare_host()
-            connection = self._extension_launcher.launch(
-                ATTACHED_TARGET_ID, self._attach_options()
-            )
+            connection = self._extension_launcher.launch(ATTACHED_TARGET_ID, self._attach_options())
             runtime = WebRuntime(connection, ATTACHED_TARGET_ID, home_url=connection.url)
             self._runtimes[ATTACHED_TARGET_ID] = runtime
             return runtime
@@ -321,10 +409,21 @@ class WebPlatform(PlatformAdapter):
                 code="no_target",
                 hint="Pass `--serial https://…` or set platforms.web.url in AUA config.",
             )
-        url = _url(target, field="target")
+        identity = str(target)
+        if identity.startswith("browser:"):
+            configured = self.options.get("url")
+            if not configured or identity not in self._context_targets(str(configured)):
+                raise DeviceError(
+                    "browser context does not belong to this configuration", code="no_target"
+                )
+            url = str(configured)
+        else:
+            url = _url(target, field="target")
         self.prepare_host()
-        runtime = WebRuntime(self._launcher.launch(url, self._launch_options()), url)
-        self._runtimes[url] = runtime
+        runtime = WebRuntime(
+            self._launcher.launch(url, self._launch_options()), identity, home_url=url
+        )
+        self._runtimes[identity] = runtime
         return runtime
 
     def normalize_key(self, name: str) -> str:
@@ -473,6 +572,19 @@ class WebPlatform(PlatformAdapter):
         return self.diagnostic_window(runtime, lines=limit, app_id=app_id).lines
 
     def doctor_checks(self) -> dict[str, Any]:
+        if self._connection_mode() == "existing-cdp":
+            installed = importlib.util.find_spec("playwright") is not None
+            endpoint = str(self.options["cdp_endpoint"])
+            return {
+                "platform": {"ok": True, "detail": self.name, "connection": "existing-cdp",
+                             "capabilities": sorted(c for c in self.capabilities if self.supports(c))},
+                "playwright": {"ok": installed, "detail": "installed" if installed else "not installed"},
+                "target": {
+                    "ok": self.config.device.serial in {None, cdp_target_id(endpoint)},
+                    "detail": endpoint,
+                    "hint": "Omit --serial. session start verifies attachment to the running app.",
+                },
+            }
         if self._connection_mode() == "existing-chrome":
             from ..chrome_extension_setup import chrome_extension_status
 

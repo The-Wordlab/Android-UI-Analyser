@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import read_budget, routing
 from .engine_support import logger
-from .errors import ElementNotFoundError, ProviderError, UsageError
+from .errors import ElementNotFoundError, JobCancelledError, ProviderError, UsageError
 from .memory import NavHints, _id_tail, screen_skips_ocr
 from .platforms.identity import TargetRef
 from .platforms.runtime import TargetRuntime as Device
@@ -802,7 +802,7 @@ def analyze(
     elif force_vis and not routing.allows(Tier.vision, ceiling):
         ceiling = Tier.vision
     if query:
-        return self._analyze_query(
+        result = self._analyze_query(
             query,
             ceiling=ceiling,
             force_hierarchy=force_hier,
@@ -812,16 +812,99 @@ def analyze(
             annotate=annotate,
             no_cache=no_cache,
         )
-    return self._analyze_screen(
-        ceiling=ceiling,
-        force_hierarchy=force_hier,
-        force_vision=force_vis,
-        with_ocr=with_ocr,
-        annotate=annotate,
-        no_cache=no_cache,
-        record=record,
-        record_ids=record_ids,
+    else:
+        result = self._analyze_screen(
+            ceiling=ceiling,
+            force_hierarchy=force_hier,
+            force_vision=force_vis,
+            with_ocr=with_ocr,
+            annotate=annotate,
+            no_cache=no_cache,
+            record=record,
+            record_ids=record_ids,
+        )
+    # Refresh even when the tree was reused: an unchanged screen can still log an error.
+    result.meta.browser_diagnostics = browser_diagnostics(self) if record_ids else None
+    return result
+
+
+def browser_diagnostics(self: Engine) -> dict[str, Any] | None:
+    """Fold the adapter's buffered browser events into the screen, without another tool call.
+
+    Windows deliberately overlap. Internal settle/wait reads must not consume the events the
+    final response needs, and an action's early error must survive its later unchanged frame.
+    """
+    if not self.config.logs.enabled or not self.platform.supports("browser.diagnostics"):
+        return None
+    now_ms = int(time.time() * 1000)
+    action_start = (
+        self._diagnostic_window_start_ms if self._call_started_epoch_ms is not None else None
     )
+    since_ms = action_start if action_start is not None else now_ms - 30_000
+    limit = max(1, min(self.config.logs.limit, 100))
+    try:
+        runtime = self.platform.runtime_capability("browser.diagnostics", self.device)
+        payload = runtime.browser_diagnostics(limit=600, kinds=(), since_ms=since_ms)
+    except JobCancelledError:
+        raise
+    except read_budget.ReadDeadlineExceeded:
+        return {"status": "omitted", "reason": "read_deadline"}
+    except Exception as exc:
+        logger.debug("inline browser diagnostics unavailable: %s", type(exc).__name__)
+        return {"status": "unavailable"}
+    events = [dict(event) for event in payload.get("events", []) if isinstance(event, Mapping)]
+    # Keep failures ahead of routine requests when the window overflows; preserve time order
+    # among the selected rows. No request/response bodies or headers enter this summary.
+    important = [
+        i
+        for i, event in enumerate(events)
+        if (
+            event.get("kind") in {"page_error", "request_failed"}
+            or event.get("level") in {"warning", "error", "assert", "fatal"}
+            or (isinstance(event.get("status"), int) and event["status"] >= 400)
+        )
+    ]
+    selected = set(important[-limit:])
+    for i in range(len(events) - 1, -1, -1):
+        if len(selected) >= limit:
+            break
+        selected.add(i)
+    allowed = {
+        "timestamp_ms",
+        "kind",
+        "level",
+        "message",
+        "url",
+        "method",
+        "status",
+        "resource_type",
+        "duration_ms",
+    }
+    bounded = [
+        {
+            key: value[:500] if isinstance(value, str) else value
+            for key, value in events[i].items()
+            if key in allowed
+        }
+        for i in sorted(selected)
+    ]
+    count = max(len(events), int(payload.get("total_count", len(events))))
+    return {
+        "status": "ok",
+        "scope": "action" if action_start is not None else "recent",
+        "since_unix_ms": since_ms,
+        "until_unix_ms": int(time.time() * 1000),
+        "events": bounded,
+        "count": len(bounded),
+        "total_count": count,
+        "omitted_count": max(0, count - len(bounded)),
+        "truncated": bool(payload.get("truncated")) or len(bounded) < count,
+        **(
+            {"buffer_overflow": bool(payload["buffer_overflow"])}
+            if "buffer_overflow" in payload
+            else {}
+        ),
+    }
 
 
 def _analyze_screen(

@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -321,6 +322,23 @@ def test_web_action_until_executes_once_and_returns_arrival(tmp_path, monkeypatc
     class Connection(FakeConnection):
         arrived = False
 
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def emit_diagnostics(self):
+            now = int(time.time() * 1000)
+            self.events.extend([
+                {"timestamp_ms": now, "kind": "console", "level": "log", "message": "Loading fixture"},
+                {"timestamp_ms": now, "kind": "response", "level": "warning",
+                 "message": "401 https://api.fixture.test/data", "status": 401,
+                 "method": "GET", "url": "https://api.fixture.test/data"},
+            ])
+
+        def diagnostics(self, *, limit, kinds, since_ms):
+            events = [event for event in self.events if event["timestamp_ms"] >= since_ms]
+            return {"events": events, "total_count": len(events), "truncated": False}
+
         def snapshot(self):
             return (
                 super().snapshot().replace("Web fixture", "Arrived" if self.arrived else "Waiting")
@@ -330,10 +348,12 @@ def test_web_action_until_executes_once_and_returns_arrival(tmp_path, monkeypatc
             super().click(x, y)
             if y > 150:
                 self.arrived = True
+                self.emit_diagnostics()
 
         def type_text(self, text):
             super().type_text(text)
             self.arrived = True
+            self.emit_diagnostics()
 
     connection = Connection()
     engine = Engine(_config(tmp_path), platform=_adapter(tmp_path, connection))
@@ -383,9 +403,14 @@ def test_web_action_until_executes_once_and_returns_arrival(tmp_path, monkeypatc
                     )
 
             payload = asyncio.run(invoke())
-        assert payload["ok"], payload
+        assert payload.get("ok"), payload
         assert payload["await_outcome"] == "satisfied", payload
         assert payload["observation_present"], payload
+        diagnostics = payload["observation"]["meta"]["browser_diagnostics"]
+        assert diagnostics["status"] == "ok", diagnostics
+        assert diagnostics["scope"] == "action"
+        assert diagnostics["events"] == connection.events
+        assert diagnostics["since_unix_ms"] <= connection.events[0]["timestamp_ms"]
         assert sum(call[0] == "click" for call in connection.calls) == 1
         assert sum(call[0] == "type" for call in connection.calls) == (action == "input")
     finally:

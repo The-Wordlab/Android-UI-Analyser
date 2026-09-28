@@ -98,6 +98,8 @@ def _deadline_wait(method: Callable[..., ActionResult]) -> Callable[..., ActionR
         if "match" in kwargs:
             MatchMode(kwargs["match"])
         self._start_call()
+        if kwargs.get("adopt_action") and self._last_action_started_epoch_ms is not None:
+            self._diagnostic_window_start_ms = self._last_action_started_epoch_ms
         started = time.monotonic()
         requested = kwargs.get("timeout_ms", default_ms)
         timeout, clamped, ceiling = self._bounded_wait_ms(requested)

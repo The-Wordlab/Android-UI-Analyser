@@ -343,6 +343,7 @@ class PlaywrightConnection:
         self._page_ids: dict[int, str] = {}
         self._next_page_id = 1
         self._events: deque[dict[str, Any]] = deque(maxlen=2000)
+        self._last_evicted_event_ms: int | None = None
         self._marks: dict[str, int] = {}
         self._cors_rules: list[dict[str, Any]] = []
         self._mock_rules: list[dict[str, Any]] = []
@@ -548,6 +549,8 @@ class PlaywrightConnection:
         url: str | None = None,
         **fields: Any,
     ) -> None:
+        if len(self._events) == self._events.maxlen:
+            self._last_evicted_event_ms = int(self._events[0]["timestamp_ms"])
         self._events.append(
             {
                 "timestamp_ms": int(time.time() * 1000),
@@ -607,6 +610,8 @@ class PlaywrightConnection:
                 f"{response.status} {self._safe_url(response.url)}",
                 url=response.url,
                 status=response.status,
+                method=response.request.method,
+                resource_type=response.request.resource_type,
             ),
         )
         page.on(
@@ -768,15 +773,15 @@ class PlaywrightConnection:
                 "format": "aua-web-dom/1",
                 "url": str(top.url),
                 "title": _read(top, "title"),
-                "viewport": {
-                    "width": self._options.viewport_width,
-                    "height": self._options.viewport_height,
-                },
+                "viewport": self._snapshot_viewport(),
                 "nodes": merged,
             }
             return json.dumps(payload, ensure_ascii=False)
 
         return self._call(capture)
+
+    def _snapshot_viewport(self) -> dict[str, int]:
+        return {"width": self._options.viewport_width, "height": self._options.viewport_height}
 
     def screenshot_png(self) -> bytes:
         def capture() -> bytes:
@@ -1309,6 +1314,9 @@ class PlaywrightConnection:
                 "count": len(bounded),
                 "total_count": len(events),
                 "truncated": len(bounded) < len(events),
+                "buffer_overflow": self._last_evicted_event_ms is not None and (
+                    since_ms is None or self._last_evicted_event_ms >= since_ms
+                ),
                 "events": bounded,
             }
 
@@ -1318,6 +1326,7 @@ class PlaywrightConnection:
         def clear() -> dict[str, Any]:
             count = len(self._events)
             self._events.clear()
+            self._last_evicted_event_ms = None
             self._marks.clear()
             return {"ok": True, "action": "browser-diagnostics-clear", "cleared": count}
 
@@ -1327,6 +1336,7 @@ class PlaywrightConnection:
         def mark() -> dict[str, Any]:
             if clear:
                 self._events.clear()
+                self._last_evicted_event_ms = None
             timestamp = int(time.time() * 1000)
             self._marks[str(name)] = timestamp
             return {

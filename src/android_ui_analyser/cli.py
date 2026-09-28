@@ -1960,6 +1960,14 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
             lease_serial = lease_device()
         if lease_serial:
             cfg.device.serial = lease_serial
+        if (
+            method == "session_start"
+            and lease_serial
+            and not getattr(engine, "_lease_was_preexisting", True)
+        ):
+            # The daemon sees the caller's just-created claim as preexisting. Carry its true
+            # origin so failed attachment can return that lease without dropping an older one.
+            kwargs["_bootstrap_new_lease"] = True
     if getattr(cfg.daemon, "enabled", False) and not host_only and not bootstrap_session:
         try:
             from . import daemon as daemon_mod

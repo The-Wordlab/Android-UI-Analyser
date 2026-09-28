@@ -531,6 +531,9 @@ class Meta(BaseModel):
     # the key appearing IS the signal: absent when nothing is in the air and absent whenever no
     # proxy is running, which is most runs, so a quiet response pays nothing for it.
     network_calls: list[str] | None = None
+    # Bounded browser console/errors/network metadata, including non-error console.log output.
+    # Shares the observation's time window across intermediate action/wait reads.
+    browser_diagnostics: dict[str, Any] | None = None
     # SHA1 of the raw hierarchy XML (or elements fingerprint for vision paths).
     fingerprint: str | None = None
     # How the result was produced (e.g. hierarchy, hierarchy-unchanged, vision).
@@ -674,6 +677,7 @@ class AnalyzeResult(BaseModel):
                         # The machine-readable form of the same warning: `delta` fires when
                         # `unchanged` is True, which is exactly the `no_change` state.
                         "arrival_state",
+                        "browser_diagnostics",
                     }
                     and v not in (None, [], False)
                 }

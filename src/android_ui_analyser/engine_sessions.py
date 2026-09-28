@@ -98,7 +98,7 @@ def _release_new_bootstrap_lease(self: Engine) -> None:
     released = holder is None or leases.release(
         self.config.lease.registry_dir,
         str(self._lease_serial),
-        owner=str(self._lease_owner_resolved),
+        owner=self._lease_owner_resolved,
         platform=platform,
     )
     if not released:
@@ -772,6 +772,7 @@ def _session_start_impl(
 def session_start(self: Engine, *args: Any, **kwargs: Any) -> dict[str, Any]:
     """Start a session and never leak a lease when bootstrap fails before returning its ID."""
     previous_session_id = getattr(self, "_session_id", None)
+    bootstrap_new_lease = kwargs.pop("_bootstrap_new_lease", False) is True
     try:
         result = _session_start_impl(self, *args, **kwargs)
         self._session_bootstrap_prepared = None
@@ -784,6 +785,8 @@ def session_start(self: Engine, *args: Any, **kwargs: Any) -> dict[str, Any]:
         failed_session_id = (
             current_session_id if current_session_id != previous_session_id else None
         )
+        if bootstrap_new_lease:
+            self._lease_was_preexisting = False
         _rollback_new_bootstrap(self)
         if failed_session_id:
             from .session import finish_session_state, load_session_state
@@ -2170,13 +2173,15 @@ def session_finish(
             errors.append({"action": name, "message": exc.message})
             return None
 
+    detached_runtime = False
     if self.platform.supports("session.state"):
-        restore(
+        restored_runtime = restore(
             "browser_session_restore",
             lambda: self.platform.runtime_capability(
                 "session.state", self.device
             ).session_state_finish(state.session_id),
         )
+        detached_runtime = bool(restored_runtime and restored_runtime.get("detached"))
 
     if state.animation_backup_path:
         animation_path = Path(state.animation_backup_path)
@@ -2370,4 +2375,7 @@ def session_finish(
         result["candidate_flow"] = candidate_payload
     if state.artifact_dir:
         result["artifacts_dir"] = state.artifact_dir
+    if detached_runtime and not errors:
+        # A warm daemon must reconnect next time instead of retaining a detached transport.
+        self.close()
     return self._session_finish_summary(result) if summary else result

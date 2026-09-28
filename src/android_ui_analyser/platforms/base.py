@@ -145,6 +145,11 @@ class PlatformAdapter(ABC):
 
         return 0
 
+    def lease_conflict_hint(self) -> str | None:
+        """Optional platform-specific recovery advice when no eligible target is free."""
+
+        return None
+
     def normalize_key(self, name: str) -> str:
         """Validate one platform-neutral key name before it reaches target input.
 

@@ -54,7 +54,36 @@ URLs and refuses credentials embedded in a URL. Do not put secret query paramete
 URL: target identities appear in local lease and journal metadata. Use a private Playwright
 `storage_state` file for authentication.
 
-## Existing logged-in Chrome tab
+## Connections and sessions
+
+### Parallel isolated sessions
+
+For concurrent agents, configure the destination with `platforms.web.url` and omit
+`device.serial` / `--serial`:
+
+```yaml
+device:
+  platform: web
+platforms:
+  web:
+    url: https://example.test/app
+    headless: false
+    context_slots: 4
+```
+
+Run `aua --config /absolute/path/web.yaml session start --goal "Check the catalog" --headed`.
+Each slot is a separate browser context in its own warm daemon. AUA's normal lease registry
+assigns a free slot to the calling agent and keeps later commands on that target. The session
+records its owner and target; finish releases only that lease. Start each agent with a distinct
+agent process, or the usual per-worker `AUA_CACHE__DIR` when workers share an ancestor process.
+Keep the default shared lease registry. Do not impersonate an owner or force another agent's lease.
+
+Increase `context_slots` if the pool is full, or wait for a session to finish. Slot identities are
+stable for a configured URL, even when the page navigates. A URL passed as `--serial` remains an
+explicit, exclusive target for backward compatibility. Attached modes below are also exclusive;
+they never create a replacement window when the configured target is leased.
+
+### Extension attachment
 
 Use the extension mode when a task needs a login or browser state that already exists in your
 normal Chrome profile. Isolated Playwright remains the default and is still the right mode for
@@ -110,11 +139,42 @@ Unix socket, and the native-host manifest accepts only the bundled extension's s
 extension attachment supports Chrome/Chromium on macOS and Linux. It does not require Playwright
 or a remote-debugging port, so it works with Chrome's normal default profile.
 
+### Existing Electron or Chromium window
+
+Enable a loopback remote-debugging port when starting the app, for example
+`electron . --remote-debugging-port=9222`, then configure:
+
+```yaml
+device:
+  platform: web
+platforms:
+  web:
+    connection: existing-cdp
+    cdp_endpoint: http://127.0.0.1:9222
+    # Required if several eligible windows are open; an exact URL, not a navigation request:
+    page_url: file:///absolute/path/to/example-app/index.html
+```
+
+Use the same `session start`, semantic actions and `session finish` commands. AUA reuses the
+running app's window, preload bridge, login and workspace. It does not launch or restart the app,
+open pages, change its viewport, restore storage, or close it at finish. Exactly one matching
+HTTP(S)/file page is required; ambiguous or missing windows return a typed error. Once attached,
+the connection stays on that page even when other windows open; closing it fails subsequent
+actions instead of switching to another window. `browser pages` reports only the selected page.
+Screenshots use CSS pixels to match DOM bounds on Retina displays.
+
+The endpoint identifies one exclusive lease, regardless of the selected page. This avoids agents
+changing different windows backed by the same app state concurrently. Network/storage mutation,
+traces, native dialogs, recording and Electron guest `<webview>` targeting are not provided by this
+attachment mode. Console and network diagnostics cover renderer browser activity; main-process
+logs, Node requests and child-process output need separate instrumentation.
+
 ## Perception stack
 
 In isolated mode, Playwright owns browser launch, navigation, input, and the native viewport
-screenshot. In attached mode, Chrome's debugger API provides navigation, trusted input, a DOM
-snapshot, and the native viewport screenshot. AUA then uses the same layered perception stack as
+screenshot. Extension attachment uses Chrome's debugger API; CDP attachment uses Playwright
+against the existing page. Both provide navigation, trusted input, a DOM snapshot and the native
+viewport screenshot. AUA then uses the same layered perception stack as
 its device adapters:
 
 1. A DOM/ARIA snapshot supplies roles, accessible names and descriptions, visible text, state,
@@ -163,6 +223,29 @@ from that baseline, which also clears HTTP cache. Browser state remains process-
 default warm daemon for a session spanning several CLI calls.
 
 ## Browser lab controls
+
+### Diagnostics included with observations
+
+Every browser `analyze` response includes `meta.browser_diagnostics`; actions such as
+`tap-and-analyze` include it in `observation.meta`. It carries ordinary console messages,
+JavaScript errors, requests, HTTP statuses and failed requests, including cross-origin calls.
+It survives compact/delta output and the default action projection. No separate `browser logs`
+call is needed for this summary.
+
+Standalone reads cover the preceding 30 seconds; actions cover their own window, including an
+adopted `--until` wait. Windows can overlap so intermediate polls cannot consume evidence needed
+by the final response. Only events observed after attachment are available. The default limit is
+20 events (`logs.limit`, bounded to 100), prioritizing failures, with 500-character string fields.
+`total_count`, `omitted_count` and `truncated` describe the retained window; `buffer_overflow`, when
+available, signals older events lost from the transport buffer. Empty summaries confirm a
+successful read; `unavailable` or `omitted` indicates missing diagnostics, not a silent app.
+
+`logs.enabled: false` / `--no-app-logs` disables this enrichment. Request bodies and headers are
+excluded, URL queries/fragments are stripped by the browser transport, and session evidence
+bundles retain counts rather than raw console/network text. Existing native `app_logs` behavior
+is unchanged.
+
+### Explicit inspection and controls
 
 `aua browser --help` exposes the browser-specific layer while ordinary UI commands retain the
 same Android/iOS response model:

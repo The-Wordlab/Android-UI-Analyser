@@ -331,6 +331,8 @@ class Engine:
         # only comparable inside this process; a journal line has to line up with another
         # process's journal and with a logcat dump, so the instant is kept both ways.
         self._call_started_epoch_ms: int | None = None
+        self._diagnostic_window_start_ms: int | None = None
+        self._last_action_started_epoch_ms: int | None = None
         self._last_action_site: _ActionSite | None = None
         self._last_analyze_elements: list[Element] | None = None
         #: Where the next observation's network window starts: the moment the last one closed.
@@ -625,31 +627,36 @@ class Engine:
                 return explicit
             if not held_before:
                 return None
-        if self._lease_wait_s:
-            serial, why, waited_ms = leases.wait_for_device(
-                self._lease_registry_dir,
-                owner=owner,
-                explicit=explicit,
-                candidates=candidates,
-                needs=needs,
-                ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
-                allow_replacement=self._lease_allow_replacement,
-                wait_s=self._lease_wait_s,
-                platform=platform_name,
-            )
-            self._lease_waited_ms = waited_ms
-        else:
-            serial, why = leases.choose_device(
-                self._lease_registry_dir,
-                owner=owner,
-                explicit=explicit,
-                candidates=initial,
-                needs=needs,
-                ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
-                allow_replacement=self._lease_allow_replacement,
-                platform=platform_name,
-            )
-            self._lease_waited_ms = 0
+        try:
+            if self._lease_wait_s:
+                serial, why, waited_ms = leases.wait_for_device(
+                    self._lease_registry_dir,
+                    owner=owner,
+                    explicit=explicit,
+                    candidates=candidates,
+                    needs=needs,
+                    ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
+                    allow_replacement=self._lease_allow_replacement,
+                    wait_s=self._lease_wait_s,
+                    platform=platform_name,
+                )
+                self._lease_waited_ms = waited_ms
+            else:
+                serial, why = leases.choose_device(
+                    self._lease_registry_dir,
+                    owner=owner,
+                    explicit=explicit,
+                    candidates=initial,
+                    needs=needs,
+                    ttl_s=int(getattr(cfg.lease, "ttl_s", leases.DEFAULT_TTL_S)),
+                    allow_replacement=self._lease_allow_replacement,
+                    platform=platform_name,
+                )
+                self._lease_waited_ms = 0
+        except DeviceLeasedError as exc:
+            if hint := self.platform.lease_conflict_hint():
+                exc.hint = hint
+            raise
         self._lease_serial = serial
         self._lease_owner_resolved = owner
         self._lease_selection_reason = why
@@ -730,6 +737,10 @@ class Engine:
                 "lease_waited_ms": 0,
             })
 
+        # The daemon fences target commands before dispatch. Bootstrap has no connected
+        # runtime yet and must select/claim under the exclusive lease lock; retaining that
+        # read fence would attempt an illegal shared-to-exclusive lock upgrade.
+        self.release_device_use()
         self._lease_wait_s = float(wait_for_lease_s)
         self._lease_waited_ms = 0
         # Window/audio requests are target requirements too. Probe every online candidate and use
@@ -810,6 +821,10 @@ class Engine:
                     "no compatible unleased device is online",
                     hint="Allow automatic provisioning or attach a compatible target.",
                 )
+            if selection_error is not None and not self.platform.supports("virtual_targets"):
+                # Attached targets and configured browser pools cannot provision native devices.
+                # Preserve the ownership refusal instead of replacing it with a capability error.
+                raise selection_error
 
             from . import leases
 
@@ -922,6 +937,8 @@ class Engine:
         self._last_action_site = None
         self._last_analyze_elements = None
         self._last_network_ts = None
+        self._diagnostic_window_start_ms = None
+        self._last_action_started_epoch_ms = None
         self._last_hierarchy_hash = None
         self._last_analyze_result = None
         self._session_id: str | None = None
@@ -2019,6 +2036,7 @@ class Engine:
         started = time.monotonic()
         self._call_started_at = started
         self._call_started_epoch_ms = int(time.time() * 1000)
+        self._diagnostic_window_start_ms = self._call_started_epoch_ms
         return started
 
     def _journal_call_answer(self, result: ActionResult, *, outcome: str | None = None) -> None:
@@ -2188,6 +2206,7 @@ class Engine:
         # The wall clock starts before the device is touched, for the same reason the log
         # window does: a duration measured from after the gesture excludes the gesture.
         self._start_call()
+        self._last_action_started_epoch_ms = self._call_started_epoch_ms
         self._mark_logcat("last-action")
         # Same reasoning as the log window: mark the capture timeline BEFORE the
         # interaction so the post-action burst records the transition itself, not just

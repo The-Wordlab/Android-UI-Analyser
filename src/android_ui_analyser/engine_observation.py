@@ -902,7 +902,7 @@ def _observe(
         else:
             result.note = (
                 (result.note or "")
-                + " Bounded wait observation uses accessibility and available warm OCR; cold providers and diagnostic enrichment were omitted."
+                + " Bounded wait observation uses accessibility and available warm OCR; cold providers and native log enrichment were omitted."
             )
     if self._frame_history_matters(result):
         hint = self._capture_hint()
@@ -1361,6 +1361,9 @@ def _app_logs(self: Engine, app_id: str) -> dict[str, Any] | None:
     nothing is a tax on every step of every flow, and measured on a real app most actions
     are quiet — an idle window logged 0 lines and an ordinary tap 0 after filtering.
     """
+    if self.platform.supports("browser.diagnostics"):
+        # Browser observations already contain console and network events in one bounded block.
+        return None
     if read_budget.current() is not None or not self.config.logs.enabled or not app_id:
         return None
     # Per-app first: what this app was told to keep or drop outranks the host-wide default,

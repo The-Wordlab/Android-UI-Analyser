@@ -11,7 +11,24 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- Web observations now include bounded console, JavaScript error and network summaries in
+  `meta.browser_diagnostics`, including action-bound waits. Error events survive noisy windows;
+  counts report omitted events. The existing `logs.enabled` setting controls inclusion.
+- `platforms.web.connection: existing-cdp` attaches to one existing local Chromium/Electron
+  window, including packaged `file://` pages, and detaches without closing it or resetting its
+  profile. The web extra is required; no additional browser download is needed for attachment.
+- Isolated web configurations using `platforms.web.url` offer four independently leased context
+  slots by default (`context_slots`). Concurrent agents receive separate targets and warm daemons;
+  subsequent calls retain the assigned target. Explicit URL targets and attached windows stay
+  exclusive. Finished attached sessions reconnect cleanly on the next session.
+
 ### Fixed
+
+- Session startup on a warm web daemon no longer attempts to upgrade its device-use lock while
+  selecting the target. Failed attachment releases a lease newly claimed by that CLI call while
+  retaining a lease that was already held before startup.
 
 - Release verification reads the plugin's pinned version from `AUA_SPEC`, matching the new
   MCP launcher.
