@@ -83,10 +83,15 @@ def _buffer_off() -> type[_Client]:
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_socket_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_ambient_socket_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`effective_serial`/`socket_path` read the environment, and the dev host has both set."""
     monkeypatch.delenv("AUA_SERIAL", raising=False)
     monkeypatch.delenv("AUA_DAEMON_SOCKET", raising=False)
+    # A fresh runner has no shared /tmp/aua-<uid> directory. Keep fake pidfiles local
+    # and exercise that missing-parent case even on a host that has used AUA before.
+    monkeypatch.setattr(
+        daemon_mod, "_short_socket_base", lambda _base: str(tmp_path / "relocated" / "daemon.sock")
+    )
 
 
 def _cfg(tmp_path: Path, serial: str | None = "emulator-5554") -> Config:
@@ -102,7 +107,9 @@ def _cfg(tmp_path: Path, serial: str | None = "emulator-5554") -> Config:
 def _pretend_the_daemon_is_this_process(cfg: Config) -> int:
     """Write the pidfile that ties the socket to a pid, so job ownership can be checked."""
     sock = daemon_mod.socket_path(cfg)
-    Path(sock + ".pid").write_text(json.dumps({"pid": os.getpid(), "exe": sys.executable}))
+    pidfile = Path(sock + ".pid")
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(json.dumps({"pid": os.getpid(), "exe": sys.executable}))
     return os.getpid()
 
 

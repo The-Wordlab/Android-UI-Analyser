@@ -45,6 +45,14 @@ STALE = "0.0.0+srcnotthistree"
 
 
 @pytest.fixture(autouse=True)
+def _isolated_short_sockets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Match a fresh runner without leaving fake pidfiles in the user's socket directory.
+    monkeypatch.setattr(
+        daemon_mod, "_short_socket_base", lambda _base: str(tmp_path / "relocated" / "daemon.sock")
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_ambient_socket_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     """`effective_serial`/`socket_path` read the environment, and the dev host has both set."""
     monkeypatch.delenv("AUA_SERIAL", raising=False)
@@ -340,7 +348,9 @@ def _record_restart(
 
 
 def _pretend_the_daemon_is_this_process(cfg: Config) -> int:
-    Path(daemon_mod.socket_path(cfg) + ".pid").write_text(
+    pidfile = Path(daemon_mod.socket_path(cfg) + ".pid")
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(
         json.dumps({"pid": os.getpid(), "exe": sys.executable})
     )
     return os.getpid()
