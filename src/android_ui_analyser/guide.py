@@ -9,7 +9,7 @@ This module is the **single source of truth**. It renders three progressive laye
 - ``aua guide --brief``      → a useful session-oriented field guide
 - ``aua guide --emit-skill`` → a compact generated SKILL.md that points to both deeper layers
 
-The generated skill is intentionally small enough to load on every Android task; detailed
+The generated skill is intentionally small enough to load on every supported UI task; detailed
 reference material stays discoverable through the CLI instead of consuming agent context.
 """
 
@@ -21,16 +21,13 @@ from pathlib import Path
 from .projection import FIELD_ALIASES, TSV_DEFAULT_FIELDS
 
 # Skill metadata. The description carries the trigger conditions that make Claude Code
-# auto-activate the skill on Android-UI tasks — keep it stable across regenerations.
+# and Codex auto-activate the skill on supported UI tasks.
 SKILL_NAME = "android-ui-analyser"
 SKILL_DESCRIPTION = (
-    "Drive, inspect, and verify Android app UIs on a device/emulator with AUA MCP tools or the "
-    "`aua` CLI. It returns stable element IDs and acts by ID instead of guessed pixels. Use for "
-    "Android tasks: inspect a screen, act on controls, automate or debug a flow, verify a change, "
-    "test offline/network or voice input, or read/seed debuggable SQLite or DataStore. "
-    "Start with "
-    "MCP `session_start` or CLI `aua session start --goal`. AUA is hierarchy-first with OCR, "
-    "detection, and grounding fallbacks for opaque screens."
+    "Test, inspect and automate Android apps, iOS simulator apps, websites, web apps and "
+    "Chromium/Electron UIs with AUA MCP or CLI. Use for UI debugging, screenshots, verifying "
+    "new features/fixes and browser console/network diagnostics. "
+    "Not for general web research or backend-only tests. Respect an explicitly requested tool."
 )
 
 DEFAULT_SKILL_PATH = Path(".claude/skills/android-ui-analyser/SKILL.md")
@@ -1678,7 +1675,10 @@ def render_markdown(*, brief: bool = False) -> str:
     p.append("")
     p.append("## iOS simulators (`--platform ios`)")
     p.append(
-        "Same commands, same ids. Select once with `aua --platform ios …` or `AUA_PLATFORM=ios`; "
+        "Same commands, same ids. Select on each CLI call with `aua --platform ios …`, or set "
+        "`AUA_PLATFORM=ios` for the process/server. Normal unpinned `session start` selects a free "
+        "booted simulator; add `--no-provision-target`. It cannot provision a simulator or meet "
+        "`--headed` requirements. `session finish` releases ownership without shutting it down. "
         "`aua --platform ios doctor` checks `xcrun`, AXe and which simulators are booted, and "
         "`doctor --fix` installs AXe through Homebrew (tap, trust, install) when it is missing. "
         "`aua app launch <bundle> --arg <flag>` (repeatable) hands the app its process arguments "
@@ -2216,74 +2216,75 @@ def render_brief() -> str:
 
 def render_skill_markdown() -> str:
     """Compact triggered instructions; deeper guidance stays in the CLI manual."""
-    return """# Android UI Analyser
+    return """# AUA — Android, iOS and web
 
-Use AUA MCP or CLI (plugin adds no `aua` to `PATH`). Act by ID; no `adb`.
+Use AUA MCP or CLI (plugin adds no `aua` to `PATH`). Act by ID, not guessed pixels.
 
-Secrets: CLI `aua config exec --env-file PATH --require NAME -- COMMAND ARGS`; MCP
-`credential_request`. Use private Save/Cancel; never expose values or shell-source .env.
+## Select the platform first
 
-## Prepare new behavior
+CLI: put `--platform android|ios|web` before every subcommand, or use `device.platform`
+in a task config with `--config PATH`. Keep that config throughout.
+MCP uses its server's configured platform; `session_start` cannot switch it. Use a matching
+server or CLI; check capabilities before platform-specific operations.
 
-No scenario: MCP `prepare_start` → `prepare_answer` → `prepare_run`; CLI
-`aua prepare start` → `answer` → `run`. Returns contract verdict, evidence and `flow_repair`.
+- Android: default; selects/provisions a free device. `--app` selects; `--apk` installs.
+- iOS: macOS, Xcode 26+, AXe and a booted simulator. Use `aua --platform ios session start
+  --goal "<goal>" --app <bundle-id> --no-provision-target`. No physical iPhones, automatic
+  provisioning, `--headed`, recording, native logs, offline control or microphone injection.
+  Finish releases ownership, leaving the simulator booted.
+- Web: isolated Chromium/Firefox/WebKit needs the `web` extra and a Playwright browser.
+  Configure `platforms.web.url`; omit `device.serial` for agent slots. For `--headed`,
+  set `platforms.web.headless: false`. Reuse logins/apps via `connection: existing-chrome`
+  (approved Chrome tab, extension only) or `existing-cdp` (local `cdp_endpoint`, `web` extra,
+  no browser download). Attachments are exclusive; use `page_url` to select the exact CDP page.
+  Read inline `meta.browser_diagnostics` for console/errors/network; absent data proves nothing.
+  Controls: `aua browser`; attachment has fewer capabilities.
+  MCP: `aua --platform web --config PATH mcp --tool-profile web`.
 
 ## Operating loop
 
 1. Start with MCP `session_start(goal="<what must be verified>")`, or
-   `aua session start --goal "<goal>"`. It leaves leased targets alone; provisions a free one.
-   `--app` selects; `--apk` installs. Reuse observation
-   and `recommended_call`; `--contract` requires proof. `--helper` (MCP `helper:true`)
-   runs and cleans up in one call, no fallback.
+   `aua session start --goal "<goal>"` with the platform above. It leaves leased targets alone.
+   Reuse observation and `recommended_call`; `--contract` requires proof.
 2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival needs
    matching `logical_name`, state and surface. Goals do not authorize side effects.
-3. Reuse observations; `--no-observe` is rejected. Send reusable `el:` IDs back directly.
-   For `id_reusable: false`, pass `selector` fields.
-   Filter elements by `clickable`. `--submit` is IME-only:
-   check `submitted`; if false, use its `recommended_call` or `--send rid:<control>`, never retype.
+3. Send reusable `el:` IDs back directly. For `id_reusable: false`, pass `selector` fields.
+   Reuse action observations; filter `clickable`. For `--submit`, check `submitted`; if false,
+   use `recommended_call` or `--send rid:<control>`, never retype.
    Check `observation_contract`: `action_succeeded`, `evidence_fresh`, `elements_available`,
    `readiness`. Only `ready` confirms arrival; `not_checked` proves none.
 4. Fold arrival into actions: `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`,
-   inspect evidence and correct the predicate; never repeat the action.
-   `await-and-analyze` for absence-only checks; `back-until-and-analyze` for nested returns.
-5. Hierarchy-first; filter `--where-rid`/`--where-text`/`--region`. Vision for opaque screens.
-6. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`).
-   `aua job start await ...` detaches read-only waits; reconnect by job id.
+   correct the predicate; never repeat the action. Hierarchy first; vision for opaque screens.
    On `daemon_outcome_unknown`, wait and inspect; never repeat the action.
-7. End with MCP `session_finish` or CLI `aua session finish` (compact), attaching final
-   `phase_done` / `--phase-done` facts; never analyze for bookkeeping.
-   `retain_started_target=false` or `--stop-started-target` stops its exact boot.
-   Incomplete finish stays active; `--allow-incomplete` abandons; `--full` gives evidence.
+5. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`).
+   End with MCP `session_finish` or CLI `aua session finish` (compact), attaching final facts;
+   never analyze for bookkeeping. Incomplete finish stays active; `--allow-incomplete`
+   abandons; `--full` gives evidence. Stop only targets this session started.
    Use `review.accounting`, not estimates: `top_level_calls` counts caller-visible invocations =
    `lifecycle_calls` + `task_calls`; `journal_events` adds `folded_internal_events` (action-bound wait).
    `reporting_call_included` is false; `top_level_calls_including_reporting_call` adds this review/finish.
-8. After a manual finish, prepare repeatable feature checks for later builds.
-   An enabled controller with `OPEN_ROUTER_API_KEY` can drive them;
-   `TYPESAFE_API_KEY` alone only helps Jev roles. Short checks may be slower.
 
+No scenario, or after manual checks: MCP `prepare_start` → `prepare_answer` → `prepare_run`;
+CLI `aua prepare start` → `answer` → `run`. Produces contract verdict, evidence and `flow_repair`.
 Flow previews expose `selector_resilience`; only a same-frame privacy-safe positive `--until`
 yields an unmapped `satisfied_action_until` arrival.
 
-## Device and safety rules
+## Safety
 
 - Start with `session start`; never list/start devices, set `AUA_OWNER`, or acquire a lease.
   It frees dead owners; omit `--serial`; switching or transfer is explicit.
-- `--no-start-emulator` forbids provisioning; `--headed` shows the target. `--audio` verifies an
-  authenticated microphone endpoint before app installation.
-  Use `mic inject`/`mic speak`; never repeat uncertain delivery.
-- Animations restore at finish. After transition/wait, use action/job `capture_evidence.ref`:
-  `capture sheet PATH.png --evidence REF`, then `capture export PATH.gif` with the same REF.
-  First inspection fixes the window; no guessed seconds/replay. Exports keep observation validity.
-- `aua network offline --verify` restores at cleanup. Guarded `aua db` for debuggable SQLite.
-- Deeplink/spinner changes do not prove arrival; check `verified` and final affordance.
-- Assert text or `--rid`; labels use `meta.device_locale`.
+  Shared-process workers need distinct `AUA_CACHE__DIR`; keep the shared lease registry.
+  Reuse the warm daemon.
+- Inspect screenshots; report unsupported evidence. Read the guide for Android recording.
+- Secrets: `aua config exec --env-file PATH --require NAME -- COMMAND ARGS` or MCP
+  `credential_request`; private Save/Cancel, never expose values or shell-source .env.
 - Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only**.
-  No login/text entry. Use screen words (`Open Catalog`); no goal word match yields `policy_handoff`.
+  No login/text entry. Use screen words (`Open Catalog`); no match yields `policy_handoff`.
 
-## Load more when needed
+## Load more
 
-- Discover with MCP `capabilities(goal="<goal>")` or CLI `aua capabilities --goal "<goal>"`.
-- Run `aua guide` for full reference; `aua guide --brief` for the field guide.
+MCP `capabilities(goal="<goal>")` or CLI `aua capabilities --goal "<goal>"`.
+Run `aua guide` for platform setup; `aua guide --brief` for the field guide.
 """
 
 
@@ -2294,7 +2295,7 @@ def render_json() -> dict[str, object]:
     return {
         "name": SKILL_NAME,
         "summary": (
-            "Structured Android UI perception + action for agents: act on element IDs, not pixels."
+            "Android, iOS simulator and web UI perception + action: act on element IDs, not pixels."
         ),
         "session_protocol": [{"step": t, "detail": b} for t, b in SESSION_PROTOCOL],
         "escalation_ladder": [
@@ -2439,9 +2440,11 @@ def render_codex_agent_metadata() -> str:
     """Deterministic Codex UI metadata shipped beside the same canonical skill body."""
     return (
         "interface:\n"
-        '  display_name: "Android UI Analyser"\n'
-        '  short_description: "Drive and verify Android apps with semantic UI evidence"\n'
-        '  default_prompt: "Use $android-ui-analyser to verify the requested Android behavior efficiently."\n'
+        '  display_name: "AUA — Android, iOS and web"\n'
+        '  short_description: "Test Android, iOS simulator and web UIs with AUA"\n'
+        '  default_prompt: "Use $android-ui-analyser to verify the requested UI behavior on the correct platform."\n'
+        "policy:\n"
+        "  allow_implicit_invocation: true\n"
     )
 
 

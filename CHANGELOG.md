@@ -13,6 +13,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- Claude Code and Codex user skills now discover Android, iOS simulator and web UI testing,
+  with platform selection, agent-owned browser sessions and inline diagnostic guidance.
 - Web observations now include bounded console, JavaScript error and network summaries in
   `meta.browser_diagnostics`, including action-bound waits. Error events survive noisy windows;
   counts report omitted events. The existing `logs.enabled` setting controls inclusion.

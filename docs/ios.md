@@ -2,11 +2,13 @@
 
 `aua` drives iOS simulators with the same agent-facing surface it offers for Android: `analyze`
 returns elements with stable ids, and every `*-and-analyze` action, `has`, `wait`, `goto`, flows
-and maps work unchanged. Select the platform once:
+and maps work unchanged. Start an agent-owned session on a free booted simulator. Keep the
+platform on every CLI call (or set `AUA_PLATFORM=ios` for the process):
 
 ```bash
-aua --platform ios devices                 # or: export AUA_PLATFORM=ios
-aua --platform ios --format compact analyze
+aua --platform ios session start --goal "Verify settings" --app com.example.app --no-provision-target
+# Reuse the returned observation and recommended_call, then finish with the evidence.
+aua --platform ios session finish
 ```
 
 or in `~/.config/android-ui-analyser/config.yaml`:
@@ -14,7 +16,6 @@ or in `~/.config/android-ui-analyser/config.yaml`:
 ```yaml
 device:
   platform: ios
-  serial: "iPhone 17"          # optional: a UDID or a unique simulator name
 platforms:
   ios:
     axe_path: /opt/homebrew/bin/axe   # optional, when `axe` is not on PATH
@@ -29,7 +30,10 @@ platforms:
 | **AXe** (`aua --platform ios doctor --fix`, or `brew tap cameroncooke/axe && brew trust cameroncooke/axe && brew install axe`) | `axe describe-ui` reads the accessibility tree of a booted simulator; `axe tap/swipe/type/key/button` sends HID input. A current Homebrew refuses an untrusted tap, which is why the one-liner has the `trust` step. |
 | A **booted simulator**, or a simulator name/UDID to boot | `aua --platform ios doctor` shows what is available and booted. |
 
-Physical iPhones are not supported: AXe drives simulators only.
+Physical iPhones are not supported: AXe drives simulators only. A normal unpinned session selects
+a free booted simulator; it does not provision one. Omit `--headed`, which this adapter does not
+support. Finish releases the lease without shutting down the simulator. For MCP, select iOS in
+the server's config or environment before launch; `session_start` cannot switch platforms.
 
 ## How it maps
 
@@ -58,8 +62,9 @@ Physical iPhones are not supported: AXe drives simulators only.
   key on iOS: `aua key-and-analyze back` performs the system back gesture (a swipe in from the left edge).
 - **Typing.** ASCII goes through the HID keyboard. Anything else (accents, emoji, other scripts)
   is placed on the simulator pasteboard and pasted, so `input-and-analyze` accepts any text.
-- **Connecting.** With no `--serial`, the single booted simulator is used; several booted ones
-  need `--serial`. Naming a shut-down simulator boots it first (`boot_timeout_s`).
+- **Connecting.** `session start` chooses a free booted simulator and retains its lease for
+  later calls; omit `--serial`. An explicit UDID/unique name can select an existing simulator;
+  naming a shut-down simulator boots it first (`boot_timeout_s`).
 - **Apps.** `aua install <Build.app>` installs an `iphonesimulator` `.app` bundle (not an
   `.ipa`); `aua app launch|stop|clear|grant|exists` map to `simctl launch|terminate|…`.
   `aua app launch <bundle> --arg --uitesting --arg --feature-flag-x:on` hands the app its

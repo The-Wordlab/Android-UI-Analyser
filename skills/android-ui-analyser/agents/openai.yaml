@@ -1,4 +1,6 @@
 interface:
-  display_name: "Android UI Analyser"
-  short_description: "Drive and verify Android apps with semantic UI evidence"
-  default_prompt: "Use $android-ui-analyser to verify the requested Android behavior efficiently."
+  display_name: "AUA — Android, iOS and web"
+  short_description: "Test Android, iOS simulator and web UIs with AUA"
+  default_prompt: "Use $android-ui-analyser to verify the requested UI behavior on the correct platform."
+policy:
+  allow_implicit_invocation: true

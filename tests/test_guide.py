@@ -318,8 +318,29 @@ def test_skill_frontmatter_has_name_and_trigger_description() -> None:
 
     meta = yaml.safe_load(front)
     assert meta["name"] == "android-ui-analyser"
-    assert "android" in meta["description"].lower()  # trigger description preserved
-    assert "mcp" in meta["description"].lower()
+    description = meta["description"].lower()
+    for trigger in ("android", "ios simulator", "websites", "web apps", "electron", "mcp"):
+        assert trigger in description
+    assert "not for general web research or backend-only tests" in description
+    assert "explicitly requested tool" in description
+
+
+def test_skill_routes_platforms_before_session_start_without_promising_ios_parity() -> None:
+    skill = guide.render_skill_markdown()
+    assert skill.index("## Select the platform first") < skill.index("## Operating loop")
+    assert "before every subcommand" in skill
+    assert "`session_start` cannot switch" in skill
+    ios = skill.split("- iOS:", 1)[1].split("- Web:", 1)[0]
+    assert "booted simulator" in ios and "--no-provision-target" in ios
+    assert "No physical iPhones, automatic" in ios
+    assert "leaving the simulator booted" in ios
+    web = skill.split("- Web:", 1)[1].split("## Operating loop", 1)[0]
+    assert "platforms.web.url" in web and "omit `device.serial`" in web
+    assert "existing-chrome" in web and "existing-cdp" in web
+    assert "meta.browser_diagnostics" in web and "exclusive" in web
+    assert "--tool-profile web" in web
+    assert "platforms.web.headless: false" in web
+    assert "extension only" in web and "no browser download" in web
 
 
 def test_compact_skill_works_with_plugin_mcp_without_a_global_cli() -> None:
@@ -353,6 +374,17 @@ def test_codex_metadata_and_bundle_share_the_canonical_skill(tmp_path: Path) -> 
     metadata = (root / "agents" / "openai.yaml").read_text(encoding="utf-8")
     assert metadata == guide.render_codex_agent_metadata()
     assert "$android-ui-analyser" in metadata
+    import yaml
+
+    parsed = yaml.safe_load(metadata)
+    assert parsed["policy"]["allow_implicit_invocation"] is True
+    interface = parsed["interface"]
+    for platform in ("Android", "iOS", "web"):
+        assert platform in interface["display_name"]
+        assert platform in interface["short_description"]
+    assert 25 <= len(interface["short_description"]) <= 64
+    committed = Path(__file__).resolve().parents[1] / "skills/android-ui-analyser/agents/openai.yaml"
+    assert committed.read_text() == metadata
 
 
 # --------------------------------------------------------------------------- CLI
