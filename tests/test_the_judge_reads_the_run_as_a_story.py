@@ -153,8 +153,20 @@ def test_a_force_stop_aua_reported_is_told_even_when_its_screen_is_not_shown() -
                   "app_stopped": True}
     story = judge_story(FRAMES, actions)
     told = [entry["action"] for entry in story] + [
-        missing["action"] for entry in story for missing in entry.get("steps_not_shown", [])]
+        stop["action"] for entry in story for stop in entry.get("app_force_stopped", [])]
     assert "force-stop the app -- AUA reported it force-stopped the app" in told
+
+
+def test_a_force_stop_with_no_screen_is_evidence_not_a_step_not_shown() -> None:
+    # The judge is told to refuse a criterion bound to a step not shown, and a force-stop never has
+    # a screen: on 2026-09-29 that refused a real cold restart.
+    actions = [dict(action) for action in ACTIONS]
+    actions[2] = {"step": actions[2]["step"], "tool": "app_force_stop", "arguments": {},
+                  "app_stopped": True}
+    story = judge_story([FRAMES[0], FRAMES[1], FRAMES[5]], actions)
+    assert story[2]["app_force_stopped"] == [
+        {"step": actions[2]["step"], "action": "force-stop the app -- AUA reported it force-stopped the app"}]
+    assert all(item["step"] != actions[2]["step"] for item in story[2].get("steps_not_shown", []))
 
 
 def test_a_press_that_was_never_sent_says_so() -> None:

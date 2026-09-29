@@ -36,6 +36,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The judge's journey reports a force-stop under `app_force_stopped` on the entry after it, as
+  evidence, instead of among `steps_not_shown`. A force-stop never has a screen, and the judge is
+  told to refuse any criterion bound to a step not shown, so a real cold restart was refused.
 - A bounded UI read that fails with uiautomator's `StaleObjectException` is read again while the
   wait's budget lasts, instead of once. The exception reports only that the tree changed under the
   dump, which a streaming chat reply does for seconds, and two such reads in a row used to fail a

@@ -1294,10 +1294,18 @@ def judge_story(frames: Sequence[Any], actions: Sequence[dict[str, Any]] = ()) -
         # An action whose screen was left out is still named, so the judge knows what was
         # attempted and that no screen for it is in evidence. Its label resolves against the
         # last shown screen when the id came from there, else against what AUA resolved.
+        between = [item for item in steps if previous_step < item < upper]
         missing = [{"step": item, "action": _story_action(by_step[item], None, previous)}
-                   for item in steps if previous_step < item < upper]
+                   for item in between if not by_step[item].get("app_stopped")]
         if missing:
             entry["steps_not_shown"] = missing
+        # A force-stop never has a screen of its own. Listed with the steps not shown, it read as
+        # unproven, and the judge was told to refuse any criterion bound to such a step, so a real
+        # cold restart was refused on 2026-09-29. AUA's report of the stop is its evidence.
+        stopped = [{"step": item, "action": _story_action(by_step[item], None, previous)}
+                   for item in between if by_step[item].get("app_stopped")]
+        if stopped:
+            entry["app_force_stopped"] = stopped
         fingerprint = frame_fingerprint(frame)
         if previous is not None and fingerprint and fingerprint == frame_fingerprint(previous):
             entry["changed"] = False
@@ -1403,7 +1411,10 @@ async def judge_outcome(
             "identical to the previous entry. `loading: true` means it was captured mid-transition. "
             "`steps_not_shown` names actions whose resulting screens were captured but are not in "
             "this story, so nothing about them is in evidence, except what their `action` itself "
-            "reports AUA did. `app_restarted: true` means AUA stopped or launched the app between "
+            "reports AUA did. `app_force_stopped` names force-stops AUA performed between the previous "
+            "entry and this one: a force-stop has no screen of its own, so AUA's report is its "
+            "evidence, and a criterion bound to it is judged from the entry after it. "
+            "`app_restarted: true` means AUA stopped or launched the app between "
             "the previous entry and this one. `rendered` is AUA's measure of that entry's screenshot: "
             "mean luminance from 0 (black) to 1 (white) and whether the screen reads as dark or "
             "light; it answers whether a screen rendered dark or light when no image of it is "
