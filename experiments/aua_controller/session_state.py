@@ -79,13 +79,17 @@ def _observation_frame(value: Any, *, allow_loading: bool) -> dict | None:
                        and isinstance(contract, dict) and isinstance(meta, dict)
                        and isinstance(meta.get("fingerprint"), str) and meta["fingerprint"].strip()
                        and contract.get("fingerprint") == meta["fingerprint"])
+        # An app launch reports its arrival beside the observation, not in its meta; the
+        # observation contract reads it from there first, and so does this.
+        arrival = item.get("arrival") if isinstance(item.get("arrival"), dict) else {}
+        arrival_state = (arrival.get("state") or meta.get("arrival_state")) if own_capture else None
         # A capture whose stability confirmation timed out (an animated feed) is, like a
         # loading one, proof of what was on screen at that instant and of nothing settled.
-        if own_capture and meta.get("arrival_state") in {"loading", "transitioning"}:
+        if arrival_state in {"loading", "transitioning"}:
             loading_capture = True
         # A press that changed nothing is not reusable for acting, but what it shows is real:
         # the dialog still open after Save on an empty name is the proof Save is disabled.
-        no_effect_capture = own_capture and meta.get("arrival_state") in {"unconfirmed", "no_change"}
+        no_effect_capture = arrival_state in {"unconfirmed", "no_change"}
         if ((item.get("stale_risk") is True and not loading_capture)
                 or item.get("stale") is True or item.get("fresh") is False
                 or item.get("observation_present") is False

@@ -96,6 +96,20 @@ def test_a_press_that_changed_nothing_is_still_evidence_of_what_was_on_screen(tm
     assert s.context()["current_observation"] is None
 
 
+def test_a_relaunch_whose_arrival_is_reported_beside_the_observation_is_still_evidence():
+    """Live, a cold relaunch showed the thread list with the renamed title, the one proof the
+    rename survived a restart. The launch reported `arrival: {state: unconfirmed}` beside the
+    observation rather than in its meta, so the frame was dropped and the judge was told the
+    relaunch step was not shown."""
+    raw = no_effect_capture()
+    del raw["observation"]["meta"]["arrival_state"]
+    raw["arrival"] = {"state": "unconfirmed", "evidence": ["shell_only_tree"]}
+    assert judgement_observation_frame(raw) == raw["observation"]
+    assert observation_frame(raw) is None
+    raw["arrival"]["state"] = "ready"
+    assert judgement_observation_frame(raw) is None
+
+
 @pytest.mark.parametrize("mutation", [
     lambda r: r.update(stale=True),
     lambda r: r["observation"]["meta"].update(stale_risk=True),

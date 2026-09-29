@@ -36,6 +36,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The judge reads an app relaunch's screen when the launch reports its arrival as unconfirmed.
+  A launch puts that state beside its observation rather than in the observation's meta, so the
+  frame was dropped: a thread list showing the renamed title after a cold restart reached the
+  judge as a step it could not see, and the rename's persistence went unverified.
 - A handle that matched nothing names the one on-screen handle it differs from only in its last
   characters, as a likely mis-copy, and presses nothing. A model repeated its own garbled copy of a
   text field's handle five times while every observation showed the real one.
