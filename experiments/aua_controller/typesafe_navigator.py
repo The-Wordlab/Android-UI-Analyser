@@ -70,18 +70,6 @@ from experiments.aua_controller.typesafe_cost import USD_PER_INPUT_TOKEN, client
 
 MODEL = "jev-latest"
 MIN_CONFIDENCE = 0.85  # measured; see the module docstring -- the threshold is not the lever
-#: A near miss under the gate buys one wait and a fresh read, not a retry. The same request
-#: replayed eight times scored 0.66-0.78 and never crossed 0.80; the screen read again after a
-#: wait scored 0.85 eight times out of eight -- the first frame was the login page still
-#: finishing. Below this floor the chat model takes the step at once.
-SECOND_LOOK_FLOOR = 0.60
-#: A pick whose own probability clears the gate is taken when its confidence is at least this,
-#: although that confidence sits under the gate. Jev reports both numbers: over 399 saved answers
-#: the confidence ran a median 0.03 under the top probability and never more than 0.07, so a
-#: probability over the gate is the same judgement in the model's other voice. Measured on 112
-#: aligned steps, the picks this admits were three for three right (0.79/0.82, 0.79/0.81,
-#: 0.77/0.80); each had cost a wait, a re-ask and a chat-model call for the very press it named.
-PROBABILITY_GATE_FLOOR = 0.60
 #: A ceiling on the journey, not a documented API limit -- the SDK publishes none. It exists
 #: because this model is documented to lose accuracy as the state fills with material that is not
 #: about the decision, and a run's journey grows every step.
@@ -467,7 +455,6 @@ class TypeSafeNavigator:
         tools: Sequence[str] = (),
         model: str = MODEL,
         min_confidence: float = MIN_CONFIDENCE,
-        second_look_floor: float | None = None,
         action_space: str = "taps",
         shadow: bool = False,
         timeout_s: float = 10.0,
@@ -477,11 +464,6 @@ class TypeSafeNavigator:
             raise ValueError("min_confidence must sit in (0, 1]")
         if action_space not in ACTION_SPACES:
             raise ValueError(f"action_space must be one of {ACTION_SPACES}")
-        if second_look_floor is None:
-            # The default floor follows a gate set under it; an explicit one above the gate is a mistake.
-            second_look_floor = min(SECOND_LOOK_FLOOR, min_confidence)
-        if not 0 <= second_look_floor <= min_confidence:
-            raise ValueError("second_look_floor must sit in [0, min_confidence]")
         if client is None:
             from typesafe_sdk import AsyncTypeSafeClient
 
@@ -494,7 +476,6 @@ class TypeSafeNavigator:
         self.step_index = 0
         self.model = model
         self.min_confidence = min_confidence
-        self.second_look_floor = second_look_floor
         self.action_space = action_space
         self.shadow = shadow
         self.timeout_s = timeout_s
@@ -520,7 +501,6 @@ class TypeSafeNavigator:
         # live as a 20-step loop. A screen mid-load re-fingerprints on every frame, so a wait is
         # keyed on the activity instead, or waiting would never be bounded at all.
         self._seen: set[tuple[str, str]] = set()
-        self._second_looks: set[str] = set()
         self._acted = False
         self._previous_screen = ""
         # One number per screen this navigator was shown; every ask about that screen carries it,
@@ -732,22 +712,7 @@ class TypeSafeNavigator:
         tool, arguments, operand, label = plan
         record["tool"] = tool
         record["operand"] = operand
-        passes = self._gate(move, record)
-        gate, probability = record["gate"], record["probability"]
-        if not passes:
-            look_key = self._last_activity or str(fingerprint)
-            if (gate >= self.second_look_floor and WAIT_TOOL in self.offered
-                    and look_key not in self._second_looks):
-                # One more look, not one more ask: the same screen re-asked gives the same
-                # number, a screen read again after a wait may not be the same screen.
-                self._second_looks.add(look_key)
-                record["second_look"] = True
-                self._decline("second_look")
-                settle(False, "below_confidence")
-                self._pending["you_chose"] = TOOL_WORDS[WAIT_TOOL]
-                return {"tool": WAIT_TOOL, "arguments": {"idle": True},
-                        "reason": (f'System One second look: {record["kind"]} at {gate:.2f} is under '
-                                   f"{self.min_confidence:.2f}; waiting for the screen once before asking again")}
+        if not self._gate(move, record):
             self._decline("below_confidence")
             settle(False, "below_confidence")
             return None
@@ -768,9 +733,8 @@ class TypeSafeNavigator:
         if screen_key is not None:
             self._seen.add(pair)
         self._pending["you_chose"] = f"{tool} on '{label}'"
-        voice = f" (probability {probability:.2f})" if record.get("accepted_by") == "probability" else ""
         return {"tool": tool, "arguments": arguments,
-                "reason": f'System One {record["kind"]} at confidence {gate:.2f}{voice}: {label}'}
+                "reason": f'System One {record["kind"]} at confidence {record["gate"]:.2f}: {label}'}
 
     def _state(self, compact: Mapping[str, Any]) -> dict[str, Any]:
         """What the model reads: the current step, the script around it, the journey, the screen."""
@@ -840,23 +804,10 @@ class TypeSafeNavigator:
         return turn, response.answers
 
     def _gate(self, move, record: dict[str, Any]) -> bool:
-        """Does this one answer clear the gate? Writes the numbers it judged into the record.
-
-        One question, one answer, one number -- `min()` of two confidences about different
-        things was never a statement about this decision. A pick under the gate still passes
-        when its own probability clears it (see PROBABILITY_GATE_FLOOR).
-        """
-        gate = move.confidence
-        probability = float((getattr(move, "probabilities", None) or {}).get(str(move.choice), 0.0) or 0.0)
-        record["gate"] = round(gate, 4)
+        """Does this one answer clear the gate? Writes the number it judged into the record."""
+        record["gate"] = round(move.confidence, 4)
         record["gate_needed"] = self.min_confidence
-        record["probability"] = round(probability, 4)
-        if gate >= self.min_confidence:
-            return True
-        if gate >= PROBABILITY_GATE_FLOOR and probability >= self.min_confidence:
-            record["accepted_by"] = "probability"
-            return True
-        return False
+        return move.confidence >= self.min_confidence
 
     def _plan(self, move, by_index):
         """Bind the one chosen move to an offered tool, or say why it cannot be.
@@ -948,7 +899,7 @@ class TypeSafeNavigator:
         return {
             "engine": "typesafe_system_one", "model": self.model, "shadow": self.shadow,
             "action_space": self.action_space,
-            "min_confidence": self.min_confidence, "second_look_floor": self.second_look_floor,
+            "min_confidence": self.min_confidence,
             "requests": self.requests,
             "input_tokens": self.input_tokens, "usd": round(self.usd, 8),
             "transcript": str(self.transcript_path) if self.transcript_path else None,

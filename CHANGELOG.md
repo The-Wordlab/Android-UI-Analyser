@@ -346,6 +346,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Changed
 
+- Jev hands a near miss straight to the chat model instead of spending a wait on a second look,
+  and a pick under the gate is no longer rescued by its own probability. Over 51 QA runs the
+  second look cleared the gate 9 times in 33, and every one of them added a device step and a
+  frame the judge had to read; the rescue was a second threshold on the same judgement.
+
 - `docs/ios.md` says that element bounds are accessibility frames, which a rim or artwork
   running past the view's edge widens by a few points, and what to measure instead for a
   pixel-exact layout check.

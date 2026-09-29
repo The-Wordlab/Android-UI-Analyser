@@ -909,71 +909,6 @@ def test_a_status_bar_item_with_a_checked_field_is_not_a_switch() -> None:
     assert options["el:dark"].endswith("[switch is ON]")
 
 
-class SequenceClient(FakeClient):
-    """Answers a fixed sequence of (choice, confidence) pairs, one per call."""
-
-    def __init__(self, answers):
-        super().__init__()
-        self.answers = list(answers)
-
-    async def system_one(self, *, state, questions, model, timeout=None):
-        self.calls += 1
-        choice, confidence = self.answers.pop(0)
-        return SimpleNamespace(answers={"move": SimpleNamespace(choice=choice, confidence=confidence)},
-                               usage=SimpleNamespace(input_tokens=400))
-
-
-LOOK_TOOLS = [TAP_TOOL, "wait_and_analyze", "session_finish"]
-
-
-def test_a_near_miss_gets_one_more_look_before_the_chat_model() -> None:
-    """Replayed eight times, the same screen scored 0.66-0.78 and never crossed the gate; a fresh
-    read after a wait scored 0.85 every time. So a near miss buys one wait, not a retry."""
-    client = SequenceClient([("achieved", 0.72), ("achieved", 0.72), ("achieved", 0.72)])
-    navigator = TypeSafeNavigator("Look at the landing screen", client=client, tools=LOOK_TOOLS,
-                                  action_space="full", min_confidence=0.80)
-
-    first = asyncio.run(navigator(SCREEN))
-    assert first["tool"] == "wait_and_analyze" and first["arguments"] == {"idle": True}
-    assert "second look" in first["reason"] and "0.72" in first["reason"]
-    assert navigator.proposals[-1]["second_look"] is True and navigator.proposals[-1]["accepted"] is False
-
-    second = asyncio.run(navigator(SCREEN))
-    assert second is None, "the same near miss on the same screen is handed to the chat model"
-    third = asyncio.run(navigator(SCREEN))
-    assert third is None, "one more look means one"
-    assert navigator.declined == {"second_look": 1, "below_confidence": 2}
-
-
-def test_a_confident_answer_after_the_second_look_is_taken() -> None:
-    client = SequenceClient([("achieved", 0.7), ("achieved", 0.9)])
-    navigator = TypeSafeNavigator("Look at the landing screen", client=client, tools=LOOK_TOOLS,
-                                  action_space="full", min_confidence=0.80)
-    assert asyncio.run(navigator(SCREEN))["tool"] == "wait_and_analyze"
-    assert asyncio.run(navigator(SCREEN))["tool"] == "session_finish"
-
-
-def test_a_clear_miss_is_handed_over_at_once() -> None:
-    client = SequenceClient([("achieved", 0.55)])
-    navigator = TypeSafeNavigator("Look at the landing screen", client=client, tools=LOOK_TOOLS,
-                                  action_space="full", min_confidence=0.80)
-    assert asyncio.run(navigator(SCREEN)) is None
-    assert navigator.declined == {"below_confidence": 1}
-
-
-def test_a_near_miss_without_a_wait_tool_is_handed_over() -> None:
-    client = SequenceClient([("1", 0.7)])
-    navigator = TypeSafeNavigator("Open notification settings", client=client, tools=[TAP_TOOL],
-                                  min_confidence=0.80)
-    assert asyncio.run(navigator(SCREEN)) is None
-    assert navigator.declined == {"below_confidence": 1}
-
-
-def test_the_second_look_floor_must_sit_under_the_gate() -> None:
-    with pytest.raises(ValueError):
-        TypeSafeNavigator("g", client=FakeClient(), min_confidence=0.8, second_look_floor=0.9)
-
-
 def test_a_text_field_is_named_as_one_in_the_menu_and_in_the_state() -> None:
     # Live shape: the goal said "tap the composer and type"; the only place the word "composer"
     # appeared on screen was the resource id of the attachments button beside the field, and the
@@ -997,32 +932,6 @@ def test_a_text_field_is_named_as_one_in_the_menu_and_in_the_state() -> None:
     assert "1" not in criteria, "one field, one door: the tap line would only split the vote"
     assert criteria["type"] == "Type text into the text field 'Ask me anything'"
     assert criteria["2"] == "Press 'buttonOpenComposerAttachments'"
-
-
-def test_a_pick_whose_probability_clears_the_gate_is_taken_at_a_lower_confidence() -> None:
-    # Live: the right control at confidence 0.79, probability 0.81, gate 0.80. The near miss bought
-    # a wait, a re-ask at 0.75, another at 0.76 and then a chat-model call for the same press.
-    # Jev reports both numbers; confidence runs a median 0.03 under the top probability and
-    # never more than 0.07 over 399 saved answers, so a probability over the gate is the same
-    # statement in the model's other voice.
-    action, navigator = propose(FakeClient(target_conf=0.79, probability=0.81), min_confidence=0.80)
-    assert action == {"tool": TAP_TOOL, "arguments": {"id": "el:aaa"}, "reason": action["reason"]}
-    assert "probability 0.81" in action["reason"]
-    assert navigator.report()["accepted"] == 1
-
-
-def test_the_probability_clause_keeps_a_confidence_floor() -> None:
-    # A probability alone is not enough: under 0.60 confidence the model is saying it is unsure
-    # whatever the distribution looks like, and unsure presses were the measured wrong ones.
-    action, navigator = propose(FakeClient(target_conf=0.59, probability=0.90), min_confidence=0.80)
-    assert action is None
-    assert navigator.report()["declined"] == {"below_confidence": 1}
-
-
-def test_a_probability_under_the_gate_does_not_rescue_a_near_miss() -> None:
-    action, navigator = propose(FakeClient(target_conf=0.79, probability=0.79), min_confidence=0.80)
-    assert action is None
-    assert navigator.report()["declined"] == {"below_confidence": 1}
 
 
 # ---------------------------------------------------------------- phases: one step of the script at a time
