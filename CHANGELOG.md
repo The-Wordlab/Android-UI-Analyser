@@ -36,6 +36,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The judge's screenshots keep the before and after of a tap that retitles its own screen. Choosing
+  Spanish translated the language screen's title, so the English and Spanish lists read as two
+  screens and the changed pair was never formed; whether the judge saw which language was marked
+  depended on where the even spread happened to land. Frames with the same set of control ids now
+  count as one screen for that pair.
 - The judge reads an app relaunch's screen when the launch reports its arrival as unconfirmed.
   A launch puts that state beside its observation rather than in the observation's meta, so the
   frame was dropped: a thread list showing the renamed title after a cold restart reached the

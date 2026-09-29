@@ -151,6 +151,29 @@ def test_image_selection_keeps_changed_pair_and_deduplicates_final_and_near_copi
                for item in picked) == 1
 
 
+def test_a_tap_that_retitles_its_own_screen_keeps_its_before_and_after_images(tmp_path):
+    """Live, choosing Spanish translated the language screen's title, so the English list and the
+    Spanish list read as two different screens. The spread then attached neither the list before
+    the choice nor the list after it, and the judge could not see which language was marked."""
+    def screen(title, *rows, ids=False):
+        return [{"text": title}] + [{"text": row, "clickable": True,
+                                     **({"resource_id": f"option_{i}"} if ids else {})}
+                                    for i, row in enumerate(rows)]
+    journey = [screen("Chats", "New chat"), screen("Settings", "App language"),
+               screen("App language", "English", "Spanish", "French", ids=True),
+               screen("Idioma de la aplicación", "Inglés", "Español", "Francés", ids=True),
+               screen("Ajustes", "Idioma de la aplicación"), screen("Chats", "Nuevo chat"),
+               screen("Chats", "Nuevo chat", "Ver más"), screen("Ajustes", "Idioma", "Tema"),
+               screen("Idioma de la aplicación", "Atrás", "Inglés", "Español", "Francés")]
+    frames = [{"observation": {"screen": {"width": 360, "height": 640},
+                               "meta": {"fingerprint": f"f{step}"}, "elements": elements},
+               "_judge_evidence": {"after_step": step, "ref": f"E{step}", "sequence": step}}
+              for step, elements in enumerate(journey)]
+    picked = judge_image_frames(frames[:-1], frames[-1], _render_test_frames(tmp_path, frames), limit=5)
+    assert frames[2] in picked and frames[3] in picked
+    assert picked[-1] is frames[-1]
+
+
 def test_sparse_or_absent_observation_payloads_are_safe():
     frames = [{"observation": None}, _state_frame("Preferences", "A", "a"), {}]
     assert judged_frame_sample(frames, 13) == frames[:-1]

@@ -411,6 +411,13 @@ def _frame_traits(frame: Any) -> tuple[str, str, str]:
     return family, state, json.dumps(selection, sort_keys=True) if selection else ""
 
 
+def _resource_ids(frame: Any) -> frozenset[str]:
+    compact = evidence_frame(frame)
+    observation = (compact.get("observation") or compact) if isinstance(compact, dict) else {}
+    return frozenset(str(item["resource_id"]) for item in observation.get("elements", [])
+                     if item.get("resource_id"))
+
+
 def annotate_judge_frames(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """Preserve host journal position, especially across restarts, without action arguments."""
     epoch = 0
@@ -718,10 +725,15 @@ def judge_image_frames(frames: Sequence[Any], final: Any, index: Mapping[str, st
             selected.update(checkpoint_indexes)
             break
     if slots - len(selected) >= 2:
+        # A tap can retitle its own screen: choosing a language translates it. The same set of
+        # control ids still names one screen, so its before and after remain a changed pair.
+        controls = [_resource_ids(frame) for frame in candidates]
         for right in range(1, len(candidates)):
             for left in range(right):
                 a, b = traits[left], traits[right]
-                if a[0] and a[0] == b[0] and a[1] != b[1]:
+                same_screen = (a[0] and a[0] == b[0]) or (
+                    len(controls[left]) >= 3 and controls[left] == controls[right])
+                if same_screen and a[1] != b[1]:
                     selection_change = bool(a[2] and b[2] and a[2] != b[2])
                     pairs.append((int(selection_change), -(right - left), -left, left, right))
         if pairs:
