@@ -36,6 +36,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The real-app controller is told that a check showing something other than what the goal expects
+  is a result to report with `achieved`, and that `blocked` is only for a step it cannot do. A
+  persistence row saw its pin gone after a relaunch and finished `blocked`, and a blocked claim
+  cannot establish a failure, so a reproduced product defect could not be confirmed.
 - A wait the controller asked to last longer than AUA's ceiling now tells it, in `warnings`, how
   much of the requested wait is left and that calling again continues the same wait. AUA's own
   note saying the wait was capped never reached the model, so a run told to "wait once, at most

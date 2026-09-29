@@ -142,6 +142,9 @@ once with outcome "achieved" and a one-line note; do not spend steps collecting 
 If a login wall, permission prompt, network failure or missing precondition stops you, call
 session_finish with outcome "blocked" and say what blocked you. If the app cannot do what is
 asked, use "not_achievable". A separate reviewer verifies your claim from the screens.
+A check that shows something other than what the goal expects is a result, not a blocker: do
+every step you still can, then finish with "achieved" and say what you saw. Use "blocked" only
+when something stops you from doing a step.
 """
 CONTRACT_SYSTEM = """
 This run adds expect_and_analyze to the compact-v1 subset: the note above about expect being

@@ -42,6 +42,12 @@ class TestTheToolToProveIt:
         """One more tool is one more way to spend a step on a run that has no checkpoints."""
         assert CONTRACT_TOOL not in _names(realapp_tools(SCHEMAS))
 
+    def test_a_check_that_came_out_differently_is_reported_not_called_a_blocker(self) -> None:
+        """A persistence row saw its pin gone after a relaunch and finished `blocked`; a blocked
+        claim cannot establish a failure, so the observed pin loss could not be confirmed."""
+        assert "is a result, not a blocker" in REALAPP_SYSTEM
+        assert 'Use "blocked" only\nwhen something stops you from doing a step.' in REALAPP_SYSTEM
+
     def test_the_instructions_differ_because_the_authority_differs(self) -> None:
         assert "you decide when the goal is met" in REALAPP_SYSTEM
         assert "you are not the one who decides it is met" in CONTRACT_SYSTEM
