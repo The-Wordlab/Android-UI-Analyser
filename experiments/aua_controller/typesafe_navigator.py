@@ -1,56 +1,40 @@
 """A System One navigator: it answers the steps it is sure of and declines the rest.
 
 The controller asks a chat model for the next tool call, which is the dominant call count of a
-run: tens of requests against the judge's two. Most of them decide something narrow — which of
-the controls on this screen moves toward the goal — and that is a Choice over controls the
-harness already enumerates. This plugs into ``run_agent``'s ``host_next`` seam, so returning
-``None`` simply hands the step back to the chat model and nothing else changes.
+run. Most of those calls decide something narrow -- which control on this screen moves the goal
+on -- and that is a Choice over controls the harness already enumerates. This plugs into
+``run_agent``'s ``host_next`` seam, so returning ``None`` hands the step back to the chat model
+and nothing else changes.
 
-It declines far more than it answers, on purpose, and two of those refusals are structural
-rather than tuned:
+**Three narrow questions about the whole brief, in one request.** ``operation`` asks what kind of
+move comes next, ``target`` which control a press would be on, and ``text`` which of the brief's
+own quoted texts a typing move would type. This is the shape TypeSafe's docs and the public Jev
+browser harness use: one narrow judgment per question, only the operations this screen allows,
+and the operand questions asked speculatively beside the operation because a System One request
+prices the state once.
 
-* **No text.** A System One model generates nothing, so a step needing a typed string is not one
-  it can answer even in principle. The public browser harnesses call a small generative model at
-  exactly this point.
-* **It never ends a run.** ``blocked`` is offered so a stuck run has somewhere to put the truth,
-  but acting on it is refused: the worst measured confusions were about stopping, and ending a
-  run early corrupts the verdict rather than costing a step.
+The earlier shape asked one merged question -- every control plus ten boundary moves -- about one
+step of the brief, tracked by a pointer. Replayed over 378 real screens from a QA group, both
+halves of that were the cause of the hand-overs, not the gate:
 
-**One question, and the gate measured against it.** A press is not an action plus a separate
-operand -- each pressable control *is* an action, listed beside the actions that operate on
-nothing. The earlier shape asked "what kind of move" and "which control" as two independent
-questions, because the API has no question conditional on another answer, so the model named a
-control even when it chose to wait and the gate was the minimum of two confidences about
-different things. Measured over 60 real screens three times, the merged form is steadier (median
-confidence 0.54-0.55 against 0.47-0.48) and acts on the same taps at the same accuracy. It is not
-faster. It is one question with one answer and nothing discarded.
+* On screens the chat model took, the merged question's top pick was "this step is done" 41% of
+  the time and "back" 25%: boundary moves absorbed the probability whenever the screen did not
+  match the step's words.
+* The pointer was often on the wrong step. Of 90 chat-model presses on a listed control, the step
+  Jev had been shown named that control 17 times; 40 named it nowhere and 33 in another step.
 
-200 steps replayed out of verified-pass runs of a real app, scored against what the run did next
--- a floor on correctness, not correctness: a different tap is not a wrong tap, and the chat model
-itself takes recoverable detours. Only a tap is ever acted on in the default space. Three samples,
-the spread shown where they differ:
+Asked only which control, with the whole brief, the same 90 presses were matched 83% of the time
+instead of 53%. On scenarios held out from every choice made here, the three-question form acts
+on 58% of screens where the merged form acted on 21%. It agrees with what the run did on 73% of
+them, and most of the rest are the same move made another way: a back gesture where the run
+pressed the on-screen back arrow.
 
-====  ==============  ===========================
-gate  steps acted on  same control the run tapped
-====  ==============  ===========================
-0.00       106 (53%)                    ~49%
-0.70        33 (16%)                    ~76%
-0.80        28 (14%)                     79%
-0.85        26 (13%)                    ~83%
-0.90        19  (9%)                    ~93%
-====  ==============  ===========================
+It still declines on purpose, and two refusals are structural rather than tuned:
 
-Every row of that table moved when the journey started quoting screens instead of counting
-controls: at 0.85 it was 19 steps at 74%, and is now 26 at 83% -- more coverage *and* more
-accuracy, which is not a trade. Once a brief is read one step at a time, quoting *every* earlier
-screen stopped paying: replayed on 24 saved asks, a journey of choices plus only the screen the
-last choice was made on (``previous_screen``) matched it (8 vs 7 asks at 0.80 or more) on 23%
-fewer tokens.
-
-0.85 stays the default. 0.90 is now a real alternative for the first time -- it was within noise
-of 0.85 under the old journey and is worth about ten points of fidelity under this one, for a
-third fewer steps. Naming a control is still where the accuracy goes: 49% of presses match the
-run when nothing is gated at all.
+* **No free text.** A System One model generates nothing. It types only a text the brief itself
+  quotes after "type exactly", chosen among those quotes; anything else goes to the chat model.
+* **It never ends a run.** ``finished`` and ``other`` are offered so the truth has somewhere to
+  go, and both hand the step back: the worst measured confusions were about stopping.
 
 A proposal is an opinion with no authority beyond the tools it was offered. ``shadow`` records
 what it would have done and returns ``None`` every time, which is how a run proves the gate on
@@ -69,7 +53,7 @@ from typing import Any
 from experiments.aua_controller.typesafe_cost import USD_PER_INPUT_TOKEN, client_options
 
 MODEL = "jev-latest"
-MIN_CONFIDENCE = 0.85  # measured; see the module docstring -- the threshold is not the lever
+MIN_CONFIDENCE = 0.85  # applied to the operation and to the operand it acts on
 #: A ceiling on the journey, not a documented API limit -- the SDK publishes none. It exists
 #: because this model is documented to lose accuracy as the state fills with material that is not
 #: about the decision, and a run's journey grows every step.
@@ -78,67 +62,31 @@ MAX_OPTIONS = 60  # a Choice takes up to 255 options; a screen offering more is 
 TAP_TOOL = "tap_and_analyze"
 SCROLL_TOOL = "scroll_and_analyze"
 BACK_TOOL = "back_gesture_and_analyze"
-FINISH_TOOL = "session_finish"
 WAIT_TOOL = "wait_and_analyze"
 INPUT_TOOL = "input_and_analyze"
-# "type exactly `Hi!`": text the author wrote into the step, so it is no secret and needs no model.
+# "type exactly `Hi!`": text the author wrote into the brief, so it is no secret and needs no model.
 EXACT_TEXT = re.compile(r"\btype\s+exactly\s+`([^`\n]{1,200})`", re.IGNORECASE)
-#: A step that tells the run to do something, rather than to look. Such a step is over only once
-#: something was done on it: asked "is this step done?" on the screen before the tap, the model
-#: said yes to "tap `Images` again" at 0.89 and to "type exactly `Before the wait`" at 0.97,
-#: the steps were never taken, and both runs finished with a contract bullet unobserved.
-ACTION_STEP = re.compile(r"^\s*(?:then\s+)?(?:tap|long-press|double-tap|type|scroll|swipe|press|"
-                         r"force-close|relaunch|open|close|select|clear|send|paste|copy)\b", re.IGNORECASE)
-#: Every tool a navigator answer can become. A step that names any other tool asks for an action
-#: this navigator has no way to take.
-NAVIGATOR_TOOLS = frozenset({TAP_TOOL, SCROLL_TOOL, BACK_TOOL, FINISH_TOOL, WAIT_TOOL})
 
-# Widened action space, after reading how public Jev browser agents are built
-# (browser-use/jev-ultrafast): one call returns the operation and every operand it might need, and
-# the harness acts on whichever operand the chosen operation names. The extra questions ride the
-# same state for free, because a System One request prices the state once and the answers in
-# parallel. `type` is still refused here for the same reason their harness hands it to a small
-# LLM: a non-generative model cannot write the string.
-#: The harness's finish outcomes, word for word what `session_finish` accepts. They used to be a
-#: second question beside the move, and on a step in the middle of a run none of them is true,
-#: so that question had to offer `in_progress` -- which then vetoed a confident `done`. Over a
-#: 27-row run it vetoed 17 times: the 10 premature ones were already under the gate, and the 2
-#: right ones above it were lost (an observe-only row, 13s of chat-model time to say nothing).
-#: Finishing is now a move like any other, so a mid-run step simply picks a press or a scroll and
-#: nothing is asked about a run that has not stopped.
-FINISH_OUTCOMES: dict[str, str] = {
-    "achieved": "The goal was carried out during this run",
-    "already_satisfied": "No step was ever needed; it was true before the run began",
-    "blocked": "Something outside the goal stops it being carried out",
-    "not_achievable": "This app cannot do what the goal asks",
-}
 ACTION_SPACES = ("taps", "full")
 
-# Offered so the model can say "none of these", which is what a low-confidence tap looks like
-# before it is thrown away. `wait` and `blocked` are never acted on and exist only to be chosen:
-# jev-1.13 is documented as literal and answers the question as written, so a screen that is
-# still loading, or a run that is stuck, had nowhere to go but an outright wrong tap. The public
-# browser harnesses carry WAIT and BLOCKED in their action space for the same reason. Giving a
-# boundary case its own option is the doc's own advice, and it costs nothing: both decline.
-ACTION_KINDS: dict[str, str] = {
-    "tap": "Press a control that is visible on this screen now",
+#: Every operation, one meaning each. Only the ones this screen and action space allow are
+#: offered: a scroll on a screen with nothing to scroll is an option that can only be wrong.
+#: `finished` and `other` exist to be chosen and declined -- jev-1.13 answers the question as
+#: written, so a screen whose true move is a long-press had nowhere to go but a confident wrong
+#: press, and a finished run nowhere but another tap.
+OPERATIONS: dict[str, str] = {
+    "press": "Press one of the controls on this screen",
     "type": "Type text into a text field on this screen",
-    "scroll_down": "What is needed is below; scroll down to reveal it",
-    "scroll_up": "What is needed is above; scroll up to reveal it",
-    "back": "This is not the screen the goal needs; the previous screen was closer",
-    "achieved": "The goal was carried out during this run; nothing further is needed",
-    "already_satisfied": "Nothing was ever needed; the goal was already true before the run began",
-    "wait": "This screen is still loading or mid-animation; nothing should be pressed yet",
-    "blocked": "Something outside the goal stops this run going further",
-    "not_achievable": "This app cannot do what the goal asks",
+    "scroll_down": "Scroll down: what is needed is further down this screen",
+    "scroll_up": "Scroll up: what is needed is further up this screen",
+    "back": "Go back to the previous screen",
+    "wait": "Wait: the screen is still loading or the app is still answering",
+    "finished": "Stop: every step of `goal` has been carried out",
+    "other": ("Something else: a long-press, a system key, relaunching or force-closing the app, "
+              "or a tool `goal` names"),
 }
-#: Scroll is two actions rather than one action plus a direction question. The public browser
-#: harnesses carry SCROLL_UP and SCROLL_DOWN as operations for the same reason it is right here:
-#: "which way should this screen be scrolled" is a hop of indirection jev-1.13's own notes warn
-#: about, and gating on min(action, direction) mixed the confidences of two separate questions,
-#: which those notes also warn about. Replayed over 11 saved screens the merged form chose the
-#: same action 11 times out of 11 and asked 2% fewer tokens, so the extra question was buying
-#: nothing. What it picks when a scroll is genuinely needed is untested either way.
+FULL_ONLY = ("scroll_down", "scroll_up", "back")
+HANDED_OVER = ("finished", "other")
 SCROLL_KINDS = {"scroll_down": "down", "scroll_up": "up"}
 #: AUA's tool names said back in the vocabulary the model answers in, so a journey the chat model
 #: half-wrote still reads as one story rather than two.
@@ -149,17 +97,9 @@ TOOL_WORDS = {
     BACK_TOOL: "back",
     "key_and_analyze": "back",
     WAIT_TOOL: "wait",
-    FINISH_TOOL: "done",
-    "input_and_analyze": "type",
+    "session_finish": "done",
+    INPUT_TOOL: "type",
 }
-
-#: `blocked` is chosen to be declined: acting on it means ending the run, and ending a run early
-#: is this model's worst measured skill. `wait` is not in here because waiting is a real tool the
-#: harness already offers -- asking "is this screen still loading?" and then paying a chat model
-#: to answer the same question was the option costing a round trip to say nothing.
-NON_ACTIONS = ("blocked", "not_achievable")
-#: The two finish moves a System One answer may act on; each is its own `session_finish` outcome.
-FINISH_KINDS = ("achieved", "already_satisfied")
 
 
 def where(element: Mapping[str, Any], screen: Mapping[str, Any] | None) -> str:
@@ -202,9 +142,9 @@ FIELD_SUFFIX = " (text field)"
 def move_phrase(label: str) -> str:
     """The menu line for one control: what a person would do to it, not just its name.
 
-    A button is pressed. A field is tapped so text can be typed into it -- the same words the
-    goal uses when it asks for typing, which is how a literal reader tells the field apart from
-    the button beside it whose id happens to contain a word from the goal.
+    A button is pressed. A field is tapped so text can be typed into it -- the words a goal uses
+    when it asks for typing, which is how a literal reader tells the field apart from the button
+    beside it whose id happens to contain a word from the goal.
     """
     if label.endswith(FIELD_SUFFIX):
         return f"Tap the text field '{label[: -len(FIELD_SUFFIX)]}' so text can be typed into it"
@@ -232,9 +172,8 @@ def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTION
             label = where(element, observation.get("screen") if isinstance(observation, Mapping) else None)
         if element.get("editable") is True:
             # A field is labelled by its hint, so the menu read "Press 'Ask me anything'" beside
-            # "Press 'buttonOpenComposerAttachments'" -- and a goal that said "tap the composer"
-            # matched the word, not the field, twice at 0.96 and 0.93. The role is the fact a
-            # reader uses to tell a field from the button next to it.
+            # "Press 'buttonAttach'" and a goal that named the field matched the button's id.
+            # The role is the fact a reader uses to tell a field from the button next to it.
             label = f"{label}{FIELD_SUFFIX}"
         if is_switch(element):
             label = f"{label} [switch is {'ON' if element['checked'] else 'OFF'}]"
@@ -242,6 +181,12 @@ def candidates(observation: Mapping[str, Any] | None, *, limit: int = MAX_OPTION
         if len(options) >= limit:
             break
     return options
+
+
+def scrollable(observation: Mapping[str, Any] | None) -> bool:
+    return isinstance(observation, Mapping) and any(
+        isinstance(element, Mapping) and element.get("scrollable") is True
+        for element in observation.get("elements") or [])
 
 
 def plain(value: Any) -> Any:
@@ -291,8 +236,6 @@ def sketch(result: Any) -> str:
             labels.append("…")
             break
     return " · ".join(labels)
-
-
 
 
 def screen_for_model(compact: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -362,90 +305,35 @@ def numbered(options: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]
     return criteria, by_index
 
 
-#: What finishing means while the script has steps to go: the step is done, not the run. Live,
-#: the run-level line ("nothing further is needed") sat beside a list of steps still to do, and a
-#: true "this step is done" came back at 0.73 and 0.49 -- under the gate, so the pointer never
-#: moved and every later ask was about a step the run had long finished. Reworded, the same
-#: screen came back at 0.88.
-STEP_DONE_KINDS: dict[str, str] = {
-    "achieved": "This step is done; the run should move on to the next step",
-    "already_satisfied": "This step was already true before anything was done; move on to the next step",
-}
-
-
-#: Asked beside the move while steps remain. Live, a step the chat model had already carried out
-#: stayed current for twelve asks because the model never *picked* "done" among fifteen moves
-#: (0.03-0.49); asked this directly on the same saved screens it said done at up to 0.86. It is
-#: a second decision, not a second opinion on the move, so it is judged on its own gate and never
-#: mixed into the move's -- the docstring's warning is about min() over one decision.
-STEP_QUESTION = {
-    "instructions": "Look at the screen and the journey. Has the current step (`goal`) already been carried out?",
-    "criteria": {"done": "Yes, the step is already done; nothing on this screen is left to do for it",
-                 "not_yet": "No, something still has to happen on this screen for this step"},
-}
+def quoted_texts(goal: str) -> list[str]:
+    """The texts the brief says to type, once each, in the order it names them."""
+    return list(dict.fromkeys(EXACT_TEXT.findall(goal)))
 
 
 def build_questions(options: Mapping[str, str], *, action_space: str = "taps",
-                    steps_remain: bool = False) -> dict[str, Any]:
-    """One question naming every move this screen allows, finishing included.
-
-    A press is not an action plus a separate operand; each pressable control *is* an action, and
-    so is each way of finishing: the outcome `session_finish` records is the move itself. With
-    ``steps_remain`` the two finish lines speak of the current step, not the run, and a second
-    question asks outright whether that step is already done.
-    """
+                    can_scroll: bool = True, texts: Sequence[str] = ()) -> dict[str, Any]:
+    """The operation, the control a press would be on, and the text a typing move would type."""
     from typesafe_sdk import Choice
 
-    # Every pressable control is its own action, beside the actions that operate on nothing.
-    # The earlier shape asked "what kind of move" and "which control" as two independent
-    # questions -- the API has no question conditional on another answer -- so the model named a
-    # control even when it chose to wait, and the gate was then the minimum of two confidences
-    # about different things. Measured over 60 real screens, three times: the merged form is
-    # steadier (median confidence 0.54-0.55 against 0.47-0.48) and acts on the same taps at the
-    # same accuracy. It is not faster; it is one question with one answer and nothing discarded.
-    # One text field made two menu lines, "tap the field so text can be typed" and "type", and
-    # the vote split between them (0.54 / 0.46 on a real chat screen) although both meant the
-    # same thing. The harness built both from the same element, so it also knows they are one:
-    # with a single field on the screen, `type` names that field and the tap line is not offered.
-    # Typing hands the step to the chat model, which focuses the field and types in one call.
-    fields = [label for label in options.values() if label.endswith(FIELD_SUFFIX)]
-    lone = fields[0][: -len(FIELD_SUFFIX)] if len(fields) == 1 else None
-    criteria: dict[str, str] = {index: move_phrase(label)
-                                for index, label in numbered(options)[0].items()
-                                if lone is None or not label.endswith(FIELD_SUFFIX)}
-    actions = dict(ACTION_KINDS)
-    if steps_remain:
-        actions.update(STEP_DONE_KINDS)
-    if lone is not None:
-        actions["type"] = f"Type text into the text field '{lone}'"
-    criteria.update({kind: text for kind, text in actions.items() if kind != "tap"})
-    questions: dict[str, Any] = {"move": Choice(instructions="What should happen next on this screen?",
-                                                criteria=criteria)}
-    if steps_remain:
-        questions["step"] = Choice(**STEP_QUESTION)
+    fields = any(label.endswith(FIELD_SUFFIX) for label in options.values())
+    offered = [kind for kind in OPERATIONS
+               if (kind != "type" or fields)
+               and (kind not in FULL_ONLY or action_space == "full")
+               and (kind not in SCROLL_KINDS or can_scroll)]
+    questions: dict[str, Any] = {
+        "operation": Choice(instructions="What should happen next on this screen to carry on with `goal`?",
+                            criteria={kind: OPERATIONS[kind] for kind in offered}),
+        "target": Choice(instructions="If a control on this screen is pressed next to carry on with `goal`, which one?",
+                         criteria={index: move_phrase(label) for index, label in numbered(options)[0].items()}),
+    }
+    if fields and texts:
+        questions["text"] = Choice(instructions="If text is typed next, which of these texts from `goal` is it?",
+                                   criteria={str(n): text for n, text in enumerate(texts, start=1)})
     return questions
 
 
-def goal_steps(goal: str) -> list[str]:
-    """The goal's own ordered steps, cut only where the prose says so; a one-step goal is [].
-
-    A human-written brief is a short script: "open the menu and look, then close it. Send a
-    message and wait for the reply, then open the menu again." Sent whole on every turn, the
-    model has to work out from the journey how far the script has run -- and a System One model
-    is bad at counting. Measured on one row: the two picks that opened the menu were 0.96 and
-    0.85; the picks that had to know *which* phase the run was in were 0.21 to 0.51, every one
-    of them declined and paid for twice. AUA's own `goal_phases` already cuts a goal at its
-    sequence words (then, next, after that, a full stop) and never invents a step, so the
-    author keeps writing prose and the navigator hands the model one step at a time.
-    """
-    from android_ui_analyser.session import goal_phases
-
-    steps = [phase.objective for phase in goal_phases(goal) if phase.kind == "verify"]
-    return steps if len(steps) > 1 else []
-
-
 class TypeSafeNavigator:
-    """Propose a confident tap, or decline and let the chat model take the step."""
+    """Propose a confident move, or decline and let the chat model take the step."""
 
     def __init__(
         self,
@@ -470,10 +358,7 @@ class TypeSafeNavigator:
             client = AsyncTypeSafeClient(**client_options())
         self.client = client
         self.goal = goal
-        # The script's steps and where the run is in it. A finish answered while steps remain is
-        # "this step is done", moves the pointer and is asked again on the same screen.
-        self.steps = goal_steps(goal)
-        self.step_index = 0
+        self.texts = quoted_texts(goal)
         self.model = model
         self.min_confidence = min_confidence
         self.action_space = action_space
@@ -489,23 +374,20 @@ class TypeSafeNavigator:
         offered = tool_names(tools)
         self.offered = offered
         self.can_tap = not offered or TAP_TOOL in offered
-        # One entry per step the RUN took, not per step this navigator won. The chat model takes
-        # most of them in the default space, and a journey that silently omits them told the model
-        # it was on step 6 of a run that was on step 12. The 33%-vs-41% measurement behind this
-        # field was taken on a journey built from every step, which is not what shipped.
+        # One entry per step the RUN took, not per step this navigator won: a journey that omits
+        # the chat model's steps tells the model it is on step 6 of a run that is on step 12.
         self._journey: list[dict[str, Any]] = []
         self._pending: dict[str, Any] | None = None
         self._options: dict[str, str] = {}
+        # The brief's quoted texts typed so far, in order. They are the author's words, never a
+        # secret, and they are how a typing move knows which quote comes next.
+        self._typed: list[str] = []
         # (screen key, action:operand) pairs already proposed. This model reads each screen from
         # scratch, so on a screen its own action failed to move it repeats that action -- observed
         # live as a 20-step loop. A screen mid-load re-fingerprints on every frame, so a wait is
         # keyed on the activity instead, or waiting would never be bounded at all.
         self._seen: set[tuple[str, str]] = set()
-        self._acted = False
         self._previous_screen = ""
-        # One number per screen this navigator was shown; every ask about that screen carries it,
-        # so a reader can pair a step's several asks (a step declared done is re-asked) with the step.
-        self._screen_seq = 0
         self._last_fingerprint: str | None = None
         self._last_activity: str | None = None
         self.proposals: list[dict[str, Any]] = []
@@ -525,60 +407,27 @@ class TypeSafeNavigator:
         to translate before it can read what it did. Steps the chat model took are named the same
         way, because the journey is one story.
         """
-        handle = (arguments or {}).get("id")
+        arguments = arguments or {}
+        handle = arguments.get("id")
         label = self._options.get(handle) if isinstance(handle, str) else None
-        self._catch_up(tool, label, arguments)
-        self._acted = True
+        typed = str(arguments.get("text") or "")
+        if tool == INPUT_TOOL and typed in self.texts:
+            self._typed.append(typed)
         if self._pending is None:
             return
-        if self.steps:
-            # The step the run is on when it acts; a step declared done on this screen moved it.
-            self._pending["step"] = self.steps[self.step_index]
-        if tool == "input_and_analyze" and label and label.endswith(FIELD_SUFFIX):
+        if tool == INPUT_TOOL and label and label.endswith(FIELD_SUFFIX):
             # Named after the field's tap line, typing read "tap the text field so text can be
-            # typed into it", and the model asked to type again on every later screen. The text
-            # itself stays out: it may be a secret.
-            sent = " and send it" if (arguments or {}).get("submit") else ""
-            self._pending["you_chose"] = f"type text into the text field '{label[: -len(FIELD_SUFFIX)]}'{sent}"
+            # typed into it", and the model asked to type again on every later screen. Only a text
+            # the brief quotes is ever repeated here; anything else may be a secret.
+            field = label[: -len(FIELD_SUFFIX)]
+            what = f"`{typed}`" if typed in self.texts else "text"
+            sent = " and send it" if arguments.get("submit") else ""
+            self._pending["you_chose"] = f"type {what} into the text field '{field}'{sent}"
         elif label:
             phrase = move_phrase(label)
             self._pending["you_chose"] = phrase[0].lower() + phrase[1:]
         else:
             self._pending["you_chose"] = TOOL_WORDS.get(tool, tool)
-
-    def _catch_up(self, tool: str, label: str | None, arguments: Mapping[str, Any] | None) -> None:
-        """Move the pointer to a later step when the run acted on a control that step names.
-
-        The pointer moved only on this navigator's own confident "done". Once the chat model took
-        a step the pointer stayed behind, and every later proposal was about a step that was over:
-        one N-06 run sat on step 1 of 16 for all twenty asks and was declined twenty times.
-        Briefs name each control in backticks, so an action on one a later step names says the run
-        has reached that step. Only forward, and only to that step: whether it is done is still
-        this navigator's own question.
-
-        Typing says which step it is only by the text it typed, and only to a step that quotes that
-        text to type. Matched like a tap, the field's name and the typed words pulled the pointer to
-        whichever later step mentioned either: a cold start that typed its first question jumped
-        eighteen steps, past the force-stop, to the check that quotes the question after relaunch.
-        """
-        if not self.steps:
-            return
-        if tool == "input_and_analyze":
-            typed = str((arguments or {}).get("text") or "").casefold()
-            for index in range(self.step_index + 1, len(self.steps)):
-                if typed and typed in (quote.casefold() for quote in EXACT_TEXT.findall(self.steps[index])):
-                    self.step_index = index
-                    return
-            return
-        said = [str(value).casefold() for value in
-                (label, *((arguments or {}).get(key) for key in ("text", "desc", "rid"))) if value]
-        if not said:
-            return
-        for index in range(self.step_index + 1, len(self.steps)):
-            names = [name.casefold() for name in re.findall(r"`([^`]{3,})`", self.steps[index])]
-            if any(name in words for name in names for words in said):
-                self.step_index = index
-                return
 
     def forget(self) -> None:
         """Drop the open turn: its action was never sent.
@@ -603,9 +452,9 @@ class TypeSafeNavigator:
         # Leaving a turn open across a decline closed it later against a screen it never saw,
         # which is how a tap on Notifications came back as "scroll_and_analyze on '?'".
         if self._pending is not None:
-            # A turn is what was chosen, on which step; the screen it was chosen on is kept only
-            # for the last turn. "Your tap did nothing" is the one fact a screen that looks
-            # plausible cannot tell, so an unmoved screen still says so.
+            # The screen a turn was chosen on is kept only for the last turn. "Your tap did
+            # nothing" is the one fact a screen that looks plausible cannot tell, so an unmoved
+            # screen still says so.
             self._previous_screen = self._pending.pop("_screen", "")
             if fingerprint == self._last_fingerprint:
                 self._pending["screen_did_not_change"] = True
@@ -613,21 +462,10 @@ class TypeSafeNavigator:
         self._last_fingerprint = fingerprint if isinstance(fingerprint, str) else None
         self._last_activity = activity if isinstance(activity, str) else self._last_activity
         # Opened for every step. Whoever acts, `observed` fills it in.
-        self._pending = {"n": len(self._journey) + 1}
-        if self.steps:
-            self._pending["step"] = self.steps[self.step_index]
-        self._pending["you_chose"] = "(nothing yet)"
-        self._pending["_screen"] = sketch(compact)
-        self._screen_seq += 1
+        self._pending = {"n": len(self._journey) + 1, "you_chose": "(nothing yet)", "_screen": sketch(compact)}
 
         if not self.can_tap:
             self._decline("tap_not_offered")
-            return None
-        current_step = self.steps[self.step_index] if self.steps else self.goal
-        if set(re.findall(r"\b[a-z_]+_and_analyze\b", current_step)) - NAVIGATOR_TOOLS:
-            # Live, "press the system Back key with key_and_analyze" came back as a tap on the
-            # screen's own back arrow: with no key press to give, every answer was wrong.
-            self._decline("step_names_another_tool")
             return None
         self._options = candidates(observation)
         if len(self._options) < 2:
@@ -636,138 +474,133 @@ class TypeSafeNavigator:
             return None
 
         by_index = numbered(self._options)[1]
-        # One ask per step the model may declare done on this screen, plus the move itself. A
-        # step declared done costs a second question, never a device step, and the pointer only
-        # ever moves forward, so this is bounded by the script's length.
-        for _ in range(len(self.steps) + 1):
-            questions = build_questions(self._options, action_space=self.action_space,
-                                        steps_remain=bool(self.steps) and self.step_index < len(self.steps) - 1)
-            asked = await self._ask(compact, questions)
-            if asked is None:
-                return None
-            turn, answers = asked
-            move = answers["move"]
-            record = {
-                "kind": "tap" if move.choice in by_index else move.choice,
-                "choice": move.choice,
-                "confidence": round(move.confidence, 4),
-                "target_id": by_index.get(move.choice),
-                "options": len(self._options),
-            }
+        questions = build_questions(self._options, action_space=self.action_space,
+                                    can_scroll=scrollable(observation), texts=self.texts)
+        asked = await self._ask(compact, questions)
+        if asked is None:
+            return None
+        turn, answers = asked
+        operation = answers["operation"]
+        record: dict[str, Any] = {"kind": operation.choice, "gate": round(operation.confidence, 4),
+                                  "gate_needed": self.min_confidence, "options": len(self._options)}
 
-            def settle(accepted: bool, why: str | None = None, *, record=record, turn=turn) -> None:
-                record["accepted"] = accepted
-                if not accepted:
-                    record["declined_because"] = why
-                self.proposals.append(record)
-                turn["verdict"] = dict(record)
-                self._record(turn)
+        def settle(accepted: bool, why: str | None = None) -> None:
+            record["accepted"] = accepted
+            if not accepted:
+                record["declined_because"] = why
+                self._decline(str(why))
+            self.proposals.append(record)
+            turn["verdict"] = dict(record)
+            self._record(turn)
 
-            steps_remain = bool(self.steps) and self.step_index < len(self.steps) - 1
-            step = answers.get("step") if isinstance(answers, Mapping) else None
-            if steps_remain and step is not None and step.choice == "done":
-                # A confident "already done" moves the pointer; the move it came with was about a
-                # step that is over, so it is not taken.
-                verdict = {"kind": "phase_done", "via": "step_question", "choice": "done",
-                           "confidence": round(step.confidence, 4), "step": self.step_index + 1,
-                           "options": len(self._options)}
-                unacted = self._unacted()
-                if self._gate(step, verdict) and not unacted:
-                    verdict["accepted"] = True
-                    self.proposals.append(verdict)
-                    turn["verdict"] = dict(verdict)
-                    self._record(turn)
-                    self._advance()
-                    continue
-                if move.choice not in FINISH_KINDS:
-                    # An unsure one leaves the pointer, but its move was still chosen for a step
-                    # that may be over. Live, that move pressed a confirm dialog's destructive
-                    # button while the next step said to cancel.
-                    why = "step_not_acted" if unacted else "step_may_be_done"
-                    self._decline(why)
-                    settle(False, why)
-                    return None
-            if steps_remain and move.choice in FINISH_KINDS:
-                # "Done" with steps still to go is a claim about the current step, not the run.
-                record["kind"] = "phase_done"
-                record["via"] = "move"
-                record["step"] = self.step_index + 1
-                if self._unacted():
-                    self._decline("step_not_acted")
-                    settle(False, "step_not_acted")
-                    return None
-                if not self._gate(move, record):
-                    self._decline("below_confidence")
-                    settle(False, "below_confidence")
-                    return None
-                settle(True)
-                self._advance()
-                continue
-            break
-
-        plan, why = self._plan(move, by_index)
+        if operation.confidence < self.min_confidence:
+            settle(False, "below_confidence")
+            return None
+        plan, why = self._plan(operation.choice, answers, by_index, record)
         if plan is None:
             settle(False, why)
             return None
         tool, arguments, operand, label = plan
         record["tool"] = tool
         record["operand"] = operand
-        if not self._gate(move, record):
-            self._decline("below_confidence")
-            settle(False, "below_confidence")
-            return None
 
         # A waiting screen re-fingerprints on every frame it redraws, so keying a wait on the
         # fingerprint would never repeat and never escalate. The activity is what holds still.
-        screen_key = self._last_activity if record["kind"] == "wait" else str(fingerprint)
-        pair = (str(screen_key), f'{record["kind"]}:{operand}')
+        screen_key = self._last_activity if operation.choice == "wait" else fingerprint
+        pair = (str(screen_key), f"{operation.choice}:{operand}")
         if screen_key is not None and pair in self._seen:
-            self._decline("repeat_on_unchanged_screen")
             settle(False, "repeat_on_unchanged_screen")
             return None
         if self.shadow:
-            self._decline("shadow")
             settle(False, "shadow")
             return None
         settle(True)
         if screen_key is not None:
             self._seen.add(pair)
-        self._pending["you_chose"] = f"{tool} on '{label}'"
         return {"tool": tool, "arguments": arguments,
-                "reason": f'System One {record["kind"]} at confidence {record["gate"]:.2f}: {label}'}
+                "reason": f"System One {operation.choice} at confidence {record['gate']:.2f}: {label}"}
+
+    def _plan(self, kind: str, answers: Mapping[str, Any], by_index: Mapping[str, str],
+              record: dict[str, Any]):
+        """Bind a confident operation to an offered tool, or say why it cannot be.
+
+        Returns ``(plan, why)``. A plan is ``(tool, arguments, operand, label)``; the operand is
+        what the repeat guard keys on. An operation that needs an operand is gated on the
+        operand's own confidence as well: a sure "press" with an unsure control is not a press.
+        """
+        if kind == "press":
+            target = answers["target"]
+            handle = by_index.get(target.choice)
+            record["target_id"] = handle
+            record["operand_confidence"] = round(target.confidence, 4)
+            if handle is None:
+                # Not on this screen's menu -- a stale index, or a raw id the menu exists to keep
+                # out. The menu is rebuilt per screen, so there is nothing safe to press.
+                return None, "unknown_target"
+            if target.confidence < self.min_confidence:
+                return None, "below_confidence"
+            return (TAP_TOOL, {"id": handle}, handle, self._options[handle]), None
+        if kind == "type":
+            return self._typing(answers, by_index, record)
+        if kind == "wait":
+            if WAIT_TOOL not in self.offered:
+                return None, "wait_not_offered"
+            return (WAIT_TOOL, {"idle": True}, "idle", "wait for the screen"), None
+        if kind in SCROLL_KINDS and self.action_space == "full":
+            if SCROLL_TOOL not in self.offered:
+                return None, "scroll_not_offered"
+            direction = SCROLL_KINDS[kind]
+            return (SCROLL_TOOL, {"direction": direction}, direction, f"scroll {direction}"), None
+        if kind == "back" and self.action_space == "full":
+            if BACK_TOOL not in self.offered:
+                return None, "back_not_offered"
+            return (BACK_TOOL, {}, "back", "go back"), None
+        # `finished`, `other`, and anything this space does not act on: the chat model's call.
+        return None, f"kind:{kind}"
+
+    def _typing(self, answers: Mapping[str, Any], by_index: Mapping[str, str], record: dict[str, Any]):
+        """Type a text the brief quotes into a field, or hand the step to the chat model.
+
+        The text is one of the author's own quotes, chosen by Jev among them, so nothing is
+        generated. The field is the only one on the screen, or the one the target answer names.
+        """
+        text = answers.get("text") if isinstance(answers, Mapping) else None
+        if text is None or INPUT_TOOL not in self.offered:
+            return None, "kind:type"
+        record["operand_confidence"] = round(text.confidence, 4)
+        choice = str(text.choice)
+        if not (choice.isdigit() and 1 <= int(choice) <= len(self.texts)):
+            return None, "unknown_text"
+        if text.confidence < self.min_confidence:
+            return None, "below_confidence"
+        fields = [handle for handle, label in self._options.items() if label.endswith(FIELD_SUFFIX)]
+        target = by_index.get(str(answers["target"].choice))
+        if len(fields) != 1:
+            fields = [target] if target in fields else []
+        if not fields:
+            return None, "kind:type"
+        typed = self.texts[int(choice) - 1]
+        field = self._options[fields[0]][: -len(FIELD_SUFFIX)]
+        return (INPUT_TOOL, {"id": fields[0], "text": typed, "submit": False},
+                f"type:{typed}", f"type '{typed}' into '{field}'"), None
 
     def _state(self, compact: Mapping[str, Any]) -> dict[str, Any]:
-        """What the model reads: the current step, the script around it, the journey, the screen."""
+        """What the model reads: the brief, the journey, the texts typed, the screen."""
         journey = list(self._journey)
         # Every token in the state that is not about this decision is documented to cost
         # accuracy. Oldest turns go first -- a loop is made of the recent ones.
         while len(json.dumps(journey, default=str)) > MAX_JOURNEY_CHARS and journey:
             journey.pop(0)
-        # The rest of the script is not listed. Offered at the bottom as `next_step`, it was done
-        # instead of the current step: replayed, Jev pressed the menu at 0.84-0.98 while the step
-        # said to send a message. The current step is the only instruction.
-        state: dict[str, Any] = {"goal": self.goal}
-        if self.steps:
-            state["goal"] = self.steps[self.step_index]
-            state["done_before_this"] = self.steps[: self.step_index]
-        state["journey_so_far"] = [{k: v for k, v in turn.items() if not k.startswith("_")} for turn in journey]
+        state: dict[str, Any] = {
+            "goal": self.goal,
+            "journey_so_far": [{k: v for k, v in turn.items() if not k.startswith("_")} for turn in journey],
+        }
+        if self._typed:
+            state["typed_so_far"] = list(self._typed)
         if self._previous_screen:
             state["previous_screen"] = self._previous_screen
         state["this_is_the_new_screen"] = screen_for_model(compact)
         return state
-
-    def _unacted(self) -> bool:
-        """The current step says to act, and nothing has been done since the run reached it."""
-        return bool(self.steps) and not self._acted and ACTION_STEP.match(self.steps[self.step_index]) is not None
-
-    def _advance(self) -> None:
-        """The current step is done: move the pointer and say so in the journey."""
-        self._acted = False
-        done, self.step_index = self.steps[self.step_index], self.step_index + 1
-        self._journey.append({"n": len(self._journey) + 1, "step": done, "you_chose": "said this step was done"})
-        if self._pending is not None:
-            self._pending["n"] = len(self._journey) + 1
-            self._pending["step"] = self.steps[self.step_index]
 
     async def _ask(self, compact: Mapping[str, Any], questions: Mapping[str, Any]):
         """One request; ``None`` when it failed, else the transcript turn and every answer."""
@@ -790,7 +623,6 @@ class TypeSafeNavigator:
         self.usd += tokens * USD_PER_INPUT_TOKEN
         turn = {
             "call": self.requests,
-            "screen_seq": self._screen_seq,
             "request_ms": round(elapsed_ms, 1),
             "input_tokens": tokens,
             "usd": round(tokens * USD_PER_INPUT_TOKEN, 9),
@@ -802,87 +634,6 @@ class TypeSafeNavigator:
             "menu": numbered(self._options)[0],
         }
         return turn, response.answers
-
-    def _gate(self, move, record: dict[str, Any]) -> bool:
-        """Does this one answer clear the gate? Writes the number it judged into the record."""
-        record["gate"] = round(move.confidence, 4)
-        record["gate_needed"] = self.min_confidence
-        return move.confidence >= self.min_confidence
-
-    def _plan(self, move, by_index):
-        """Bind the one chosen move to an offered tool, or say why it cannot be.
-
-        Returns ``(plan, why)``. A plan is ``(tool, arguments, operand, label)``. The operand is
-        what the repeat guard keys on.
-        """
-        # A numbered answer IS a press: the menu of controls and the list of actions are one
-        # list, so naming a control names the whole move.
-        handle = by_index.get(move.choice)
-        if handle is not None:
-            return (TAP_TOOL, {"id": handle}, handle, self._options[handle]), None
-        kind = move.choice
-        if kind not in ACTION_KINDS:
-            # Not a control on this screen and not an action either -- a stale index, or a raw
-            # element id the menu exists to keep out. The menu is rebuilt per screen, so there is
-            # nothing safe to press.
-            self._decline("unknown_target")
-            return None, "unknown_target"
-        if kind in NON_ACTIONS:
-            # Chosen on purpose, declined on purpose: acting on `blocked` ends the run, and
-            # ending a run early is this model's worst measured skill.
-            self._decline(f"kind:{kind}")
-            return None, f"kind:{kind}"
-        if kind == "type":
-            # A System One model returns a choice, never a string. When the step itself says
-            # what to type ("type exactly `Hi!`") the string is the author's, not the model's,
-            # so it is typed as written into the one field on the screen. Anything else goes
-            # back to the chat model, which writes its own text.
-            step = self.steps[self.step_index] if self.steps else self.goal
-            quoted = EXACT_TEXT.findall(step)
-            fields = [handle for handle, label in self._options.items() if label.endswith(FIELD_SUFFIX)]
-            if (len(quoted) == 1 and "${" not in quoted[0] and len(fields) == 1
-                    and INPUT_TOOL in self.offered):
-                field = self._options[fields[0]][: -len(FIELD_SUFFIX)]
-                return (INPUT_TOOL, {"id": fields[0], "text": quoted[0], "submit": False},
-                        f"type:{quoted[0]}", f"type '{quoted[0]}' into '{field}'"), None
-            self._decline("kind:type")
-            return None, "kind:type"
-        if kind == "wait":
-            # Honoured in both spaces. Offering it and then paying a chat model to answer the
-            # same question about the same screen was the defect, not the option.
-            if WAIT_TOOL not in self.offered:
-                self._decline("wait_not_offered")
-                return None, "wait_not_offered"
-            return (WAIT_TOOL, {"idle": True}, "idle", "wait for the screen"), None
-        if self.action_space != "full":
-            # Keeping the narrow default is what lets the two be compared on the same code.
-            self._decline(f"kind:{kind}")
-            return None, f"kind:{kind}"
-        if kind in SCROLL_KINDS:
-            if SCROLL_TOOL not in self.offered:
-                self._decline("scroll_not_offered")
-                return None, "scroll_not_offered"
-            direction = SCROLL_KINDS[kind]
-            return (SCROLL_TOOL, {"direction": direction}, direction,
-                    f"scroll {direction}"), None
-        if kind == "back":
-            if BACK_TOOL not in self.offered:
-                self._decline("back_not_offered")
-                return None, "back_not_offered"
-            return (BACK_TOOL, {}, "back", "go back"), None
-        if kind in FINISH_KINDS:
-            if FINISH_TOOL not in self.offered:
-                self._decline("finish_not_offered")
-                return None, "finish_not_offered"
-            # No note: it is free text, and a fabricated one would reach the judge as evidence.
-            # The enum the model answered is the whole claim, and the gate above applies to it
-            # exactly as to a press -- ending a run early is this model's worst measured skill.
-            if self._unacted():
-                self._decline("step_not_acted")
-                return None, "step_not_acted"
-            return (FINISH_TOOL, {"outcome": kind}, kind, f"finish as {kind}"), None
-        self._decline(f"kind:{kind}")
-        return None, f"kind:{kind}"
 
     def _record(self, entry: dict[str, Any]) -> None:
         if self.transcript_path is None:
@@ -904,7 +655,6 @@ class TypeSafeNavigator:
             "input_tokens": self.input_tokens, "usd": round(self.usd, 8),
             "transcript": str(self.transcript_path) if self.transcript_path else None,
             "proposals": len(self.proposals),
-            "phase": ({"current": self.step_index + 1, "of": len(self.steps)} if self.steps else None),
             "accepted": accepted, "declined": dict(self.declined),
             "mean_request_ms": (round(sum(self.request_ms) / len(self.request_ms), 1)
                                 if self.request_ms else None),
@@ -914,7 +664,7 @@ class TypeSafeNavigator:
         }
 
 
-__all__ = ["TypeSafeNavigator", "ACTION_KINDS", "ACTION_SPACES", "NON_ACTIONS", "numbered", "goal_steps", "STEP_DONE_KINDS", "STEP_QUESTION",
-           "MODEL", "MIN_CONFIDENCE",
-           "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "FINISH_TOOL", "WAIT_TOOL", "SCROLL_KINDS",
-           "FINISH_OUTCOMES", "FINISH_KINDS", "build_questions", "sketch", "candidates", "tool_names"]
+__all__ = ["TypeSafeNavigator", "OPERATIONS", "ACTION_SPACES", "numbered", "quoted_texts",
+           "MODEL", "MIN_CONFIDENCE", "TAP_TOOL", "SCROLL_TOOL", "BACK_TOOL", "WAIT_TOOL",
+           "INPUT_TOOL", "SCROLL_KINDS", "build_questions", "sketch",
+           "candidates", "tool_names"]

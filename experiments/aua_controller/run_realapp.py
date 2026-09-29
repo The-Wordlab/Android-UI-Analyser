@@ -2317,20 +2317,22 @@ def main() -> int:
     parser.add_argument("--no-judge", action="store_true")
     parser.add_argument("--nav-engine", choices=("chat", "typesafe"), default="chat",
                         help="chat: every step is decided by the controller model. typesafe: a "
-                             "TypeSafe System One model answers the confident taps and hands "
-                             "every other step, and every stop, back, scroll and typed string, "
-                             "back to the controller model.")
+                             "TypeSafe System One model answers the moves it is confident of and "
+                             "hands every other step, every stop and every string the brief does "
+                             "not quote back to the controller model.")
     parser.add_argument("--nav-shadow", action="store_true",
                         help="With --nav-engine typesafe, record what the navigator would have "
                              "done without letting it act. Proves the gate on real screens.")
     parser.add_argument("--nav-min-confidence", type=float, default=0.85,
-                        help="Confidence a System One tap must clear to be taken. Measured over 120 saved steps: 0.80 takes 18%% of steps at 77%% correct, 0.85 takes 12%% at 93%%, 0.90 takes 8%% at 100%%.")
+                        help="Confidence a System One move, and the control or text it acts on, must "
+                             "clear to be taken. Replayed on held-out QA scenarios, 0.85 acts on 58%% "
+                             "of screens and 0.90 on 42%%.")
     parser.add_argument("--nav-action-space", choices=("taps", "full"), default="taps",
-                        help="taps: the navigator proposes presses only, and every scroll, back "
-                             "and stop goes to the controller model. full: it also scrolls, goes "
-                             "back and finishes with an outcome, the way the public Jev browser "
-                             "harnesses drive a page. Typing stays with the controller model "
-                             "either way -- a System One model returns a choice, never a string.")
+                        help="taps: the navigator presses, waits and types a text the brief "
+                             "quotes; every scroll, back and stop goes to the controller model. "
+                             "full: it also scrolls and goes back, the way the public Jev browser "
+                             "harnesses drive a page. Stopping stays with the controller model "
+                             "either way.")
     parser.add_argument("--judge-engine", choices=("chat", "typesafe"), default="chat",
                         help="chat: the OpenRouter judge ladder, which writes its own reasons. "
                              "typesafe: one TypeSafe System One request scoring each authored "

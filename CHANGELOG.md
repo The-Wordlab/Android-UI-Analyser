@@ -13,9 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
-- Jev types the text a step quotes after "type exactly", as written and with `submit=false`, into
-  the one text field on the screen. Every typing step used to go back to the chat model, although
-  the string was the author's and needed no model at all.
+- Jev types a text the brief quotes after "type exactly", as written and with `submit=false`.
+  Every typing step used to go back to the chat model, although the string was the author's and
+  needed no model at all. Jev picks which quote comes next; it never writes text of its own.
 - Every frame the controller judge reads carries `rendered`: the mean luminance of its screenshot
   and whether it reads as dark or light. Element text cannot say whether a screen is dark, and a
   judge sees at most five images, so a theme run left its dark-mode bullets unverified.
@@ -64,22 +64,10 @@ notes, so you can check for a newer version — and read what changed — withou
   ignored. Right after a fresh install the set-flags link can reach an app that never stores it; one
   row of a 42-row sweep lost its whole run to one such read. A key the build no longer knows is
   ignored again and still fails the run.
-- Jev no longer declares a step that says to act ("tap", "type", "long-press", "relaunch", …)
-  done before anything was done on it. Asked on the screen before the tap, it said yes to "tap
-  `Images` again" at 0.89 and to "type exactly `Before the wait`" at 0.97; the steps were never
-  taken and the runs finished with contract bullets unobserved. Such a step now goes to the chat
-  model instead (`step_not_acted`). A step that only says to look is unaffected.
-- Typing moves Jev's step pointer only to a later step that quotes the typed text after "type
-  exactly". Matched like a tap, the field's name and the typed words pulled it to any later step
-  that mentioned either: a cold start typed its first question and jumped past the force-stop to
-  the post-relaunch check, and the run finished with the restart never done.
 
 - A goal's steps are no longer cut inside a parenthesis or a backtick-quoted label. "Tap the menu
   (`buttonNavBack`; not `User avatar`, …)" became a half step and a junk step, so Jev and the
   session's goal progress counted steps the author never wrote.
-- Jev's step pointer catches up when the run acts on a control a later step names in backticks.
-  It moved only on Jev's own confident "done", so after the chat model took a few steps every
-  proposal was about a step that was over: one run sat on step 1 of 16 through twenty asks.
 - A bounded Android UI read retries one failed reply while its budget allows, and the error now
   names the server's reason. A wait lost its whole 60 s budget to a single bad read twice in one
   evening, while the next read would have worked.
@@ -345,6 +333,15 @@ notes, so you can check for a newer version — and read what changed — withou
   screen as it is now. The run summary reports `host_ignored_actions`.
 
 ### Changed
+
+- Jev reads the whole brief and answers three narrow questions in one request: what kind of move
+  comes next, which control a press would land on, and which quoted text a typing move would
+  type. It used to answer one merged question about a single step of the brief, tracked by a
+  pointer. Replayed over 378 saved QA screens, that pointer was on the wrong step for most
+  hand-overs, and "this step is done" or "back" took the probability whenever a step's words
+  missed the screen. On held-out scenarios Jev now acts on 58% of screens instead of 21%. The step
+  pointer and its extra "is this step done?" ask are gone, and stopping a run is always the chat
+  model's call.
 
 - Jev hands a near miss straight to the chat model instead of spending a wait on a second look,
   and a pick under the gate is no longer rescued by its own probability. Over 51 QA runs the
