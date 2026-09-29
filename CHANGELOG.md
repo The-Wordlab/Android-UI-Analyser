@@ -36,6 +36,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- Jev reads the brief only up to the first step that names a tool Jev cannot issue, such as
+  `app_force_stop`, until the run has called that tool. Reading the whole brief, Jev did a
+  cold-start row's post-restart taps before the restart, and the row could not be judged.
 - A judged frame whose raw capture the run cache already pruned is paired with the evidence copy
   of that same capture, which the manifest records, before falling back to its fingerprint. The
   light and the dark Chats home share one fingerprint, so the light home after Light Mode reached

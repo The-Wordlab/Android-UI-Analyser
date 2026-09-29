@@ -374,6 +374,16 @@ class TypeSafeNavigator:
         offered = tool_names(tools)
         self.offered = offered
         self.can_tap = not offered or TAP_TOOL in offered
+        # Steps the brief names by a tool Jev cannot issue ("force-close with app_force_stop") are
+        # the chat model's. Read whole, the brief let Jev walk past one: a cold-start row did its
+        # post-restart checks before the restart (2026-09-29). Until the run has called such a
+        # tool, Jev reads the brief only up to that step, so it cannot get ahead of it.
+        own = {TAP_TOOL, INPUT_TOOL, WAIT_TOOL, "session_finish"}
+        if action_space == "full":
+            own |= {SCROLL_TOOL, BACK_TOOL}
+        self._barriers = {name for name in offered - own
+                          if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", goal)}
+        self._called: set[str] = set()
         # One entry per step the RUN took, not per step this navigator won: a journey that omits
         # the chat model's steps tells the model it is on step 6 of a run that is on step 12.
         self._journey: list[dict[str, Any]] = []
@@ -407,6 +417,7 @@ class TypeSafeNavigator:
         to translate before it can read what it did. Steps the chat model took are named the same
         way, because the journey is one story.
         """
+        self._called.add(tool)
         arguments = arguments or {}
         handle = arguments.get("id")
         label = self._options.get(handle) if isinstance(handle, str) else None
@@ -592,7 +603,7 @@ class TypeSafeNavigator:
         while len(json.dumps(journey, default=str)) > MAX_JOURNEY_CHARS and journey:
             journey.pop(0)
         state: dict[str, Any] = {
-            "goal": self.goal,
+            "goal": self.visible_goal(),
             "journey_so_far": [{k: v for k, v in turn.items() if not k.startswith("_")} for turn in journey],
         }
         if self._typed:
@@ -601,6 +612,18 @@ class TypeSafeNavigator:
             state["previous_screen"] = self._previous_screen
         state["this_is_the_new_screen"] = screen_for_model(compact)
         return state
+
+    def visible_goal(self) -> str:
+        """The brief up to and including the first step whose named tool the run has not called."""
+        cut = len(self.goal)
+        for name in self._barriers - self._called:
+            match = re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", self.goal)
+            if match:
+                cut = min(cut, match.end())
+        if cut == len(self.goal):
+            return self.goal
+        end = self.goal.find(". ", cut)
+        return self.goal[: end + 1 if end != -1 else len(self.goal)] + " The brief goes on after this step."
 
     async def _ask(self, compact: Mapping[str, Any], questions: Mapping[str, Any]):
         """One request; ``None`` when it failed, else the transcript turn and every answer."""

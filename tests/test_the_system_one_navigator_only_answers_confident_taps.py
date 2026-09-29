@@ -589,3 +589,25 @@ def test_a_run_without_a_transcript_path_still_works(monkeypatch) -> None:
     assert navigator.report()["transcript"] is None
     assert written, "the turn is still assembled; only the file is absent"
 
+
+
+def test_jev_does_not_read_past_a_step_only_the_chat_model_can_take() -> None:
+    # Live, Jev read a whole cold-start brief and did its post-restart taps before the restart,
+    # which only the chat model can do. It now reads up to that step until the run has taken it.
+    brief = ("Tap `Chats`. Then force-close the app with app_force_stop. Then relaunch it with "
+             "app_relaunch_and_analyze. Then tap the settings gear.")
+    tools = [*WIDE_TOOLS, "app_force_stop", "app_relaunch_and_analyze"]
+    client = FakeClient()
+    navigator = TypeSafeNavigator(brief, client=client, tools=tools)
+    asyncio.run(navigator(SCREEN))
+    first = client.states[-1]["goal"]
+    assert first.startswith("Tap `Chats`. Then force-close the app with app_force_stop.")
+    assert "settings gear" not in first and "relaunch" not in first
+    assert first.endswith("The brief goes on after this step.")
+    navigator.observed("app_force_stop")
+    asyncio.run(navigator(moved("fp-3")))
+    assert "app_relaunch_and_analyze." in client.states[-1]["goal"]
+    assert "settings gear" not in client.states[-1]["goal"]
+    navigator.observed("app_relaunch_and_analyze")
+    asyncio.run(navigator(moved("fp-4")))
+    assert client.states[-1]["goal"] == brief, "once both are done it reads the whole brief again"
