@@ -516,6 +516,32 @@ def test_a_success_claim_that_skipped_a_step_named_by_its_tool_is_sent_back_once
     assert result["claim"] == {"outcome": "achieved"}
 
 
+def test_a_success_claim_straight_after_a_named_step_the_goal_continues_past_is_sent_back_once(tmp_path):
+    """A cold-start row did its post-restart checks before the restart (2026-09-29), was sent back
+    for the missing relaunch, relaunched, and claimed success at once: nothing ran after it."""
+    goal = ("Send a message. Then force-close the app with app_force_stop. Then relaunch it with "
+            "app_relaunch_and_analyze. Then check the home shows. Then tap the settings gear.")
+    model = FakeModel(
+        controller=[
+            model_call("session_finish", {"outcome": "achieved", "note": "early"}, call_id="native-1"),
+            model_call("app_force_stop", {}, call_id="native-2"),
+            model_call("app_relaunch_and_analyze", {}, call_id="native-3"),
+            model_call("session_finish", {"outcome": "achieved", "note": "relaunched"}, call_id="native-4"),
+            model_call("tap_and_analyze", {"id": "el:fp-home-1"}, call_id="native-5"),
+            model_call("session_finish", {"outcome": "achieved", "note": "done"}, call_id="native-6"),
+        ],
+        judgements={"record_verdict": [verdict("pass", "settings"), verdict("pass", "settings after relaunch")]},
+    )
+    aua = SetupAua()
+    result = run(tmp_path, aua, model, goal=goal, controller_capabilities=["app-lifecycle"])
+    assert len(aua.named("tap_and_analyze")) == 1
+    assert result["claim"] == {"outcome": "achieved", "note": "done"}
+    assert any("straight after app_relaunch_and_analyze" in w for w in result["warnings"])
+    refusal = next(m["content"] for payload in model.payloads for m in payload["messages"]
+                   if m.get("role") == "tool" and "named_step_not_followed" in str(m.get("content")))
+    assert "Then tap the settings gear." in refusal
+
+
 def test_network_capability_maps_to_reversible_aua_calls(tmp_path):
     aua = SetupAua()
     neutral = verdict("pass", "retry worked")

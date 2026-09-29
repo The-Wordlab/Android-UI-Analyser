@@ -36,6 +36,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A success claim made straight after a step the goal names by its tool is sent back once when
+  the goal still asks for an action after that step, quoting what it asks. A cold-start row did
+  its post-restart checks before the restart, was sent back for the missing relaunch, relaunched,
+  and claimed success at once, so nothing was checked after the restart.
 - The judge's screenshots keep the before and after of a tap that retitles its own screen. Choosing
   Spanish translated the language screen's title, so the English and Spanish lists read as two
   screens and the changed pair was never formed; whether the judge saw which language was marked

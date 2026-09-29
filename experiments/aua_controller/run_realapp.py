@@ -1614,22 +1614,46 @@ async def run_realapp(
         named_tools = sorted(name for name in offered - {"session_finish"}
                              if name and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", goal))
         called: set[str] = set()
+        last_action: list[str] = []
         refused_finish: list[str] = []
+        refused_continuation: list[str] = []
+        # What the goal still asks for after a named step, when that includes an action. On
+        # 2026-09-29 a cold-start row did its post-restart checks before the restart, was sent back
+        # for the missing relaunch, relaunched, and finished at once: nothing was checked after it.
+        still_to_do: dict[str, str] = {}
+        for tool_name in named_tools:
+            *_, mention = re.finditer(rf"(?<![\w-]){re.escape(tool_name)}(?![\w-])", goal)
+            rest = goal[mention.end():].lstrip(" .")
+            if re.search(r"\bThen\b[^.]*?\b(?:tap|type|scroll|swipe|press|long-press|open)\b", rest,
+                         re.IGNORECASE):
+                still_to_do[tool_name] = rest[:400]
 
         def refuse_early_finish(name: str, arguments: Any) -> dict[str, Any] | None:
-            """Send an `achieved` claim back once when a step the goal names by tool was skipped."""
-            missing = [tool for tool in named_tools if tool not in called]
-            if (name != "session_finish" or refused_finish or not missing
+            """Send an `achieved` claim back once when a step the goal names by tool was skipped,
+            and once when it came straight after a named step the goal continues past."""
+            if (name != "session_finish"
                     or (arguments or {}).get("outcome") not in {"achieved", "already_satisfied"}):
                 return None
-            refused_finish.extend(missing)
-            return {"ok": False, "error": {"code": "named_step_not_done", "executed": False, "message": (
-                "Not finished: the goal has steps done with " + ", ".join(missing) + ", and this run "
-                "has not called it. Do those steps and the checks that follow them, then finish. If "
-                "such a step was conditional and its condition did not hold, finish again.")}}
+            missing = [tool for tool in named_tools if tool not in called]
+            if missing and not refused_finish:
+                refused_finish.extend(missing)
+                return {"ok": False, "error": {"code": "named_step_not_done", "executed": False, "message": (
+                    "Not finished: the goal has steps done with " + ", ".join(missing) + ", and this run "
+                    "has not called it. Do those steps and the checks that follow them, then finish. If "
+                    "such a step was conditional and its condition did not hold, finish again.")}}
+            after = last_action[-1] if last_action else ""
+            if after in still_to_do and not refused_continuation:
+                refused_continuation.append(after)
+                return {"ok": False, "error": {"code": "named_step_not_followed", "executed": False, "message": (
+                    f"Not finished: the goal continues after {after}, and this run finished straight "
+                    f"after calling it. What the goal asks after it: {still_to_do[after]} Do those "
+                    "steps now, even ones you did earlier, then finish.")}}
+            return None
 
         async def controller_call(name: str, arguments: dict[str, Any]) -> Any:
             called.add(name)
+            if name != "session_finish":
+                last_action[:] = [name]
             arguments, repaired_id = normalize_element_id_argument(arguments)
             if repaired_id:
                 repair = (
@@ -1819,6 +1843,9 @@ async def run_realapp(
         if refused_finish:
             result["warnings"].append("controller claimed success before a named step ("
                                       + ", ".join(refused_finish) + "); it was sent back once")
+        if refused_continuation:
+            result["warnings"].append(f"controller claimed success straight after {refused_continuation[0]} "
+                                      "although the goal continues after it; it was sent back once")
         result["controller"] = {
             key: report.get(key) for key in (
                 "stop_reason", "error", "steps_consumed", "model_requests", "tool_calls_executed",
