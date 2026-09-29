@@ -130,3 +130,22 @@ def test_selector_does_not_depend_on_a_vision_candidate_missing_from_fresh_hiera
     assert selector_alternative(detected, [first, detected, second]) is None
     assert selector_alternative(second, [first, detected, second]) is None
     assert selector_alternative(second, [first, second]) == {"text": "Open", "index": 1}
+
+
+def test_a_miscopied_handle_is_named_but_never_pressed():
+    # 2026-09-29: a model typed five times into `el:...2b8fb1b`, its own copy of the field
+    # `el:...2b8d909` that every observation showed. The miss now names the real handle.
+    device = BootDevice(hierarchy_xml=panel("Notes"))
+    engine = engine_for(device)
+    observed = engine.analyze(source="hierarchy", with_ocr=False).as_dict()
+    real = next(el["id"] for el in observed["elements"] if el.get("text") == "Open")
+    garbled = real[:-4] + ("0000" if not real.endswith("0000") else "1111")
+    with pytest.raises(ElementNotFoundError) as failure:
+        engine.tap(garbled, observe=False)
+    assert not clicks(device), "nothing is pressed on a guess"
+    assert f"differs only in its last characters from {real}" in failure.value.hint
+    assert "'Open'" in failure.value.hint
+    unrelated = "el:" + "f" * 32
+    with pytest.raises(ElementNotFoundError) as failure:
+        engine.tap(unrelated, observe=False)
+    assert "differs only in its last characters" not in failure.value.hint

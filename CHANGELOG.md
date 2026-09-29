@@ -36,6 +36,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A handle that matched nothing names the one on-screen handle it differs from only in its last
+  characters, as a likely mis-copy, and presses nothing. A model repeated its own garbled copy of a
+  text field's handle five times while every observation showed the real one.
 - The judge credits a `wait` or `look again` that follows an action, with nothing pressed between
   them, as that action's settled result. A back arrow whose own frame caught a splash was failed
   though the wait after it showed Home; a recovery tap is still a different action.

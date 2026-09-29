@@ -478,6 +478,27 @@ def _miss_observation(self: Engine, observation: AnalyzeResult) -> Any:
         return observation
 
 
+def _miscopied_handle_hint(key: str, elements: Sequence[Element]) -> str:
+    """Name the one on-screen handle a caller most likely mis-copied, or say nothing.
+
+    A model copying a 32-hex handle can change its last characters and then repeat its own copy:
+    on 2026-09-29 a run typed five times into `el:...2b8fb1b` while every observation showed the
+    field as `el:...2b8d909`. Only a handle sharing all but a short tail with exactly one current
+    element is named, and nothing is executed -- the caller sends the real handle itself.
+    """
+    if not key.startswith("el:") or len(key) < 3 + 24:
+        return ""
+    shared = 3 + 24
+    near = [el for el in elements
+            if isinstance(el.handle, str) and el.handle != key and el.handle[:shared] == key[:shared]]
+    if len(near) != 1:
+        return ""
+    label = near[0].text or near[0].content_desc or near[0].resource_id or ""
+    named = f" ({label[:40]!r})" if label else ""
+    return (f"This handle differs only in its last characters from {near[0].handle}{named}, which is "
+            "on the screen now: it looks mis-copied. Send that handle exactly if you meant it. ")
+
+
 def _resolve_action_key(
     self: Engine, key: str, *, bounds: Sequence[int] | None = None, verb: str = "tap"
 ) -> Element:
@@ -525,7 +546,8 @@ def _resolve_action_key(
             raise ElementNotFoundError(
                 f"could not establish a unique current element for handle {key!r}",
                 hint=(
-                    "No action was sent. The element may be absent, indistinguishable from "
+                    _miscopied_handle_hint(key, current.elements)
+                    + "No action was sent. The element may be absent, indistinguishable from "
                     "another item, changed, or from an expired target lifetime. Inspect the "
                     "attached observation. If id_reusable is false, refreshing its ID will "
                     "not help. To choose a visible control, pass its selector explicitly "
