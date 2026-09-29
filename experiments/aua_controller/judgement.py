@@ -1372,7 +1372,11 @@ def outcome_question(contract: Any) -> str:
                  "fail such a criterion because the starting action's entry shows work still in "
                  "progress; that is what the contract says should happen. The rule exists to stop a "
                  "later UNRELATED action supplying the proof, not to require an outcome before the "
-                 "contract says it arrives.")
+                 "contract says it arrives. A `wait` or `look again` presses nothing, so it cannot "
+                 "supply proof from a different action: when one follows an action with no other "
+                 "action between them, the entry it produced is that same action's result once the "
+                 "screen settled. Judge the action from it when the action's own entry was caught "
+                 "mid-transition -- a splash, `loading: true`, or a screen that had not changed yet.")
     return question
 
 

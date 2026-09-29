@@ -147,6 +147,18 @@ def test_the_question_speaks_in_the_storys_own_terms() -> None:
         assert stale not in question, stale
 
 
+def test_a_wait_after_an_action_is_that_actions_settled_result() -> None:
+    # 2026-09-29: a back arrow's own frame caught the app mid-transition (a splash), the wait with
+    # nothing pressed after it showed Home, and both judges failed a working navigation because the
+    # wait's entry was "a separate action". A recovery tap is still a different action.
+    decider = _Decider()
+    asyncio.run(judge_outcome(decider, goal="g", final_frame=FRAMES[-1], frames=FRAMES[:-1],
+                              actions=ACTIONS, contract="- Back reaches Home."))
+    question = decider.seen[0]["question"]
+    assert "presses nothing, so it cannot supply proof from a different action" in question
+    assert "later UNRELATED action supplying the proof" in question
+
+
 def test_a_force_stop_aua_reported_is_told_even_when_its_screen_is_not_shown() -> None:
     actions = [dict(action) for action in ACTIONS]
     actions[4] = {"step": actions[4]["step"], "tool": "app_force_stop", "arguments": {},

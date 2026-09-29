@@ -36,6 +36,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- The judge credits a `wait` or `look again` that follows an action, with nothing pressed between
+  them, as that action's settled result. A back arrow whose own frame caught a splash was failed
+  though the wait after it showed Home; a recovery tap is still a different action.
 - The judge's journey reports a force-stop under `app_force_stopped` on the entry after it, as
   evidence, instead of among `steps_not_shown`. A force-stop never has a screen, and the judge is
   told to refuse any criterion bound to a step not shown, so a real cold restart was refused.
