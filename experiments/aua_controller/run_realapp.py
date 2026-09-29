@@ -1650,10 +1650,36 @@ async def run_realapp(
                     "steps now, even ones you did earlier, then finish.")}}
             return None
 
+        # Consecutive waits are one wait: the one the goal sized ("wait once, at most 60
+        # seconds"). AUA returns every wait within its own few-second ceiling, and says so in a
+        # note the model never sees; a run that obeyed "once" gave up while a reply was still
+        # being written (2026-09-29). Nothing is waited here: the model decides whether to wait on.
+        wait_series: dict[str, float] = {}
+
+        def continue_capped_wait(arguments: Mapping[str, Any], outcome: Any) -> Any:
+            requested = arguments.get("timeout")
+            if not isinstance(outcome, dict) or not isinstance(requested, int) or isinstance(requested, bool):
+                return outcome
+            if not wait_series:
+                wait_series.update(started=time.monotonic(), requested_ms=float(requested))
+            ceiling = outcome.get("wait_ceiling_ms")
+            left = wait_series["requested_ms"] / 1000 - (time.monotonic() - wait_series["started"])
+            if outcome.get("wait_clamped_from_ms") is None or not isinstance(ceiling, int) or left < 3:
+                return outcome
+            outcome = dict(outcome)
+            outcome["warnings"] = [*(outcome.get("warnings") or []), (
+                f"AUA ends every wait within {ceiling / 1000:g} s, so {left:.0f} s of the "
+                f"{wait_series['requested_ms'] / 1000:g} s wait you asked for are left. If what you "
+                "are waiting for is not on the screen yet, call wait_and_analyze again: it is the "
+                "same wait, not a second one.")]
+            return outcome
+
         async def controller_call(name: str, arguments: dict[str, Any]) -> Any:
             called.add(name)
             if name != "session_finish":
                 last_action[:] = [name]
+            if name != "wait_and_analyze":
+                wait_series.clear()
             arguments, repaired_id = normalize_element_id_argument(arguments)
             if repaired_id:
                 repair = (
@@ -1798,6 +1824,8 @@ async def run_realapp(
                         "observation, screenshot, foreground action, or model call ran in the interval."
                     ),
                 }
+            if name == "wait_and_analyze":
+                return continue_capped_wait(arguments, await call_tool(name, arguments))
             return await call_tool(name, arguments)
 
         compactor = FrameCompactor(max_elements=max_elements)

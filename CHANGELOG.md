@@ -36,6 +36,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A wait the controller asked to last longer than AUA's ceiling now tells it, in `warnings`, how
+  much of the requested wait is left and that calling again continues the same wait. AUA's own
+  note saying the wait was capped never reached the model, so a run told to "wait once, at most
+  60 seconds" for a reply gave up after a wait that ended at once, while the reply was still
+  being written.
 - A success claim made straight after a step the goal names by its tool is sent back once when
   the goal still asks for an action after that step, quoting what it asks. A cold-start row did
   its post-restart checks before the restart, was sent back for the missing relaunch, relaunched,

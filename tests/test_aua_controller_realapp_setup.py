@@ -542,6 +542,41 @@ def test_a_success_claim_straight_after_a_named_step_the_goal_continues_past_is_
     assert "Then tap the settings gear." in refusal
 
 
+class CappedWaitAua(SetupAua):
+    """AUA ends a wait at its ceiling and says so only in its own result fields."""
+
+    async def call_tool(self, name, arguments):
+        if name == "wait_and_analyze":
+            self.calls.append((name, copy.deepcopy(arguments)))
+            return {**copy.deepcopy(self.screen), "wait_ceiling_ms": 5000,
+                    "wait_clamped_from_ms": arguments.get("timeout")}
+        return await super().call_tool(name, arguments)
+
+
+def test_a_capped_wait_tells_the_model_how_much_of_its_one_wait_is_left(tmp_path):
+    """A run told to "wait once, at most 60 seconds" for a reply got a wait AUA ended at once,
+    never saw AUA's note that it was capped, and gave up while the reply was still being written
+    (2026-09-29). Back-to-back waits are one wait; another action starts a new one."""
+    wait = {"idle": True, "timeout": 60000}
+    model = FakeModel(
+        controller=[
+            model_call("wait_and_analyze", wait, call_id="native-1"),
+            model_call("wait_and_analyze", wait, call_id="native-2"),
+            model_call("tap_and_analyze", {"id": "el:fp-home-1"}, call_id="native-3"),
+            model_call("wait_and_analyze", {"idle": True}, call_id="native-4"),
+            model_call("session_finish", {"outcome": "achieved", "note": "done"}, call_id="native-5"),
+        ],
+        judgements={"record_verdict": [verdict("pass", "reply"), verdict("pass", "reply shown")]},
+    )
+    run(tmp_path, CappedWaitAua(), model, goal="Send a message. Then wait once, at most 60 seconds, for the reply.")
+    seen = {m.get("tool_call_id"): m["content"] for payload in model.payloads
+            for m in payload["messages"] if m.get("role") == "tool"}
+    assert "of the 60 s wait you asked for are left" in seen["native-1"]
+    assert "same wait, not a second one" in seen["native-2"]
+    # The wait after the tap is a new one, and it asked for no more than AUA gives: no note.
+    assert "same wait" not in seen["native-4"]
+
+
 def test_network_capability_maps_to_reversible_aua_calls(tmp_path):
     aua = SetupAua()
     neutral = verdict("pass", "retry worked")
