@@ -36,6 +36,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A bounded UI read that fails with uiautomator's `StaleObjectException` is read again while the
+  wait's budget lasts, instead of once. The exception reports only that the tree changed under the
+  dump, which a streaming chat reply does for seconds, and two such reads in a row used to fail a
+  whole 60 s wait.
 - A gesture AUA declined as `unsafe_action_target` ("No gesture was sent") also counts as a no-action
   miss. It carries no screen, so the classifier refused it, and one declined long-press voided a pass
   both judges had given.

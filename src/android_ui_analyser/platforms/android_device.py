@@ -985,14 +985,23 @@ class Uiautomator2Device(AndroidRuntimeBase):
             return call()
         except read_budget.ReadDeadlineExceeded:
             raise
-        except DeviceError:
-            # One bad reply is not a broken device. A wait's poll lost its whole 60 s budget to
-            # a single failed read twice on 2026-09-28, while the next read would have worked.
-            # Retry once while the budget allows; a second failure is the answer.
-            if budget.remaining() < 0.5:
-                raise
+        except DeviceError as first:
+            error = first
+        # One bad reply is not a broken device. A wait's poll lost its whole 60 s budget to a
+        # single failed read twice on 2026-09-28, while the next read would have worked. Retry once
+        # while the budget allows; a second failure is the answer, unless it is uiautomator's
+        # StaleObjectException, which reports only that the tree changed under the dump. A
+        # streaming reply does that for seconds: on 2026-09-29 both tries of two waits hit it, and
+        # the row failed. That one keeps being read while the budget lasts.
+        while budget.remaining() >= 0.5:
             time.sleep(0.2)
-            return call()
+            try:
+                return call()
+            except DeviceError as again:
+                error = again
+                if "StaleObjectException" not in str(again):
+                    break
+        raise error
 
     def _bounded_shell(self, command: str) -> str:
         return self._bounded_command(["shell", command])

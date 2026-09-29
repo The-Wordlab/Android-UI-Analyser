@@ -222,6 +222,39 @@ def test_a_second_failure_and_an_exhausted_budget_are_not_retried(monkeypatch):
     assert len(calls) == 1, "no retry once the budget cannot hold one"
 
 
+def test_a_tree_that_changed_under_the_dump_is_read_again_while_the_budget_lasts(monkeypatch):
+    from android_ui_analyser import read_budget
+    from android_ui_analyser.errors import DeviceError
+    from android_ui_analyser.platforms import android_bounded_reads
+
+    calls = []
+    stale = DeviceError("bounded Android UI read failed (androidx.test.uiautomator.StaleObjectException); "
+                        "no reconnect attempted")
+
+    def settles_on_the_fourth_read(*_args):
+        calls.append(1)
+        if len(calls) < 4:
+            raise stale
+        return "<hierarchy/>"
+
+    monkeypatch.setattr(android_bounded_reads, "rpc", settles_on_the_fourth_read)
+    with read_budget.activate(ReadBudget(time.monotonic() + 5, time.monotonic)):
+        assert _rpc_device()._bounded_rpc("dumpWindowHierarchy", [False, 50]) == "<hierarchy/>"
+    assert len(calls) == 4
+
+    def never_settles(*_args):
+        calls.append(1)
+        raise stale
+
+    calls.clear()
+    monkeypatch.setattr(android_bounded_reads, "rpc", never_settles)
+    started = time.monotonic()
+    with read_budget.activate(ReadBudget(time.monotonic() + 1.5, time.monotonic)), pytest.raises(DeviceError):
+        _rpc_device()._bounded_rpc("dumpWindowHierarchy", [False, 50])
+    assert time.monotonic() - started < 1.5, "the budget still bounds it"
+    assert len(calls) > 2
+
+
 def test_a_server_error_reply_keeps_its_reason():
     from android_ui_analyser.errors import DeviceError
 
