@@ -756,6 +756,9 @@ def judge_image_frames(frames: Sequence[Any], final: Any, index: Mapping[str, st
     return result
 
 
+RAW_IMAGE_KEY = "raw:"
+
+
 def screenshot_index(manifest_path: Any) -> dict[str, str]:
     """Map an observation fingerprint to the screenshot AUA captured with it.
 
@@ -776,6 +779,11 @@ def screenshot_index(manifest_path: Any) -> dict[str, str]:
         fingerprint = evidence_id.rsplit(":", 1)[-1]
         if fingerprint and Path(str(shot)).is_file():
             index.setdefault(fingerprint, str(shot))
+            # The evidence copy of one raw capture, which the run cache may rotate away before the
+            # judge runs. Unlike the fingerprint, it names one moment, not every twin of a tree.
+            raw = (entry.get("observation_contract") or {}).get("image_path")
+            if isinstance(raw, str) and raw:
+                index.setdefault(RAW_IMAGE_KEY + raw, str(shot))
     return index
 
 
@@ -806,14 +814,18 @@ def frame_screenshot(frame: Any, index: Mapping[str, str]) -> str | None:
     The fingerprint hashes the element tree, and a theme change leaves that tree identical: the
     light and the dark Chats home shared one, so a light frame was paired with the dark image and
     both judges failed a theme that had switched correctly (settings-app-theme, 2026-09-28). Each
-    observation names its own image in ``meta.raw_image``; the index is the fallback.
+    observation names its own image in ``meta.raw_image``, and the manifest names the evidence copy
+    of that image once the run cache has pruned it; the fingerprint is the last resort.
     """
     if isinstance(frame, dict):
         for candidate in (frame, frame.get("observation") if isinstance(frame.get("observation"), dict) else None):
             meta = candidate.get("meta") if isinstance(candidate, dict) else None
             raw = meta.get("raw_image") if isinstance(meta, dict) else None
-            if isinstance(raw, str) and raw and Path(raw).is_file():
-                return raw
+            if isinstance(raw, str) and raw:
+                if Path(raw).is_file():
+                    return raw
+                if index.get(RAW_IMAGE_KEY + raw):
+                    return index[RAW_IMAGE_KEY + raw]
     return screenshot_for(index, frame_fingerprint(frame))
 
 

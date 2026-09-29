@@ -8,6 +8,7 @@ immediate-change and navigation bullets unverified (settings-app-theme, 2026-09-
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 from experiments.aua_controller.judgement import (
@@ -63,3 +64,22 @@ def test_a_frame_is_paired_with_its_own_screenshot_not_its_twins(tmp_path: Path)
     assert rendered_appearance(frame_screenshot(frame, index))["reads_as"] == "light"
     gone = {"observation": {"meta": {"fingerprint": "samefingerprint", "raw_image": str(tmp_path / "pruned.png")}}}
     assert frame_screenshot(gone, index) == str(dark), "a pruned capture falls back to the index"
+
+
+def test_a_pruned_capture_is_paired_with_the_evidence_copy_of_itself(tmp_path: Path) -> None:
+    """Live, the run cache had rotated the raw captures away before the judge ran, so every frame of
+    the Chats home fell back to the first image of that element tree -- a dark one. The light home
+    after Light Mode reached the judge as dark, and both judges failed a theme that had switched."""
+    from experiments.aua_controller.judgement import frame_screenshot, screenshot_index
+
+    dark, light = _png(tmp_path, "007-samefingerprint", 18), _png(tmp_path, "012-samefingerprint", 245)
+    entries = [{"evidence_id": "s:observation:samefingerprint", "screenshot": str(shot),
+                "observation_contract": {"image_path": str(tmp_path / raw)}}
+               for shot, raw in ((dark, "cache-1.png"), (light, "cache-2.png"))]
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    index = screenshot_index(manifest)
+    light_home = {"observation": {"meta": {"fingerprint": "samefingerprint",
+                                           "raw_image": str(tmp_path / "cache-2.png")}}}
+    assert frame_screenshot(light_home, index) == str(light)
+    assert rendered_appearance(frame_screenshot(light_home, index))["reads_as"] == "light"

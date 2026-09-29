@@ -36,6 +36,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- A judged frame whose raw capture the run cache already pruned is paired with the evidence copy
+  of that same capture, which the manifest records, before falling back to its fingerprint. The
+  light and the dark Chats home share one fingerprint, so the light home after Light Mode reached
+  the judge with the first, dark image of that tree, and both judges failed a theme that switched.
 - The real-app controller is told that a check showing something other than what the goal expects
   is a result to report with `achieved`, and that `blocked` is only for a step it cannot do. A
   persistence row saw its pin gone after a relaunch and finished `blocked`, and a blocked claim
