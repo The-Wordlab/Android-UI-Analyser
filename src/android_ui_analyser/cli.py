@@ -9366,6 +9366,9 @@ def api_check_cmd(
         True, "--fetch/--no-fetch", help="`git fetch --tags` each client repo first."
     ),
     client: list[str] = typer.Option([], "--client", help="Only this client; repeatable."),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Export cached ref specs again (the exporter's setup changed)."
+    ),
 ) -> None:
     """Report each backend change beside the client versions and source lines that call it."""
 
@@ -9383,6 +9386,7 @@ def api_check_cmd(
             head_spec=head_spec,
             fetch=fetch,
             only=client,
+            refresh=refresh,
         )
         typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
 

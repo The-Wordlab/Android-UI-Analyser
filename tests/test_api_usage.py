@@ -257,7 +257,7 @@ def test_the_base_spec_is_exported_from_its_ref_without_touching_the_backend_che
     assert (backend / "fields.txt").read_text() == "price\n"
     assert _git(backend, "worktree", "list").count("\n") == 1
     sha = _git(backend, "rev-parse", "main").strip()
-    assert (tmp_path / "cache" / "api-usage" / "specs" / f"{sha}.json").is_file()
+    assert list((tmp_path / "cache" / "api-usage" / "specs").glob(f"{sha}-*.json"))
 
 
 @pytest.mark.parametrize(
@@ -280,3 +280,59 @@ def test_a_missing_config_shows_an_example(tmp_path):
     with pytest.raises(UsageError) as raised:
         load_config(tmp_path / "absent.yaml")
     assert "spec_command" in (raised.value.hint or "")
+
+
+def test_retrofit_reads_the_http_annotation_whatever_order_its_arguments_are_in(tmp_path):
+    # A shipped client deleted threads through `@HTTP(method = "DELETE", …)`, unseen until now.
+    app = _repo(tmp_path / "example-android")
+    api = (
+        "interface ExampleApi {\n"
+        '    @HTTP(method = "DELETE", path = "threads", hasBody = true)\n'
+        "    suspend fun a(@Body ids: Ids): Any\n"
+        '    @HTTP(path = "items/{itemId}", method = "PATCH")\n'
+        "    suspend fun b(): Any\n"
+        "}\n"
+    )
+    _commit(app, {"data/Api.kt": api}, "2026-01-01T00:00:00")
+    config = _write(
+        tmp_path / "aua-api.yaml",
+        f"backend: {{repo: {app}}}\nclients:\n"
+        f"  - {{name: android, repo: {app}, branch: main, scanner: retrofit, base_path: /api/v1/}}\n",
+    )
+
+    result = usage(config, tmp_path / "cache", fetch=False)
+
+    assert [c["call"] for c in result["calls"]] == [
+        "DELETE /api/v1/threads",
+        "PATCH /api/v1/items/{}",
+    ]
+
+
+def test_a_cached_base_spec_is_exported_again_when_its_exporter_changes_or_on_refresh(tmp_path):
+    app = _client_history(tmp_path)
+    backend = _repo(tmp_path / "example-backend")
+    environment = tmp_path / "exporter-environment.txt"  # stands in for installed dependencies
+    environment.write_text("name\n")
+    exporter = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        f"fields = Path({str(environment)!r}).read_text().split() + sys.argv[2:]\n"
+        "props = {f: {'type': 'string'} for f in fields}\n"
+        "op = {'responses': {'200': {'content': {'application/json': {'schema':\n"
+        "    {'type': 'object', 'properties': props}}}}}}\n"
+        "Path(sys.argv[1]).write_text(json.dumps({'paths': {'/api/v1/items': {'get': op}}}))\n"
+    )
+    _commit(backend, {"export.py": exporter}, "2026-03-01T00:00:00")
+    head = _write(tmp_path / "head.json", _spec({"/api/v1/items": {"get": _op()}}))
+
+    def removed(extra: str = "", refresh: bool = False) -> list[str]:
+        command = f"{sys.executable} export.py {{out}}{extra}"
+        config = _config(tmp_path, app, backend, base="main", spec_command=command)
+        result = check(config, tmp_path / "cache", head_spec=head, fetch=False, refresh=refresh)
+        return sorted(f["field"] for f in result["findings"])
+
+    assert removed() == ["name"]
+    environment.write_text("name price\n")
+    assert removed() == ["name"]  # same commit, same exporter: the cached export stands
+    assert removed(refresh=True) == ["name", "price"]
+    assert removed(extra=" extra") == ["extra", "name", "price"]  # a new exporter is a new export

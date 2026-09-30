@@ -1432,7 +1432,7 @@ backend:
 clients:
   - name: android
     repo: ../example-android
-    scanner: retrofit                 # @GET("items") etc. in *.kt / *.java
+    scanner: retrofit                 # @GET("items"), @HTTP(method = …, path = …) in *.kt / *.java
     base_path: /api/v1/
     tags: "v*"                        # one entry per released version…
     version: {tag_pattern: '^v(\d+\.\d+\.\d+)'}   # …or {file: …, pattern: …}
@@ -1442,7 +1442,7 @@ clients:
     repo: ../example-web
     files: ["src/*"]
     exclude: ["*.test.*"]
-    pattern: '(?P<path>/api/v1(?:/[A-Za-z0-9_\-{}$]+)+)'   # a `method` group is optional
+    pattern: '(?P<path>/api/v1(?:/[A-Za-z0-9_\-{}$]+)+)'   # or a list; a `method` group is optional
 ```
 
 ```bash
@@ -1453,8 +1453,9 @@ aua api usage "GET /api/v1/items"     # which versions call it, and from where
 
 A finding is a candidate: AUA matched the route, not the fields each client decodes. The
 result's `agent_brief` says how to confirm it in the client's model. A base spec is exported
-from an extracted copy of that ref and cached by commit; client files are cached by blob id, so a
-repeat run reads only what changed. Partial clones (`--filter=blob:none`) are fetched in one
+from an extracted copy of that ref and cached by commit and export command (`--refresh` exports
+again after the exporter's setup changed); client files are cached by blob id, so a repeat run
+reads only what changed. Partial clones (`--filter=blob:none`) are fetched in one
 batch rather than one file at a time.
 
 ---

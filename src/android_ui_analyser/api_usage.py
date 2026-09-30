@@ -69,9 +69,12 @@ CONFIG_HINT = (
     "    pattern: '(?P<path>/api/v1(?:/[A-Za-z0-9_\\-{}$]+)+)'"
 )
 
-_RETROFIT = (
-    r'@(?P<method>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\(\s*(?:value\s*=\s*)?"(?P<path>[^"]*)"'
-)
+_RETROFIT = [
+    r'@(?P<method>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\(\s*(?:value\s*=\s*)?"(?P<path>[^"]*)"',
+    # `@HTTP(method = "DELETE", path = "…", hasBody = true)` — the only way Retrofit sends a
+    # DELETE with a body; the lookaheads accept the arguments in either order.
+    r'@HTTP\((?=[^)]*\bmethod\s*=\s*"(?P<method>[A-Za-z]+)")(?=[^)]*\bpath\s*=\s*"(?P<path>[^"]*)")',
+]
 _SCANNERS: dict[str, dict[str, Any]] = {
     "retrofit": {"pattern": _RETROFIT, "files": ["*.kt", "*.java"]},
 }
@@ -119,8 +122,11 @@ def load_config(path: str | Path) -> dict[str, Any]:
                 f"client {client['name']} needs `scanner`, or both `pattern` and `files`",
                 hint=CONFIG_HINT,
             )
-        if "(?P<path>" not in str(client["pattern"]):
-            raise UsageError(f"client {client['name']}: `pattern` needs a named group `path`")
+        # One pattern, or a list of them for a client that spells a call more than one way.
+        if isinstance(client["pattern"], str):
+            client["pattern"] = [client["pattern"]]
+        if any("(?P<path>" not in str(p) for p in client["pattern"]):
+            raise UsageError(f"client {client['name']}: every `pattern` needs a named group `path`")
     return {"file": str(file), "backend": backend, "clients": clients}
 
 
@@ -323,15 +329,18 @@ def _signature(client: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(keyed, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def _scan_text(text: str, pattern: re.Pattern[str], client: dict[str, Any]) -> list[list[Any]]:
+def _scan_text(
+    text: str, patterns: list[re.Pattern[str]], client: dict[str, Any]
+) -> list[list[Any]]:
     calls = []
     default_method = str(client.get("method") or "*").upper()
-    for match in pattern.finditer(text):
-        groups = match.groupdict()
-        method = (groups.get("method") or default_method).upper()
-        path = normalize_path(groups["path"], str(client.get("base_path") or ""))
-        calls.append([method, path, text.count("\n", 0, match.start()) + 1])
-    return calls
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            groups = match.groupdict()
+            method = (groups.get("method") or default_method).upper()
+            path = normalize_path(groups["path"], str(client.get("base_path") or ""))
+            calls.append([method, path, text.count("\n", 0, match.start()) + 1])
+    return sorted(calls, key=lambda call: call[2])
 
 
 def scan_client(client: dict[str, Any], cache_dir: Path, *, fetch: bool) -> dict[str, Any]:
@@ -347,14 +356,14 @@ def scan_client(client: dict[str, Any], cache_dir: Path, *, fetch: bool) -> dict
     labels: dict[str, str] = cache.get("labels") or {}
     fetched = _fetch(repo) if fetch else "skipped"
     refs = _refs(client, labels)
-    pattern = re.compile(str(client["pattern"]), re.MULTILINE)
+    patterns = [re.compile(str(p), re.MULTILINE) for p in client["pattern"]]
     include = list(client["files"])
     exclude = list(client.get("exclude") or [])
     listed = {ref["label"]: _files_at(repo, ref["sha"], include, exclude) for ref in refs}
     unseen = sorted({blob for files in listed.values() for blob, _ in files if blob not in blobs})
     _prefetch(repo, unseen)
     for blob, text in _read_blobs(repo, unseen).items():
-        blobs[blob] = _scan_text(text, pattern, client)
+        blobs[blob] = _scan_text(text, patterns, client)
     # Not cached, so the next run tries again.
     unreadable = sum(blob not in blobs for blob in unseen)
     calls: dict[str, list[dict[str, Any]]] = {}
@@ -407,15 +416,18 @@ def _run_spec_command(backend: dict[str, Any], checkout: str) -> dict[str, Any]:
 
 
 def _spec_at(
-    backend: dict[str, Any], ref: str, cache_dir: Path
+    backend: dict[str, Any], ref: str, cache_dir: Path, *, refresh: bool = False
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     repo = backend["repo"]
     sha = _rev(repo, ref)
     if sha is None:
         raise UsageError(f"backend ref {ref!r} does not resolve in {repo}")
-    cached = cache_dir / "specs" / f"{sha}.json"
+    # A commit alone does not name an export: a different exporter can describe the same code
+    # differently. `refresh` covers what the key cannot see, such as reinstalled dependencies.
+    exporter = hashlib.sha256(str(backend.get("spec_command")).encode()).hexdigest()[:12]
+    cached = cache_dir / "specs" / f"{sha}-{exporter}.json"
     info = {"ref": ref, "sha": sha}
-    if cached.is_file():
+    if cached.is_file() and not refresh:
         return json.loads(cached.read_text()), info
     # An export of a ref other than the working tree runs in an extracted copy, so the
     # backend checkout — and whatever someone has in progress there — is never touched.
@@ -553,6 +565,7 @@ def check(
     head_spec: str | None = None,
     fetch: bool = True,
     only: list[str] | None = None,
+    refresh: bool = False,
 ) -> dict[str, Any]:
     """What the backend change from *base* to *head* touches in every configured client."""
 
@@ -563,11 +576,11 @@ def check(
         spec_before, base_info = _load_spec_file(base_spec)
     else:
         base_ref = base or backend.get("base") or "origin/HEAD"
-        spec_before, base_info = _spec_at(backend, base_ref, store)
+        spec_before, base_info = _spec_at(backend, base_ref, store, refresh=refresh)
     if head_spec:
         spec_after, head_info = _load_spec_file(head_spec)
     elif head:
-        spec_after, head_info = _spec_at(backend, head, store)
+        spec_after, head_info = _spec_at(backend, head, store, refresh=refresh)
     else:
         spec_after, head_info = _working_tree_spec(backend)
     diff = diff_specs(spec_before, spec_after)
