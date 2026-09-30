@@ -231,6 +231,27 @@ class IOSSimulatorRuntime(TargetRuntime):
         native_x, native_y = self._native(x, y)
         self._tools.axe("touch", "-x", native_x, "-y", native_y, "--up", "--udid", self.target_id)
 
+    def drag(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        duration_ms: int = 500,
+        hold_ms: int = 0,
+    ) -> None:
+        """AXe exposes no touch-move, so a drag is its single-pointer swipe: one press, a
+        continuous move over *duration_ms*, one release. A still hold before moving has no
+        AXe verb, so it is refused rather than dropped."""
+
+        if hold_ms > 0:
+            raise DeviceError(
+                "a hold before dragging is unsupported on iOS simulators",
+                code="drag_hold_unsupported",
+                hint="Retry without hold_ms; the drag then starts moving at once.",
+            )
+        self.swipe(x1, y1, x2, y2, duration_ms)
+
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> None:
         start_x, start_y = self._native(x1, y1)
         end_x, end_y = self._native(x2, y2)

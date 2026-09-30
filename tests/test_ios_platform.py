@@ -828,3 +828,24 @@ def test_doctor_fix_leaves_an_installed_axe_alone(adapter: IOSPlatform, host: Fa
     assert report["fixed"] == []
     assert "axe is already installed" in report["skipped"]
     assert not [call for call in host.calls if call[0] == "brew"]
+
+
+def test_ios_drag_is_axes_single_pointer_swipe_and_refuses_a_hold(
+    adapter: IOSPlatform, host: FakeSimulatorHost
+) -> None:
+    runtime = adapter.connect(None)
+    assert adapter.supports("device.drag")
+    host.calls.clear()
+
+    runtime.drag(30, 60, 90, 150, 600, 0)
+
+    (call,) = host.argv_of("axe", "swipe")
+    assert call[1:] == (
+        "swipe", "--start-x", "10", "--start-y", "20", "--end-x", "30", "--end-y", "50",
+        "--duration", "0.6", "--udid", UDID,
+    )
+    with pytest.raises(DeviceError) as caught:
+        runtime.drag(30, 60, 90, 150, 600, 300)
+    assert caught.value.code == "drag_hold_unsupported"
+    assert len(host.argv_of("axe", "swipe")) == 1
+    assert not host.argv_of("axe", "touch")

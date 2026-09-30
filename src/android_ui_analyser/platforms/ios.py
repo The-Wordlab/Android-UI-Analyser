@@ -64,6 +64,7 @@ class IOSPlatform(PlatformAdapter):
             "feature_flags",
             "device.clipboard",
             "device.location",
+            "device.drag",
             "device.touch",
             "ui.input",
             "ui.peek",
