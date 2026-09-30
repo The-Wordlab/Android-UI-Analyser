@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.31.1] - 2026-09-30
+
 ### Fixed
 
 - Teardown closes the target connection it opens to replay an undo. The watchdog retries a
@@ -1653,5 +1655,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.30.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.30.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.31.0...HEAD
 [0.31.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.31.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.31.1...HEAD
+[0.31.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.31.1
