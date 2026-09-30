@@ -109,6 +109,9 @@ def _type_of(spec: dict[str, Any], node: Any, depth: int = 0) -> str:
     kind = resolved.get("type")
     if isinstance(kind, list):
         return "|".join(sorted(k for k in kind if k != "null")) or "null"
+    if kind == "array":
+        items = _type_of(spec, resolved.get("items"), depth + 1) if depth < _MAX_DEPTH else "any"
+        return f"array<{items}>"
     if kind:
         return str(kind)
     if ref or "properties" in resolved or "allOf" in resolved:
@@ -116,10 +119,71 @@ def _type_of(spec: dict[str, Any], node: Any, depth: int = 0) -> str:
     return "any"
 
 
+def _enum_of(spec: dict[str, Any], node: Any, depth: int = 0) -> list[str] | None:
+    """The values a field may hold, or ``None`` when it is not restricted to a set."""
+
+    resolved, _ = _deref(spec, node)
+    if "enum" in resolved:
+        return sorted(str(v) for v in resolved["enum"] if v is not None)
+    if "const" in resolved:
+        return [str(resolved["const"])]
+    variants = [v for v in _variants(resolved) if not _is_null(spec, v)]
+    if variants and depth < _MAX_DEPTH:
+        sets = [_enum_of(spec, v, depth + 1) for v in variants]
+        return None if any(s is None for s in sets) else sorted(set().union(*sets))  # type: ignore[arg-type]
+    if resolved.get("type") == "array" and depth < _MAX_DEPTH:
+        return _enum_of(spec, resolved.get("items"), depth + 1)
+    return None
+
+
+def _alternatives(kind: str) -> set[str]:
+    """``integer|array<a|b>`` → ``{"integer", "array<a|b>"}``."""
+
+    found, depth, start = set(), 0, 0
+    for i, char in enumerate(kind):
+        depth += {"<": 1, ">": -1}.get(char, 0)
+        if char == "|" and depth == 0:
+            found.add(kind[start:i])
+            start = i + 1
+    found.add(kind[start:])
+    return found
+
+
+def _merge(out: dict[str, dict[str, Any]], found: dict[str, dict[str, Any]]) -> None:
+    """Fold *found* into *out*, as alternatives: a union's branches must not overwrite each other."""
+
+    for path, new in found.items():
+        old = out.get(path)
+        if old is None:
+            out[path] = new
+            continue
+        enums = (
+            None
+            if old["enum"] is None or new["enum"] is None
+            else set(old["enum"]) | set(new["enum"])
+        )
+        out[path] = {
+            **old,
+            "type": "|".join(sorted(_alternatives(old["type"]) | _alternatives(new["type"]))),
+            "required": old["required"] and new["required"],
+            "nullable": old["nullable"] or new["nullable"],
+            "enum": None if enums is None else sorted(enums),
+        }
+
+
 def fields(
-    spec: dict[str, Any], node: Any, prefix: str = "", stack: tuple[str, ...] = ()
+    spec: dict[str, Any],
+    node: Any,
+    prefix: str = "",
+    stack: tuple[str, ...] = (),
+    owner: str | None = None,
+    local: str = "",
 ) -> dict[str, dict[str, Any]]:
-    """Every field under *node* as ``a.b[].c`` → type, required, nullable."""
+    """Every field under *node* as ``a.b[].c`` → type, required, nullable, enum.
+
+    Each field also names the schema component that declares it (``schema``) and its path inside
+    that component (``schema_field``), so one change to a shared model reads as one change.
+    """
 
     out: dict[str, dict[str, Any]] = {}
     resolved, ref = _deref(spec, node)
@@ -127,24 +191,30 @@ def fields(
         if ref in stack:
             return out
         stack = (*stack, ref)
+        owner, local = ref.rsplit("/", 1)[-1], ""
     if len(stack) > _MAX_DEPTH:
         return out
     for variant in _variants(resolved):
         if not _is_null(spec, variant):
-            out.update(fields(spec, variant, prefix, stack))
+            _merge(out, fields(spec, variant, prefix, stack, owner, local))
     for part in resolved.get("allOf") or []:
-        out.update(fields(spec, part, prefix, stack))
+        out.update(fields(spec, part, prefix, stack, owner, local))
     if resolved.get("type") == "array" or "items" in resolved:
-        out.update(fields(spec, resolved.get("items") or {}, prefix + "[]", stack))
+        items = resolved.get("items") or {}
+        _merge(out, fields(spec, items, prefix + "[]", stack, owner, local + "[]"))
     required = set(resolved.get("required") or [])
     for name, sub in (resolved.get("properties") or {}).items():
         path = f"{prefix}.{name}" if prefix else name
+        here = f"{local}.{name}" if local else name
         out[path] = {
             "type": _type_of(spec, sub),
             "required": name in required,
             "nullable": _nullable(spec, sub),
+            "enum": _enum_of(spec, sub),
+            "schema": owner,
+            "schema_field": here,
         }
-        out.update(fields(spec, sub, path, stack))
+        _merge(out, fields(spec, sub, path, stack, owner, here))
     return out
 
 
@@ -155,23 +225,46 @@ def _json_schema(content: Any) -> Any:
     return media.get("schema") if isinstance(media, dict) else None
 
 
-def _response_fields(spec: dict[str, Any], op: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    for status in sorted((op.get("responses") or {}), key=str):
+def _success_bodies(spec: dict[str, Any], op: dict[str, Any]) -> list[Any]:
+    """The schema of every 2xx response that has a body (``{}`` when it is undescribed)."""
+
+    bodies = []
+    for status, raw in (op.get("responses") or {}).items():
         if str(status).startswith("2"):
-            response, _ = _deref(spec, op["responses"][status])
-            schema = _json_schema(response.get("content"))
-            return fields(spec, schema) if schema is not None else {}
-    return {}
+            response, _ = _deref(spec, raw)
+            if response.get("content"):
+                bodies.append(_json_schema(response["content"]) or {})
+    return bodies
 
 
-def _required_params(spec: dict[str, Any], params: list[Any]) -> set[str]:
-    required = set()
+def _response_fields(spec: dict[str, Any], op: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for schema in _success_bodies(spec, op):
+        _merge(out, fields(spec, schema))
+    return out
+
+
+def untyped_response(spec: dict[str, Any], op: dict[str, Any]) -> bool:
+    """A success body the spec does not describe, so only removing the operation is visible."""
+
+    return any(
+        not fields(spec, schema) and _type_of(spec, schema) in ("any", "object")
+        for schema in _success_bodies(spec, op)
+    )
+
+
+def _params(spec: dict[str, Any], params: list[Any]) -> dict[str, dict[str, Any]]:
+    found = {}
     for raw in params:
         param, _ = _deref(spec, raw)
-        # A path parameter is part of the route the client already builds, not a new demand.
-        if param.get("required") and param.get("in") != "path":
-            required.add(f"{param.get('in')}:{param.get('name')}")
-    return required
+        schema = param.get("schema") or {}
+        found[f"{param.get('in')}:{param.get('name')}"] = {
+            # A path parameter is part of the route the client already builds, not a new demand.
+            "demanded": bool(param.get("required")) and param.get("in") != "path",
+            "type": _type_of(spec, schema),
+            "enum": _enum_of(spec, schema),
+        }
+    return found
 
 
 def _body(spec: dict[str, Any], op: dict[str, Any]) -> tuple[bool, dict[str, dict[str, Any]]]:
@@ -197,40 +290,81 @@ def _spelling(path: str) -> str:
     return path.replace("_", "").replace("-", "").lower()
 
 
+def _comparable(old: str, new: str) -> bool:
+    return "any" not in old and "any" not in new
+
+
+def _widens(old: str, new: str) -> bool:
+    """A response may now send a type a client built against *old* has never seen."""
+
+    return _comparable(old, new) and bool(_alternatives(new) - _alternatives(old))
+
+
+def _narrows(old: str, new: str) -> bool:
+    """A request may no longer accept a type a client built against *old* sends."""
+
+    return _comparable(old, new) and bool(_alternatives(old) - _alternatives(new))
+
+
+def _quoted(values: list[str]) -> str:
+    return ", ".join(f"`{v}`" for v in values)
+
+
+def _adds(old: list[str] | None, new: list[str] | None) -> str | None:
+    if old is None:
+        return None
+    if new is None:
+        return "no longer an enum"
+    extra = sorted(set(new) - set(old))
+    return f"adds {_quoted(extra)}" if extra else None
+
+
+def _rejects(old: list[str] | None, new: list[str] | None) -> str | None:
+    if new is None:
+        return None
+    if old is None:
+        return f"now only accepts {_quoted(new)}"
+    gone = sorted(set(old) - set(new))
+    return f"rejects {_quoted(gone)}" if gone else None
+
+
+def _at(path: str, record: dict[str, Any]) -> dict[str, Any]:
+    where: dict[str, Any] = {"field": path}
+    if record.get("schema"):
+        where |= {"schema": record["schema"], "schema_field": record["schema_field"]}
+    return where
+
+
 def _response_changes(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
     changes: list[dict[str, Any]] = []
     removed: set[str] = set()
     respelled = {_spelling(path): path for path in after}
     for path, old in before.items():
         new = after.get(path)
+        where = _at(path, old)
         if new is None:
             # One finding for a removed object, not one per field inside it.
             if not _under_reported(path, removed):
-                change = {"change": "response_field_removed", "field": path}
+                change = {"change": "response_field_removed", **where}
                 # `created_at` → `createdAt` is still a removal for a client decoding the old
                 # key, but the agent needs to know to look for the old spelling.
                 if _spelling(path) in respelled:
-                    change["detail"] = f"renamed to `{respelled[_spelling(path)]}`?"
+                    leaf = respelled[_spelling(path)].rsplit(".", 1)[-1]
+                    change["detail"] = f"renamed to `{leaf}`?"
                 changes.append(change)
             removed.add(path)
             continue
-        if "any" not in (old["type"], new["type"]) and old["type"] != new["type"]:
-            changes.append(
-                {
-                    "change": "response_field_type_changed",
-                    "field": path,
-                    "detail": f"{old['type']} → {new['type']}",
-                }
-            )
-        was_guaranteed = old["required"] and not old["nullable"]
-        if was_guaranteed and (not new["required"] or new["nullable"]):
-            changes.append(
-                {
-                    "change": "response_field_now_optional",
-                    "field": path,
-                    "detail": "no longer required" if not new["required"] else "now nullable",
-                }
-            )
+        if _widens(old["type"], new["type"]):
+            detail = f"{old['type']} → {new['type']}"
+            changes.append({"change": "response_field_type_changed", **where, "detail": detail})
+        if old["required"] and not new["required"]:
+            changes.append({"change": "response_field_now_optional", **where})
+        if not old["nullable"] and new["nullable"]:
+            changes.append({"change": "response_field_now_nullable", **where})
+        added = _adds(old["enum"], new["enum"])
+        if added:
+            # An addition, and still a break: a strict enum fails on a value it has never seen.
+            changes.append({"change": "response_enum_value_added", **where, "detail": added})
     return changes
 
 
@@ -241,34 +375,45 @@ def _request_changes(
     after: dict[str, Any],
 ) -> list[dict[str, Any]]:
     changes: list[dict[str, Any]] = []
-    new_params = _required_params(spec_after, after["parameters"]) - _required_params(
-        spec_before, before["parameters"]
-    )
-    for param in sorted(new_params):
-        changes.append({"change": "request_parameter_now_required", "field": param})
+    old_params = _params(spec_before, before["parameters"])
+    for key, new in sorted(_params(spec_after, after["parameters"]).items()):
+        old = old_params.get(key)
+        if new["demanded"] and (old is None or not old["demanded"]):
+            changes.append({"change": "request_parameter_now_required", "field": key})
+        if old is None:
+            continue
+        if _narrows(old["type"], new["type"]):
+            detail = f"{old['type']} → {new['type']}"
+            changes.append(
+                {"change": "request_parameter_type_changed", "field": key, "detail": detail}
+            )
+        rejected = _rejects(old["enum"], new["enum"])
+        if rejected:
+            changes.append(
+                {"change": "request_enum_value_removed", "field": key, "detail": rejected}
+            )
     old_required, old_body = _body(spec_before, before["op"])
     new_required, new_body = _body(spec_after, after["op"])
     if new_required and not old_required:
         changes.append({"change": "request_body_now_required"})
     for path, new in new_body.items():
         old = old_body.get(path)
+        where = _at(path, new)
         # An old client can only send fields that existed when it was built, so a required
         # field inside an object that is itself new asks nothing of it.
         reachable = all(parent in old_body for parent in _ancestors(path))
         if new["required"] and (old is None or not old["required"]) and reachable:
-            changes.append({"change": "request_field_now_required", "field": path})
-        elif (
-            old is not None
-            and "any" not in (old["type"], new["type"])
-            and old["type"] != new["type"]
-        ):
-            changes.append(
-                {
-                    "change": "request_field_type_changed",
-                    "field": path,
-                    "detail": f"{old['type']} → {new['type']}",
-                }
-            )
+            changes.append({"change": "request_field_now_required", **where})
+        if old is None:
+            continue
+        if _narrows(old["type"], new["type"]):
+            detail = f"{old['type']} → {new['type']}"
+            changes.append({"change": "request_field_type_changed", **where, "detail": detail})
+        if old["nullable"] and not new["nullable"]:
+            changes.append({"change": "request_field_no_longer_nullable", **where})
+        rejected = _rejects(old["enum"], new["enum"])
+        if rejected:
+            changes.append({"change": "request_enum_value_removed", **where, "detail": rejected})
     return changes
 
 

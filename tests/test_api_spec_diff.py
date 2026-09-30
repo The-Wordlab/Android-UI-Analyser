@@ -134,7 +134,7 @@ def test_the_diff_reports_only_what_an_already_shipped_client_can_feel():
 
     assert found == {
         ("GET /gone", "operation_removed", None),
-        ("GET /items", "response_field_now_optional", "title"),  # became nullable
+        ("GET /items", "response_field_now_nullable", "title"),
         ("GET /items", "response_field_type_changed", "count"),
         ("GET /items", "response_field_removed", "owner"),  # one finding, not one per child
         ("GET /items", "response_field_now_optional", "note"),  # no longer required
@@ -188,6 +188,197 @@ def test_a_field_that_only_changed_case_style_is_named_as_a_likely_rename():
 
     assert {(c["field"], c.get("detail")) for c in diff["changes"]} == {
         ("next_cursor", "renamed to `nextCursor`?"),
-        ("items[].next_cursor", "renamed to `items[].nextCursor`?"),
-        ("items[].created_at", "renamed to `items[].createdAt`?"),
+        ("items[].next_cursor", "renamed to `nextCursor`?"),
+        ("items[].created_at", "renamed to `createdAt`?"),
+    }
+
+
+def _changes(base: dict[str, Any], head: dict[str, Any]) -> set[tuple[Any, ...]]:
+    return {
+        (c["operation"], c["change"], c.get("field"), c.get("detail"))
+        for c in diff_specs(base, head)["changes"]
+    }
+
+
+def _enum(*values: str) -> dict[str, Any]:
+    return {"type": "string", "enum": list(values)}
+
+
+def test_a_new_value_in_a_response_enum_is_a_change_though_it_is_an_addition():
+    # A strict Codable or Moshi enum without a fallback fails on a value it has never seen.
+    base = _spec({"/a": {"get": _op({"state": _enum("on", "off"), "kind": _enum("x")})}})
+    head = _spec(
+        {"/a": {"get": _op({"state": _enum("on", "off", "paused"), "kind": {"type": "string"}})}}
+    )
+
+    assert _changes(base, head) == {
+        ("GET /a", "response_enum_value_added", "state", "adds `paused`"),
+        ("GET /a", "response_enum_value_added", "kind", "no longer an enum"),
+    }
+
+
+def test_optional_and_nullable_are_different_promises_and_both_are_watched():
+    base = _spec(
+        {
+            "/a": {
+                "get": _op(
+                    {"hint": {"type": "string"}, "name": {"type": "string"}}, required=["name"]
+                )
+            }
+        }
+    )
+    head = _spec(
+        {
+            "/a": {
+                "get": _op(
+                    {
+                        "hint": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "name": {"type": "string"},
+                    }
+                )
+            }
+        }
+    )
+
+    assert _changes(base, head) == {
+        # Optional before, but never null: a defaulted non-null property breaks on `null`.
+        ("GET /a", "response_field_now_nullable", "hint", None),
+        ("GET /a", "response_field_now_optional", "name", None),
+    }
+
+
+def test_array_elements_and_widened_response_types_are_compared():
+    def tags(items: dict[str, Any], total: Any) -> dict[str, Any]:
+        return _spec(
+            {"/a": {"get": _op({"tags": {"type": "array", "items": items}, "total": total})}}
+        )
+
+    narrowed = {"anyOf": [{"type": "integer"}, {"type": "string"}]}
+    changes = _changes(
+        tags({"type": "string"}, narrowed), tags({"type": "integer"}, {"type": "integer"})
+    )
+
+    # A response that narrows (`integer|string` → `integer`) only sends what clients already take.
+    assert changes == {
+        ("GET /a", "response_field_type_changed", "tags", "array<string> → array<integer>")
+    }
+
+
+def test_a_request_that_narrows_what_it_accepts_is_a_change():
+    def op(page: dict[str, Any], sort: dict[str, Any], note: dict[str, Any]) -> dict[str, Any]:
+        body = {"type": "object", "properties": {"note": note}}
+        return _spec(
+            {
+                "/a": {
+                    "post": {
+                        "parameters": [
+                            {"in": "query", "name": "page", "schema": page},
+                            {"in": "query", "name": "sort", "schema": sort},
+                        ],
+                        "requestBody": {"content": {"application/json": {"schema": body}}},
+                        "responses": {"200": {}},
+                    }
+                }
+            }
+        )
+
+    nullable = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    base = op({"type": "string"}, _enum("new", "old", "top"), nullable)
+    head = op({"type": "integer"}, _enum("new", "top"), {"type": "string"})
+
+    assert _changes(base, head) == {
+        ("POST /a", "request_parameter_type_changed", "query:page", "string → integer"),
+        ("POST /a", "request_enum_value_removed", "query:sort", "rejects `old`"),
+        ("POST /a", "request_field_no_longer_nullable", "note", None),
+    }
+
+
+def test_union_branches_merge_whatever_order_the_spec_lists_them_in():
+    def union(*branches: dict[str, Any]) -> dict[str, Any]:
+        return _spec(
+            {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {"schema": {"anyOf": list(branches)}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+    def branch(*kinds: str) -> dict[str, Any]:
+        return {"type": "object", "properties": {"kind": _enum(*kinds)}}
+
+    assert _changes(union(branch("a"), branch("b")), union(branch("b", "c"), branch("a"))) == {
+        ("GET /a", "response_enum_value_added", "kind", "adds `c`")
+    }
+
+
+def test_every_success_response_is_compared_not_only_the_first():
+    def op(created: dict[str, Any]) -> dict[str, Any]:
+        def body(props: dict[str, Any]) -> dict[str, Any]:
+            schema = {"type": "object", "properties": props}
+            return {"content": {"application/json": {"schema": schema}}}
+
+        return _spec(
+            {
+                "/a": {
+                    "post": {
+                        "responses": {"200": body({"id": {"type": "string"}}), "201": body(created)}
+                    }
+                }
+            }
+        )
+
+    assert _changes(op({"url": {"type": "string"}}), op({})) == {
+        ("POST /a", "response_field_removed", "url", None)
+    }
+
+
+def test_a_field_is_attributed_to_the_named_schema_that_declares_it():
+    score = {"type": "object", "properties": {"points": {"type": "integer"}}}
+    reply = {"type": "object", "properties": {"score": {"$ref": "#/components/schemas/Score"}}}
+    base = _spec(
+        {
+            "/score": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/Score"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/chat": {
+                "post": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/Reply"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        },
+        {"Score": score, "Reply": reply},
+    )
+    head = _spec(base["paths"], {"Score": {"type": "object", "properties": {}}, "Reply": reply})
+
+    changes = diff_specs(base, head)["changes"]
+
+    assert {(c["operation"], c["field"], c["schema"], c["schema_field"]) for c in changes} == {
+        ("GET /score", "points", "Score", "points"),
+        ("POST /chat", "score.points", "Score", "points"),
     }
