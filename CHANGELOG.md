@@ -17,6 +17,11 @@ notes, so you can check for a newer version — and read what changed — withou
   failing undo every 15 seconds, and each retry left its connection open: on the web a Playwright
   driver and a headless browser, on Android the uiautomator2 server holding UiAutomation. One
   stuck web undo grew to 276 drivers and ~1,100 Chrome processes in an hour and pinned the CPU.
+- A web or iOS session whose goal mentions an animation, transition or motion starts normally
+  and leaves no undo behind. The goal's wording turned on Android animation scales on every
+  platform, so the session failed on developer settings web and iOS do not have, after it had
+  already journalled an undo that no reaper could ever replay. An explicit `--animations` on such
+  a platform still fails, now before anything is recorded.
 
 ## [0.31.0] - 2026-09-30
 

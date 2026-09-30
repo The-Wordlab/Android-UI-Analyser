@@ -317,8 +317,10 @@ def _session_start_impl(
         # means every platform adapter gets the same neutral capability request; core never
         # reaches around it for Android tooling.
         normalized_needs.append("root")
-    animations_requested = bool(
-        animations or "animations" in normalized_needs or _ANIMATION_GOAL_RE.search(goal)
+    # A goal that merely mentions motion asks for animations only where the platform can turn
+    # them on. Web and iOS have no developer settings; the word alone must not fail the session.
+    animations_requested = bool(animations or "animations" in normalized_needs) or bool(
+        _ANIMATION_GOAL_RE.search(goal) and self.platform.supports("developer_settings")
     )
     # ``animations`` is a reversible session environment requirement, not a hardware
     # capability. Do not reject otherwise compatible targets for lacking a probe key. Apply
@@ -381,6 +383,9 @@ def _session_start_impl(
                     hint="No app setup was attempted; inspect the selected platform's audio setup.",
                 )
         if observation is None and animations_requested:
+            # Resolve the capability before recording its undo: an unsupported platform must
+            # fail here, not leave the ledger an undo no reaper can ever replay.
+            devopts = self.platform.capability("developer_settings")
             serial = str(prepared["serial"])
             target_key = TargetRef(self.platform.name, serial).storage_key
             animation_backup_path = (
@@ -398,7 +403,6 @@ def _session_start_impl(
                 detail="animation scales enabled for animation-aware session",
                 serial=serial,
             )
-            devopts = self.platform.capability("developer_settings")
             animation_state = devopts.anim_on(self.device, animation_backup_path)
             scales = (animation_state or {}).get("anim") or {}
             animations_enabled = bool(scales) and all(
@@ -695,7 +699,7 @@ def _session_start_impl(
                 else "needs"
                 if "animations" in normalized_needs
                 else "goal"
-                if _ANIMATION_GOAL_RE.search(goal)
+                if animations_requested
                 else "default"
             ),
         },

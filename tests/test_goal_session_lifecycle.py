@@ -9,13 +9,13 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from android_ui_analyser import device_ledger, journal, leases, network, network_profiles
 from android_ui_analyser import engine as engine_mod
-from android_ui_analyser import journal, leases, network, network_profiles
 from android_ui_analyser.cli import _apply_phases_done, app
 from android_ui_analyser.coaching import decorate_result
 from android_ui_analyser.daemon import dispatch
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.errors import DeviceError
+from android_ui_analyser.errors import DeviceError, UnsupportedPlatformCapabilityError
 from android_ui_analyser.schema import AnalyzeResult, DeviceInfo, Element, Meta, Screen, Source
 from android_ui_analyser.session import (
     complete_environment_phase,
@@ -645,6 +645,42 @@ def test_explicit_animation_session_controls_enable_and_restore(
 
     engine.session_finish(started["session_id"], allow_incomplete=True)
     assert devopts.read_state(engine.device.shell)["anim"]["window_animation_scale"] == "0"
+
+
+def _without_developer_settings(engine: Engine, monkeypatch: Any) -> None:
+    """Web and iOS: a platform that cannot set animation scales."""
+    monkeypatch.setattr(
+        engine.platform, "capabilities", engine.platform.capabilities - {"developer_settings"}
+    )
+    monkeypatch.setattr(engine, "analyze", lambda **_kwargs: _observation(engine.device.serial))
+
+
+def test_an_animation_goal_on_a_platform_without_developer_settings_records_no_undo(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The word in a goal used to fail the session and leave an undo no reaper could replay.
+
+    The watchdog retried that undo every 15 seconds for a day, one browser per retry.
+    """
+    engine = _engine(tmp_path, "goal-animation-unsupported")
+    _without_developer_settings(engine, monkeypatch)
+
+    started = engine.session_start("verify the transition animation and easing")
+
+    assert started["animations"] == {"requested": False, "enabled": False, "source": "default"}
+    assert device_ledger.read_ledger(engine.device.serial) == []
+
+
+def test_an_explicit_animation_request_on_an_unsupported_platform_fails_before_recording(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    engine = _engine(tmp_path, "goal-animation-unsupported-flag")
+    _without_developer_settings(engine, monkeypatch)
+
+    with pytest.raises(UnsupportedPlatformCapabilityError):
+        engine.session_start("inspect the final visual state", animations=True)
+
+    assert device_ledger.read_ledger(engine.device.serial) == []
 
 
 def test_session_start_app_alias_launches_and_reuses_that_observation(
