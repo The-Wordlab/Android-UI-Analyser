@@ -563,6 +563,16 @@ def _start(engine: Engine, monkeypatch: Any) -> dict[str, Any]:
     return engine.session_start("verify cached results while offline")
 
 
+def test_session_finish_keeps_a_native_runtime_warm(monkeypatch: Any, tmp_path: Path) -> None:
+    """Android and iOS keep their transport across leases, so the next session reuses it."""
+    engine = _engine(tmp_path, "goal-keeps-runtime")
+    device = engine._device
+    started = _start(engine, monkeypatch)
+
+    assert engine.session_finish(started["session_id"], allow_incomplete=True)["terminated"]
+    assert engine._device is device
+
+
 def test_cli_headed_accepts_an_already_attached_emulator(monkeypatch: Any) -> None:
     device = FakeDevice(serial="goal-headed-attached")
     monkeypatch.setattr(

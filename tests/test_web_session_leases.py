@@ -95,6 +95,18 @@ def test_detached_session_reconnects_in_the_same_warm_engine(tmp_path):
         engine.close()
 
 
+def test_an_isolated_browser_closes_when_its_session_finishes(tmp_path):
+    """The next lease discards it anyway; left open it idled until the daemon's idle limit."""
+    connection = FakeConnection()
+    engine = engine_for(tmp_path, "agent-a", connection=connection)
+    try:
+        started = engine.session_start("Inspect fixture")
+        assert engine.session_finish(started["session_id"], allow_incomplete=True)["terminated"]
+        assert connection.closed and engine._device is None
+    finally:
+        engine.close()
+
+
 def test_android_keeps_its_existing_lease_recovery_advice(tmp_path):
     from android_ui_analyser.config import Config
     from android_ui_analyser.platforms.android import AndroidPlatform

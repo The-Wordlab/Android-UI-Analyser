@@ -23,6 +23,12 @@ notes, so you can check for a newer version — and read what changed — withou
   receive. iOS simulators drag with AXe's continuous swipe and refuse `--hold-ms`, since AXe
   cannot hold before moving. Adapters declare the new `device.drag` capability.
 
+### Changed
+
+- A web session closes its headless browser when it finishes. The daemon kept that browser
+  running until its idle limit, 30 minutes later, although the next session's lease discards it
+  anyway. Android and iOS keep their connection warm across sessions as before.
+
 ## [0.31.1] - 2026-09-30
 
 ### Fixed

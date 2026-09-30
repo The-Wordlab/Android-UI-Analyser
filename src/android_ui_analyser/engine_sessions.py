@@ -2387,7 +2387,9 @@ def session_finish(
         result["candidate_flow"] = candidate_payload
     if state.artifact_dir:
         result["artifacts_dir"] = state.artifact_dir
-    if detached_runtime and not errors:
-        # A warm daemon must reconnect next time instead of retaining a detached transport.
+    if (detached_runtime or not self.platform.retain_runtime_on_lease_change()) and not errors:
+        # A warm daemon must reconnect next time instead of retaining a detached transport. A
+        # runtime the next lease would discard anyway (web's own headless browser) is closed now
+        # too; left open it idled for the daemon's whole idle limit after the session ended.
         self.close()
     return self._session_finish_summary(result) if summary else result
