@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-30
+
 ### Added
 
 - `aua drag-and-analyze` (MCP `drag_and_analyze`) drags on web, Android and iOS simulators:
@@ -1698,5 +1700,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.31.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.31.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.31.1...HEAD
 [0.31.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.31.1
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.32.0
