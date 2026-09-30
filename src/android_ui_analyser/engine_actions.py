@@ -289,6 +289,12 @@ def resolve_selector(
                 f"`aua tap-and-analyze {rid}`. Use --rid for the app's resource-id string "
                 "(the `rid` column), and prefer it: ids are renumbered by every analyze."
             )
+        elif rid and (labelled := _labelled_as(elements, rid)) is not None:
+            flag, value, el = labelled
+            hint = (
+                f"{rid!r} is the {flag[2:]} of id={el.id}, not a resource-id; --rid matches "
+                f"resource-ids only. Use `{flag} {shlex.quote(value)}`."
+            )
         elif near:
             hint = "nearest: " + " | ".join(element_digest(el) for el in near)
         elif miss_observation is not None:
@@ -337,6 +343,20 @@ def resolve_selector(
                 + " | ".join(element_digest(el) for el in matches[:_MAX_CANDIDATES]),
             )
     return matches[0]
+
+
+def _labelled_as(elements: Sequence[Element], rid: str) -> tuple[str, str, Element] | None:
+    """The flag, value and element whose desc or text is exactly *rid*, ignoring case.
+
+    A screen with no resource-ids shows its controls by desc and text, so a `--rid` holding one
+    of those strings is the wrong flag, not a typo, and the nearest-element list hides that.
+    """
+    wanted = rid.casefold()
+    for el in app_elements(elements):
+        for flag, value in (("--desc", el.content_desc), ("--text", el.text)):
+            if value and value.casefold() == wanted:
+                return flag, value, el
+    return None
 
 
 def _match_by_vision(
