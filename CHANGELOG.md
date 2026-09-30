@@ -28,6 +28,10 @@ notes, so you can check for a newer version — and read what changed — withou
 - A web session closes its headless browser when it finishes. The daemon kept that browser
   running until its idle limit, 30 minutes later, although the next session's lease discards it
   anyway. Android and iOS keep their connection warm across sessions as before.
+- A web daemon exits after 5 minutes without a request instead of 30, since it keeps a whole
+  browser running. An agent silent that long mid-session gets a fresh browser on its next
+  command. `daemon.idle_ttl_s` now defaults to unset, meaning the platform's own limit (30
+  minutes on Android and iOS); an explicit value still applies to every platform.
 
 ## [0.31.1] - 2026-09-30
 

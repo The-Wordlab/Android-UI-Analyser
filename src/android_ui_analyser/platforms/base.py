@@ -142,6 +142,14 @@ class PlatformAdapter(ABC):
 
         return True
 
+    def daemon_idle_ttl_s(self) -> int:
+        """How long a warm daemon for this platform idles before exiting.
+
+        Used only when ``daemon.idle_ttl_s`` is unset; an explicit value always wins.
+        """
+
+        return 1800
+
     @abstractmethod
     def connect(self, target_id: str | None = None) -> TargetRuntime:
         """Connect to a target, or choose the sole available target."""

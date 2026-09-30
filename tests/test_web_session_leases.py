@@ -107,6 +107,15 @@ def test_an_isolated_browser_closes_when_its_session_finishes(tmp_path):
         engine.close()
 
 
+def test_a_web_daemon_idles_five_minutes_and_a_native_one_thirty(tmp_path):
+    """A warm web daemon keeps a whole browser running; a native one only a transport."""
+    from android_ui_analyser.config import Config
+    from android_ui_analyser.platforms.android import AndroidPlatform
+
+    assert engine_for(tmp_path, "agent-a").platform.daemon_idle_ttl_s() == 300
+    assert AndroidPlatform(Config()).daemon_idle_ttl_s() == 1800
+
+
 def test_android_keeps_its_existing_lease_recovery_advice(tmp_path):
     from android_ui_analyser.config import Config
     from android_ui_analyser.platforms.android import AndroidPlatform

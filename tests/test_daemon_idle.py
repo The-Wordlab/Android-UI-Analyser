@@ -17,7 +17,7 @@ from android_ui_analyser import daemon as daemon_mod
 from android_ui_analyser.capture import CaptureBuffer, CaptureCfgView
 
 
-def _engine_stub(*, idle_pause_s: int, idle_ttl_s: int) -> SimpleNamespace:
+def _engine_stub(*, idle_pause_s: int, idle_ttl_s: int | None) -> SimpleNamespace:
     paused: list[bool] = []
 
     def capture_idle_pause() -> bool:
@@ -77,6 +77,19 @@ def test_zero_disables_both_policies() -> None:
     engine = _engine_stub(idle_pause_s=0, idle_ttl_s=0)
     assert daemon_mod._idle_tick(engine, _Clock(10_000.0)) is False
     assert engine.paused_calls == []
+
+
+def test_an_unset_ttl_uses_the_platforms_own_default() -> None:
+    engine = _engine_stub(idle_pause_s=0, idle_ttl_s=None)
+    engine.platform = SimpleNamespace(daemon_idle_ttl_s=lambda: 300)
+    assert daemon_mod._idle_tick(engine, _Clock(299.0)) is False
+    assert daemon_mod._idle_tick(engine, _Clock(301.0)) is True
+
+
+def test_an_explicit_ttl_beats_the_platforms_default() -> None:
+    engine = _engine_stub(idle_pause_s=0, idle_ttl_s=1800)
+    engine.platform = SimpleNamespace(daemon_idle_ttl_s=lambda: 300)
+    assert daemon_mod._idle_tick(engine, _Clock(301.0)) is False
 
 
 def test_manual_pause_survives_idle_resume() -> None:

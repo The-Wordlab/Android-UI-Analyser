@@ -314,7 +314,8 @@ def _idle_tick(engine: Engine, activity: _Activity) -> bool:
         with contextlib.suppress(Exception):
             if engine.capture_idle_pause():
                 logger.info("capture paused after %.0fs idle (frames kept)", idle)
-    ttl = int(getattr(engine.config.daemon, "idle_ttl_s", 0) or 0)
+    configured = getattr(engine.config.daemon, "idle_ttl_s", None)
+    ttl = int(engine.platform.daemon_idle_ttl_s() if configured is None else configured)
     return ttl > 0 and idle >= ttl
 
 

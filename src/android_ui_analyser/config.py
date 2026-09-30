@@ -489,8 +489,9 @@ class DaemonCfg(BaseModel):
     # Poll interval for the push / wait_changed fingerprint watcher (host-side).
     watch_interval_ms: int = 150
     # Exit after this long with no client request (0 = never). Agent sessions end without
-    # stopping their daemon, and every survivor keeps polling a device forever.
-    idle_ttl_s: int = 1800
+    # stopping their daemon, and every survivor keeps polling a device forever. Unset means the
+    # platform's own default: 30 minutes, or 5 on the web, whose daemon keeps a browser running.
+    idle_ttl_s: int | None = None
 
 
 class CacheCfg(BaseModel):

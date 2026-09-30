@@ -374,6 +374,10 @@ class WebPlatform(PlatformAdapter):
         # Attached runtimes only detach their transport, preserving the user's app/profile.
         return False
 
+    def daemon_idle_ttl_s(self) -> int:
+        # A warm web daemon keeps a whole headless browser running, about five processes.
+        return 300
+
     def connect(self, target_id: str | None = None) -> TargetRuntime:
         if self._connection_mode() == "existing-cdp":
             endpoint = str(self.options["cdp_endpoint"])
