@@ -90,7 +90,7 @@ _ESCALATION_ARGUMENTS = frozenset(
         "force",
     }
 )
-_CURRENT_FRAME_TOOL_PREFIXES = ("tap", "input", "long_press", "swipe", "key", "scroll")
+_CURRENT_FRAME_TOOL_PREFIXES = ("tap", "input", "long_press", "drag", "swipe", "key", "scroll")
 _OBSERVATION_KEYS = frozenset(
     {
         "fresh",

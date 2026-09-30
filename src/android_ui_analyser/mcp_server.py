@@ -65,6 +65,14 @@ def _ordinal(raw: Any) -> int | None:
         return None
 
 
+def _point(raw: Any) -> tuple[int, int] | None:
+    return (int(raw[0]), int(raw[1])) if raw else None
+
+
+def _point4(raw: Any) -> tuple[int, int, int, int] | None:
+    return (int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3])) if raw else None
+
+
 def _element_target(engine: Engine, args: dict[str, Any], *, verb: str) -> Any:
     """The id for a call that takes an id and no selector.
 
@@ -207,6 +215,13 @@ _OBSERVE_META_PROP: dict[str, Any] = {
         "capture hints and locale are not in 'changed' — call analyze_screen when you want them."
     ),
 }
+_XY_PROP: dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "integer"},
+    "minItems": 2,
+    "maxItems": 2,
+    "description": "A point as [x,y].",
+}
 _OBSERVE_PROP: dict[str, Any] = {
     "type": "boolean",
     "default": True,
@@ -309,6 +324,7 @@ _ANALYZED_TOOL_NAMES: dict[str, str] = {
     "wait": "wait_and_analyze",
     "wait_changed": "wait_changed_and_analyze",
     "long_press": "long_press_and_analyze",
+    "drag": "drag_and_analyze",
     "mic_inject": "mic_inject_and_analyze",
     "mic_speak": "mic_speak_and_analyze",
     "scroll_to": "scroll_to_and_analyze",
@@ -1280,6 +1296,42 @@ def _tool_definitions() -> list[types.Tool]:
                         "minItems": 4,
                         "maxItems": 4,
                     },
+                    "observe": _OBSERVE_PROP,
+                    "with_image": _WITH_IMAGE_PROP,
+                },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="drag",
+            description=(
+                "Drag: press at the start, optionally hold still (hold_ms), move smoothly to the "
+                "end over duration_ms, release without a fling. Use it for games, sliders, "
+                "pull-to-aim, drag-and-drop and reordering; use swipe/scroll to move content. "
+                "Start is an element (id/rid/text/desc) or from_coords; end is an element "
+                "(to_id/to_rid/to_text/to_desc) or to_coords; coords=[x1,y1,x2,y2] sets both."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": _ELEMENT_ID_PROP,
+                    **{key: value for key, value in _SELECTOR_PROPS.items()
+                       if key in {"rid", "text", "desc", "index"}},
+                    "to_id": _ELEMENT_ID_PROP,
+                    "to_rid": _RESOURCE_ID_PROP,
+                    "to_text": {"type": "string", "description": "End at the element with this text."},
+                    "to_desc": {"type": "string", "description": "End at the element with this content-desc."},
+                    "from_coords": _XY_PROP,
+                    "to_coords": _XY_PROP,
+                    "coords": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                        "description": "Start and end as [x1,y1,x2,y2].",
+                    },
+                    "duration_ms": {"type": "integer", "default": 500},
+                    "hold_ms": {"type": "integer", "default": 0},
                     "observe": _OBSERVE_PROP,
                     "with_image": _WITH_IMAGE_PROP,
                 },
@@ -3821,6 +3873,23 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
             engine.swipe(
                 direction=args.get("direction"),
                 coords=coord_tuple,
+                observe=args.get("observe", True),
+                with_image=img,
+            )
+        )
+    if name == "drag":
+        to_args = {key: args.get(f"to_{key}") for key in ("id", "rid", "text", "desc")}
+        return _dump(
+            engine.drag(
+                _ordinal(args.get("id")),
+                selector=_selector_from_args(args),
+                to_id=_ordinal(to_args["id"]),
+                to_selector=_selector_from_args(to_args),
+                from_coords=_point(args.get("from_coords")),
+                to_coords=_point(args.get("to_coords")),
+                coords=_point4(args.get("coords")),
+                duration_ms=int(args.get("duration_ms", 500)),
+                hold_ms=int(args.get("hold_ms", 0)),
                 observe=args.get("observe", True),
                 with_image=img,
             )

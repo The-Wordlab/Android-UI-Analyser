@@ -223,6 +223,7 @@ class AndroidPlatform(PlatformAdapter):
             "device.recording.recovery",
             "device.shell",
             "device.touch",
+            "device.drag",
             "app_database",
             "app_datastore",
             "device_agent",

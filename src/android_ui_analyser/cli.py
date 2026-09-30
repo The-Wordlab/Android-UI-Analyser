@@ -3318,6 +3318,83 @@ def long_press(
     _run(ctx, go)
 
 
+@app.command(name="drag-and-analyze", cls=AnalyzeCommand)
+def drag(
+    ctx: typer.Context,
+    ident: str | None = typer.Argument(
+        None, metavar="[ID]", help="Element id to start the drag on (or the selector value)."
+    ),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    to: str | None = typer.Option(None, "--to", help="Element id to end the drag on."),
+    to_rid: str | None = typer.Option(None, "--to-rid", help="End on this resource-id."),
+    to_text: str | None = typer.Option(None, "--to-text", help="End on this label."),
+    to_desc: str | None = typer.Option(None, "--to-desc", help="End on this content-desc."),
+    from_coords: tuple[int, int] | None = typer.Option(
+        None, "--from-coords", help="Start at this x y instead of an element."
+    ),
+    to_coords: tuple[int, int] | None = typer.Option(
+        None, "--to-coords", help="End at this x y instead of an element."
+    ),
+    coords: tuple[int, int, int, int] | None = typer.Option(
+        None, "--coords", help="Explicit x1 y1 x2 y2 (start and end)."
+    ),
+    duration_ms: int = typer.Option(
+        500, "--duration-ms", help="Time to move from start to end, in milliseconds."
+    ),
+    hold_ms: int = typer.Option(
+        0, "--hold-ms", help="Hold still at the start before moving (long-press drag)."
+    ),
+    observe: bool = typer.Option(
+        True, "--observe/--no-observe", help="Also return the post-drag screen."
+    ),
+    with_image: str | None = typer.Option(
+        None,
+        "--with-image",
+        metavar="[PATH]",
+        help="Also save the raw screenshot; bare flag uses a timestamped default path.",
+        show_default=False,
+    ),
+) -> None:
+    """Press, move smoothly and release: games, sliders, pull-to-aim, drag-and-drop, reordering.
+
+    `aua drag-and-analyze --coords 200 600 200 300` · `aua drag-and-analyze --rid handle --to-rid slot`.
+    Use ``swipe-and-analyze``/``scroll-and-analyze`` to move content; a drag moves a pointer the
+    app tracks. ``--hold-ms`` holds still before moving (iOS simulators cannot hold).
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        selector = _selector(
+            ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first
+        )
+        to_selector = _selector(ident=to, rid=to_rid, text=to_text, desc=to_desc)
+        _emit(
+            _route(
+                engine,
+                "drag",
+                element_id=_element_id(ident, selector),
+                selector=selector,
+                to_id=_element_id(to, to_selector),
+                to_selector=to_selector,
+                from_coords=from_coords,
+                to_coords=to_coords,
+                coords=coords,
+                duration_ms=duration_ms,
+                hold_ms=hold_ms,
+                observe=observe,
+                with_image=_annotate_arg(with_image),
+            ),
+            fmt,
+        )
+
+    _run(ctx, go)
+
+
 @app.command(name="double-tap-and-analyze", cls=AnalyzeCommand)
 def double_tap(
     ctx: typer.Context,

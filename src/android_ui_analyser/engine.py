@@ -2479,6 +2479,8 @@ class Engine:
     tap = engine_actions.tap
     tap_point = engine_actions.tap_point
     long_press = engine_actions.long_press
+    _drag_end = engine_actions._drag_end
+    drag = engine_actions.drag
     mic_inject = engine_actions.mic_inject
     mic_speak = engine_actions.mic_speak
     double_tap = engine_actions.double_tap

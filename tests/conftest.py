@@ -200,6 +200,9 @@ class FakeDevice(Device):
     def long_click(self, x: int, y: int, duration_ms: int = 600) -> None:
         self.calls.append(("long_click", (x, y, duration_ms)))
 
+    def drag(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 500, hold_ms: int = 0) -> None:
+        self.calls.append(("drag", (x1, y1, x2, y2, duration_ms, hold_ms)))
+
     def touch_down(self, x: int, y: int) -> None:
         self.calls.append(("touch_down", (x, y)))
 

@@ -127,6 +127,22 @@ class TargetRuntime(ABC):
 
         raise DeviceError("held touch gestures are unsupported by this target runtime")
 
+    def drag(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        duration_ms: int = 500,
+        hold_ms: int = 0,
+    ) -> None:
+        """Press at the start, hold still for *hold_ms*, move smoothly to the end over
+        *duration_ms*, then release at the end point without a fling."""
+
+        raise DeviceError(
+            "drag input is unsupported by this target runtime", code="drag_unsupported"
+        )
+
     def send_text(self, text: str, *, clear: bool = True) -> None:
         raise DeviceError("text input is unsupported by this target runtime")
 

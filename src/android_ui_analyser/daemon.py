@@ -16,7 +16,7 @@ Errors::
 
 Supported commands
 ------------------
-ping, analyze, ask_screen, has, inspect, screenshot, tap, long_press, mic_inject, mic_speak, input, clear,
+ping, analyze, ask_screen, has, inspect, screenshot, tap, long_press, drag, mic_inject, mic_speak, input, clear,
 swipe, scroll_to, key, open_link, wait, wait_stable, wait_after_change, memory_update, goto,
 flow_run, flow_save, navigate, orient, list_devices, app, install_app, logcat,
 job_start, job_status, job_wait, job_cancel, job_list,
@@ -708,6 +708,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.long_press(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "drag":
+            result = engine.drag(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "mic_inject":
             result = engine.mic_inject(**args)
             return _result_ok(result.model_dump(mode="json"))
@@ -1104,7 +1108,7 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
                 "unknown_command",
                 f"unknown command: {cmd!r}",
                 hint="Valid commands: ping, analyze, has, inspect, screenshot, "
-                "tap, long_press, mic_inject, mic_speak, double_tap, input, clear, swipe, scroll, scroll_to, expect, key, back_gesture, "
+                "tap, long_press, drag, mic_inject, mic_speak, double_tap, input, clear, swipe, scroll, scroll_to, expect, key, back_gesture, "
                 "hide_keyboard, paste, copy_text, erase, clipboard_set, clipboard_get, "
                 "location_set, orientation_set, orientation_get, airplane_set, airplane_toggle, "
                 "network_status, network_offline, network_restore, "

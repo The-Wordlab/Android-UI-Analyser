@@ -159,6 +159,7 @@ RUNTIME_CAPABILITIES: dict[str, CapabilitySpec] = {
     "device.touch": _spec(
         "device.touch", CapabilityScope.RUNTIME, "click_once", "touch_down", "touch_up"
     ),
+    "device.drag": _spec("device.drag", CapabilityScope.RUNTIME, "drag"),
     "device.proxy": _spec(
         "device.proxy",
         CapabilityScope.RUNTIME,

@@ -74,6 +74,10 @@ def _input_runtime(self: Engine) -> TargetRuntime:
     return self.platform.runtime_capability("ui.input", self.device)
 
 
+def _drag_runtime(self: Engine) -> TargetRuntime:
+    return self.platform.runtime_capability("device.drag", self.device)
+
+
 def _touch_runtime(self: Engine) -> TargetRuntime:
     return self.platform.runtime_capability("device.touch", self.device)
 
@@ -935,6 +939,78 @@ def long_press(
             id=_published_id(el),
             target=[cx, cy],
             acting=acting,
+        ),
+        observe,
+        with_image,
+    )
+
+
+def _drag_end(
+    self: Engine,
+    *,
+    element_id: ElementId | None,
+    selector: dict[str, Any] | None,
+    coords: tuple[int, int] | None,
+    end: str,
+) -> tuple[tuple[int, int], Element | None]:
+    """One end of a drag: explicit coordinates, or the aim point of a named element."""
+    if coords is not None:
+        if element_id is not None or selector:
+            raise UsageError(
+                f"drag {end} takes coordinates or an element, not both",
+                code="drag_target_ambiguous",
+            )
+        return (int(coords[0]), int(coords[1])), None
+    if element_id is None and not selector:
+        raise UsageError(
+            f"drag needs a {end}: an element id or selector, or coordinates",
+            hint="e.g. `aua drag-and-analyze --coords 100 400 300 400`",
+        )
+    el = self._target(element_id, selector, verb="drag")
+    return self._aim(el), el
+
+
+def drag(
+    self: Engine,
+    element_id: ElementId | None = None,
+    *,
+    selector: dict[str, Any] | None = None,
+    to_id: ElementId | None = None,
+    to_selector: dict[str, Any] | None = None,
+    from_coords: tuple[int, int] | None = None,
+    to_coords: tuple[int, int] | None = None,
+    coords: tuple[int, int, int, int] | None = None,
+    duration_ms: int = 500,
+    hold_ms: int = 0,
+    observe: bool = True,
+    with_image: bool | str | None = None,
+) -> ActionResult:
+    """Press at the start, optionally hold, move smoothly to the end, release there.
+
+    For games, sliders, pull-to-aim, drag-and-drop and reordering — a swipe moves content,
+    a drag moves a pointer the app is tracking.
+    """
+    if duration_ms < 0 or hold_ms < 0:
+        raise UsageError("drag duration_ms and hold_ms must be zero or greater")
+    device = _drag_runtime(self)
+    if coords is not None:
+        from_coords, to_coords = (coords[0], coords[1]), (coords[2], coords[3])
+    (x1, y1), start = self._drag_end(
+        element_id=element_id, selector=selector, coords=from_coords, end="start"
+    )
+    (x2, y2), _ = self._drag_end(
+        element_id=to_id, selector=to_selector, coords=to_coords, end="end"
+    )
+    step = self._step("drag", start, arg=None if start else "coords")
+    with self._acting(_action_mark("drag", start) if start else "drag:coords"):
+        device.drag(x1, y1, x2, y2, duration_ms, hold_ms)
+    self._record_action_safe(step)
+    return self._observe(
+        ActionResult(
+            ok=True,
+            action="drag",
+            id=_published_id(start),
+            target=[x1, y1, x2, y2],
         ),
         observe,
         with_image,

@@ -86,6 +86,7 @@ def test_mcp_lists_core_tools() -> None:
         "screenshot",
         "inspect",
         "long_press_and_analyze",
+        "drag_and_analyze",
         "scroll_to_and_analyze",
         "wait_stable_and_analyze",
         "goto",

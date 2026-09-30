@@ -23,6 +23,7 @@ WEB_TOOL_NAMES = frozenset(
         "input_and_analyze",
         "clear_and_analyze",
         "swipe_and_analyze",
+        "drag_and_analyze",
         "key_and_analyze",
         "scroll_to_and_analyze",
         "wait_and_analyze",

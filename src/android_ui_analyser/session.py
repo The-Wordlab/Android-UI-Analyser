@@ -2183,6 +2183,7 @@ _ACTION_COMMANDS = frozenset(
     {
         "tap",
         "long_press",
+        "drag",
         "tap_point",
         "input",
         "input_text",

@@ -28,6 +28,7 @@ from .. import read_budget
 from ..errors import DeviceError, UsageError
 from ..providers.base import Bounds, ScreenImage
 from ..schema import AppContext, DeviceInfo, MatchMode, ShellResult
+from .drag_path import drag_path
 from .runtime import TargetRuntime
 
 logger = logging.getLogger("android_ui_analyser.platforms.android_device")
@@ -1278,6 +1279,34 @@ class Uiautomator2Device(AndroidRuntimeBase):
             raise DeviceError(
                 "device touch-up failed; the hold may not have been released cleanly",
                 hint="Check the device is still attached before sending another action.",
+            ) from exc
+
+    def drag(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        duration_ms: int = 500,
+        hold_ms: int = 0,
+    ) -> None:
+        """One held touch: down, optional still hold, interpolated moves, up at the end."""
+        points, pause = drag_path(x1, y1, x2, y2, duration_ms)
+        touch = self._d.touch
+        try:
+            touch.down(x1, y1)
+            if hold_ms > 0:
+                time.sleep(hold_ms / 1000.0)
+            for x, y in points:
+                touch.move(x, y)
+                time.sleep(pause)
+            touch.up(x2, y2)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                touch.up(x2, y2)  # never leave the pointer pressed
+            raise DeviceError(
+                "device drag failed",
+                hint="Check the device is still attached (`aua devices`).",
             ) from exc
 
     def focused_text(self) -> str | None:

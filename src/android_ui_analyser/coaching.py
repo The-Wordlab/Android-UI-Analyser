@@ -13,6 +13,7 @@ _MANUAL_ACTIONS = frozenset(
     {
         "tap",
         "long_press",
+        "drag",
         "tap_point",
         "input",
         "input_text",
