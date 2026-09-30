@@ -429,6 +429,15 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`aua tap-and-analyze <id>`, `aua long-press-and-analyze <id>`, "
         '`aua input-and-analyze <id> "text"`, `aua swipe-and-analyze up`, '
         "`aua key-and-analyze back`. "
+        "**Swipe/scroll move content; drag moves a pointer the app is tracking.** For games, "
+        "sliders, pull-to-aim, drag-and-drop and reordering use `aua drag-and-analyze` "
+        "(MCP `drag_and_analyze`): press at the start, optional `--hold-ms` still hold (for "
+        "long-press drags), a smooth move over `--duration-ms`, release at the end without a "
+        "fling. Start and end are elements (`[ID]`/`--rid`/`--text`/`--desc`, "
+        "`--to`/`--to-rid`/`--to-text`/`--to-desc`) or coordinates "
+        "(`--coords x1 y1 x2 y2`, `--from-coords`, `--to-coords`). On web a swipe is a wheel "
+        "scroll, so it never drags; a web drag is a real mouse press-move-release. iOS "
+        "simulators cannot hold before moving, so `--hold-ms` is refused there. "
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
     (

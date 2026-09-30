@@ -11,6 +11,18 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `aua drag-and-analyze` (MCP `drag_and_analyze`) drags on web, Android and iOS simulators:
+  press at the start, optionally hold still (`--hold-ms`), move smoothly to the end over
+  `--duration-ms`, release there without a fling, and return the resulting screen. Start and
+  end are elements (`[ID]`, `--rid`, `--text`, `--desc`; `--to`, `--to-rid`, `--to-text`,
+  `--to-desc`) or coordinates (`--coords x1 y1 x2 y2`, `--from-coords`, `--to-coords`). Use it
+  for games, sliders, pull-to-aim, drag-and-drop and reordering. On the web a swipe is still a
+  wheel scroll; a drag is a real mouse press-move-release that pointer handlers and canvases
+  receive. iOS simulators drag with AXe's continuous swipe and refuse `--hold-ms`, since AXe
+  cannot hold before moving. Adapters declare the new `device.drag` capability.
+
 ## [0.31.1] - 2026-09-30
 
 ### Fixed

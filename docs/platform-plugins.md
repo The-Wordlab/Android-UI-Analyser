@@ -203,7 +203,7 @@ Complete structural specifications live in `platforms/contracts.py` and
 
 | Scope | Capability names |
 | --- | --- |
-| Runtime | `ui.tree`, `ui.input`, `ui.read_deadline`, `app.lifecycle`, `app.files`, `app.links`, `device.keyboard`, `device.clipboard`, `device.location`, `device.orientation`, `device.airplane`, `device.media`, `device.recording`, `device.clock`, `device.accessibility`, `device.touch`, `device.proxy`, `device.shell` |
+| Runtime | `ui.tree`, `ui.input`, `ui.read_deadline`, `app.lifecycle`, `app.files`, `app.links`, `device.keyboard`, `device.clipboard`, `device.location`, `device.orientation`, `device.airplane`, `device.media`, `device.recording`, `device.clock`, `device.accessibility`, `device.touch`, `device.drag`, `device.proxy`, `device.shell` |
 | Adapter | `ui.screenshot`, `ui.peek`, `app.status`, `app.install`, `device.logs` |
 | Service | `app_database`, `developer_settings`, `device_agent`, `feature_flags`, `microphone`, `network`, `network_profiles`, `proxy`, `target_supervision`, `virtual_targets`, `webview` |
 

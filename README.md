@@ -1565,7 +1565,7 @@ setting. The compatible default is `full`; profiles are explicit and do not sele
 See [web MCP setup](docs/web.md#browser-lab-controls) for configuration and restart behavior.
 
 Tools include (non-exhaustive): `analyze_screen`, `tap_and_analyze`,
-`double_tap_and_analyze`, `long_press_and_analyze`, `input_and_analyze`,
+`double_tap_and_analyze`, `long_press_and_analyze`, `drag_and_analyze`, `input_and_analyze`,
 `mic_inject_and_analyze`, `mic_speak_and_analyze`,
 `clear_and_analyze`, `swipe_and_analyze`, `scroll_and_analyze`,
 `scroll_to_and_analyze`, `key_and_analyze`, `wait_and_analyze`,
@@ -1892,6 +1892,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua tap-and-analyze <id>` / `aua click-and-analyze <id>` | Tap an element by ID (also `--rid`/`--text`/`--desc`) |
 | `aua double-tap-and-analyze <id>` | Double-tap an element |
 | `aua long-press-and-analyze <id>` | Long-press an element by ID |
+| `aua drag-and-analyze --coords x1 y1 x2 y2` | Press, move and release (games, sliders, drag-and-drop); swipe moves content |
 | `aua input-and-analyze <id> "text"` | Focus an element and type (`--submit` fires the IME action) |
 | `aua clear-and-analyze <id>` / `aua erase-and-analyze` | Clear a field / backspace N chars |
 | `aua hide-keyboard-and-analyze` | Dismiss the IME without navigating away |

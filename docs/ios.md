@@ -81,7 +81,7 @@ the server's config or environment before launch; `session_start` cannot switch 
 | Works | Not yet |
 |---|---|
 | `ui.tree`, `ui.input`, `ui.screenshot`, `ui.read_deadline`, `ui.peek` (dashboard tiles) | `device.logs` (unified log diagnostics) |
-| `device.touch` (held touches, single-attempt taps) | `device.recording` (`simctl io recordVideo`) |
+| `device.touch` (held touches, single-attempt taps), `device.drag` (AXe swipe; no hold before moving) | `device.recording` (`simctl io recordVideo`) |
 | `app.lifecycle`, `app.links`, `app.status`, `app.install` | `virtual_targets` (`aua virtual-target …` boot/create/delete) |
 | `device.clipboard`, `device.location` | `device.orientation`, `device.keyboard`, `device.clock`, `device.airplane`, `app.files` |
 | `app_database` (SQLite), `feature_flags` (UserDefaults and configured deeplinks) | `proxy`, `network*`, `microphone`, `device_agent`, `webview` |
