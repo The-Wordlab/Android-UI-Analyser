@@ -501,7 +501,10 @@ def test_total_decision_deadline_bounds_all_routes(tmp_path):
         calls.append(payload["model"])
         await asyncio.Event().wait()
 
-    subject = decider(send, route_timeout_s=0.02, decision_timeout_s=0.03,
+    # Each route gets a third of the decision budget. At 30 ms that is 10 ms, and a slow runner
+    # stalling for 25 ms during the second route ran out the whole decision before the third
+    # was tried. The same shares at 300 ms survive that stall.
+    subject = decider(send, route_timeout_s=0.2, decision_timeout_s=0.3,
                       fallbacks=[("fictional/second", SETTINGS), ("fictional/third", SETTINGS)],
                       output=tmp_path)
     with pytest.raises(RunError, match="decision deadline"):
