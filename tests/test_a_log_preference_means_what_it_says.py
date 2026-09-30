@@ -41,6 +41,17 @@ def _engine(**cfg: Any) -> tuple[Engine, FakeDevice]:
     return engine, device
 
 
+# A real gesture lands at least one adb round-trip after the mark, and so does whatever the app
+# logs because of it. Logging in the mark's own millisecond instead was flaky: the measured clock
+# skew rounds by up to 1 ms, so the mark could sit just after the line and the window dropped it.
+_ROUND_TRIP_MS = 15
+
+
+def _mark(engine: Engine, device: FakeDevice) -> None:
+    engine.logcat_mark("last-action")
+    device.advance_clock(_ROUND_TRIP_MS)
+
+
 def _lines(engine: Engine, app_id: str = APP) -> list[str]:
     engine._app_logs_reported_ms = None  # a second real action would open a fresh window
     digest = engine._app_logs(app_id)
@@ -56,7 +67,7 @@ def _line(priority: str, tag: str, message: str, *, ms: int = 1) -> str:
 
 def test_un_ignoring_a_tag_in_a_different_case_actually_un_ignores_it() -> None:
     engine, device = _engine()
-    engine.logcat_mark("last-action")
+    _mark(engine, device)
     device.log_now("ChatSync", "syncing", priority="D")
     engine.app_log_prefs_set(app=APP, ignore_tags=["ChatSync"])
     assert _lines(engine) == []
@@ -70,7 +81,7 @@ def test_un_ignoring_a_tag_in_a_different_case_actually_un_ignores_it() -> None:
 
 def test_un_ignoring_a_tag_a_stored_prefix_hides_clears_that_prefix() -> None:
     engine, device = _engine()
-    engine.logcat_mark("last-action")
+    _mark(engine, device)
     device.log_now("NetworkError", "timeout talking to /v1/sync", priority="E")
     engine.app_log_prefs_set(app=APP, ignore_tags=["Network"])
     assert _lines(engine) == []
@@ -106,7 +117,7 @@ def test_un_ignoring_a_runtime_tag_records_the_exemption_it_needs() -> None:
     # is "it was not being ignored" about a tag that stays invisible.
     engine, device = _engine()
     runtime_tag = APP[-12:]
-    engine.logcat_mark("last-action")
+    _mark(engine, device)
     device.log_now(runtime_tag, "Background concurrent copying GC freed", priority="D")
     assert _lines(engine) == []
 
@@ -125,7 +136,7 @@ def test_an_ignored_tag_stays_ignored_even_when_an_only_list_names_it_too() -> N
     # specific one wins — otherwise the banned tag comes back and spends the whole budget.
     engine, device = _engine()
     engine.app_log_prefs_set(app=APP, only_tags=["Payment"], ignore_tags=["PaymentDebug"])
-    engine.logcat_mark("last-action")
+    _mark(engine, device)
     for index in range(6):
         device.log_now("PaymentDebug", f"chatty {index}", priority="D")
     device.log_now("Payment", "declined", priority="E")
@@ -148,7 +159,7 @@ def test_narrowing_to_one_tag_does_not_then_cap_that_tag_at_five_lines() -> None
     # only-list IS that purpose, and answering it with 5 lines makes `limit` a lie.
     engine, device = _engine()
     engine.app_log_prefs_set(app=APP, only_tags=["Payment"], limit=30)
-    engine.logcat_mark("last-action")
+    _mark(engine, device)
     for index in range(12):
         device.log_now("Payment", f"step {index}", priority="D")
 
@@ -174,7 +185,7 @@ def test_no_tag_filter_can_hide_a_fatal_line() -> None:
 def test_a_stored_ignore_cannot_hide_a_fatal_line_either() -> None:
     engine, device = _engine()
     engine.app_log_prefs_set(app=APP, ignore_tags=["PaymentDebug"])
-    engine.logcat_mark("last-action")
+    _mark(engine, device)
     device.log_now("PaymentDebug", "FATAL EXCEPTION: main", priority="F")
 
     assert _lines(engine) == ["FATAL EXCEPTION: main"]
@@ -201,7 +212,7 @@ def test_a_session_configure_beats_a_stored_preference() -> None:
         "configure",
         {"app_log_levels": "DIWEF", "app_log_limit": 40, "app_log_per_tag": 40},
     )
-    engine.logcat_mark("last-action")
+    _mark(engine, device)
     for index in range(25):
         device.log_now("MyOwnTag", f"info {index}", priority="I")
 
@@ -272,7 +283,7 @@ def test_reading_a_preference_neither_claims_a_memory_session_nor_opens_sqlite(
     engine, device = _engine(
         memory={"enabled": False, "backend": "sqlite", "sqlite_path": str(database)}
     )
-    engine.logcat_mark("last-action")
+    _mark(engine, device)
     device.log_now("MyOwnTag", "the answer", priority="D")
 
     assert _lines(engine) == ["the answer"]
