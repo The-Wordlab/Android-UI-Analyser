@@ -34,6 +34,7 @@ class _Device:
         self.serial = serial
         self._token = token
         self.calls: list[tuple[str, Any]] = []
+        self.closed = 0
 
     def instance_token(self) -> str | None:
         return self._token
@@ -43,6 +44,9 @@ class _Device:
 
     def remove_reverse_port(self, port: int) -> None:
         self.calls.append(("remove_reverse_port", port))
+
+    def close(self) -> None:
+        self.closed += 1
 
 
 class _Platform:
@@ -123,6 +127,31 @@ def test_a_dead_owners_proxy_is_taken_off_the_device(tmp_path: Path) -> None:
     )
     assert ("remove_reverse_port", 49097) in device.calls
     assert device_ledger.read_ledger("emulator-5554") == [], "a replayed undo must not repeat"
+    assert device.closed == 1
+
+
+def test_every_retry_of_a_failing_undo_closes_the_runtime_it_connected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watchdog reaps every poll until the undo succeeds.
+
+    Measured on a web target whose undo could never apply: one Playwright driver and browser
+    left open per 15-second retry — 276 drivers and ~1,100 headless Chrome processes in an hour.
+    """
+    device = _Device()
+
+    def refuse(host_port: str | None) -> None:
+        raise RuntimeError("target refuses the undo")
+
+    monkeypatch.setattr(device, "set_http_proxy", refuse)
+    _record_proxy("emulator-5554", owner_pid=_dead_pid(), cache_dir=tmp_path)
+
+    for _ in range(3):
+        report = teardown.reap("emulator-5554", platform=_Platform(device), cache_dir=tmp_path)
+        assert report["failed"], report
+
+    assert device.closed == 3
+    assert device_ledger.read_ledger("emulator-5554"), "a failed undo stays pending"
 
 
 def test_a_live_owners_changes_are_reported_not_undone(tmp_path: Path) -> None:

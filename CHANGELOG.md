@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Teardown closes the target connection it opens to replay an undo. The watchdog retries a
+  failing undo every 15 seconds, and each retry left its connection open: on the web a Playwright
+  driver and a headless browser, on Android the uiautomator2 server holding UiAutomation. One
+  stuck web undo grew to 276 drivers and ~1,100 Chrome processes in an hour and pinned the CPU.
+
 ## [0.31.0] - 2026-09-30
 
 ### Added

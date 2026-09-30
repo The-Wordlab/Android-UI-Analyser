@@ -207,10 +207,18 @@ def reap(
         instance_token=token,
         platform=ref.platform,
     )
-    report = device_ledger.replay(
-        ref, entries=entries, context=context, dry_run=dry_run,
-        registry_dir=lease_registry_dir,
-    )
+    try:
+        report = device_ledger.replay(
+            ref, entries=entries, context=context, dry_run=dry_run,
+            registry_dir=lease_registry_dir,
+        )
+    finally:
+        # A connect is not free: web starts a Playwright driver and a browser, Android the
+        # uiautomator2 server. The watchdog retries a failing undo every poll, so an unclosed
+        # runtime piles up once per retry.
+        if device is not None:
+            with contextlib.suppress(Exception):
+                device.close()
     report["reason"] = why or "forced"
     if report["undone"]:
         logger.info(
