@@ -86,6 +86,7 @@ class WebPlatform(PlatformAdapter):
             "browser.pages",
             "browser.storage",
             "browser.trace",
+            "device.drag",
             "device.logs",
             "session.state",
             "ui.input",

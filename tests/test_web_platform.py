@@ -95,6 +95,9 @@ class FakeConnection:
     def scroll(self, x: int, y: int, delta_x: int, delta_y: int) -> None:
         self.calls.append(("scroll", x, y, delta_x, delta_y))
 
+    def drag(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int, hold_ms: int) -> None:
+        self.calls.append(("drag", x1, y1, x2, y2, duration_ms, hold_ms))
+
     def goto(self, url: str) -> None:
         self.url = url
         self.calls.append(("goto", url))
@@ -671,3 +674,84 @@ def test_web_snapshot_pumps_intercepted_responses_before_reading_dom() -> None:
 
     assert payload["url"] == URL
     assert calls == ["event-loop", "title"]
+
+
+def test_web_drag_is_a_runtime_capability_and_swipe_stays_a_wheel_scroll(tmp_path: Path) -> None:
+    connection = FakeConnection()
+    platform = _adapter(tmp_path, connection)
+    runtime = platform.connect(URL)
+
+    assert platform.supports("device.drag")
+    runtime.drag(40, 500, 300, 200, 400, 150)
+    runtime.swipe(180, 500, 180, 200)
+
+    assert connection.calls == [
+        ("drag", 40, 500, 300, 200, 400, 150),
+        ("scroll", 180, 500, 0, 300),
+    ]
+
+
+def test_playwright_drag_is_a_mouse_press_move_release_at_the_requested_points() -> None:
+    events: list[tuple] = []
+
+    class Mouse:
+        def move(self, x: int, y: int) -> None:
+            events.append(("move", x, y))
+
+        def down(self) -> None:
+            events.append(("down",))
+
+        def up(self) -> None:
+            events.append(("up",))
+
+        def wheel(self, dx: int, dy: int) -> None:  # pragma: no cover - a drag never scrolls
+            events.append(("wheel", dx, dy))
+
+    class Page:
+        mouse = Mouse()
+
+        def wait_for_timeout(self, ms: float) -> None:
+            events.append(("wait", round(ms)))
+
+    connection = object.__new__(PlaywrightConnection)
+    connection._page = Page()
+    connection._call = lambda operation: operation()  # type: ignore[method-assign]
+
+    connection.drag(10, 20, 110, 220, 320, 200)
+
+    assert events[:4] == [("move", 10, 20), ("down",), ("wait", 200), ("move", 15, 30)]
+    moves = [event for event in events if event[0] == "move"]
+    assert len(moves) > 5 and moves[-1] == ("move", 110, 220)
+    assert events[-1] == ("up",)
+    assert events.index(("up",)) > events.index(("move", 110, 220))
+    assert not [event for event in events if event[0] == "wheel"]
+
+
+def test_playwright_drag_releases_the_button_when_a_move_fails() -> None:
+    events: list[str] = []
+
+    class Mouse:
+        def move(self, x: int, y: int) -> None:
+            if events.count("move") == 2:
+                raise RuntimeError("page closed")
+            events.append("move")
+
+        def down(self) -> None:
+            events.append("down")
+
+        def up(self) -> None:
+            events.append("up")
+
+    class Page:
+        mouse = Mouse()
+
+        def wait_for_timeout(self, ms: float) -> None:
+            return None
+
+    connection = object.__new__(PlaywrightConnection)
+    connection._page = Page()
+    connection._call = lambda operation: operation()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        connection.drag(0, 0, 50, 50, 200, 0)
+    assert events[-1] == "up"

@@ -505,6 +505,15 @@ class ChromeExtensionConnection:
     def long_click(self, x: int, y: int, duration_ms: int) -> None:
         self._request("long_click", {"x": x, "y": y, "duration_ms": duration_ms})
 
+    def drag(
+        self, x1: int, y1: int, x2: int, y2: int, duration_ms: int, hold_ms: int
+    ) -> None:
+        raise DeviceError(
+            "drag is unsupported on an approved existing Chrome tab",
+            code="drag_unsupported",
+            hint="Use the isolated browser or an existing-cdp connection.",
+        )
+
     def type_text(self, text: str) -> None:
         self._request("type_text", {"text": text})
 

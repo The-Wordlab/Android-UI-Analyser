@@ -19,6 +19,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .. import read_budget
 from ..errors import AuaError, ConfigError, DeviceError, JobCancelledError
+from .drag_path import drag_path
 from .web_bounded_reads import read as _read
 
 
@@ -55,6 +56,10 @@ class WebConnection(Protocol):
     def click(self, x: int, y: int) -> None: ...
 
     def long_click(self, x: int, y: int, duration_ms: int) -> None: ...
+
+    def drag(
+        self, x1: int, y1: int, x2: int, y2: int, duration_ms: int, hold_ms: int
+    ) -> None: ...
 
     def type_text(self, text: str) -> None: ...
 
@@ -818,6 +823,26 @@ class PlaywrightConnection:
             self._page.mouse.up()
 
         self._call(hold)
+
+    def drag(
+        self, x1: int, y1: int, x2: int, y2: int, duration_ms: int, hold_ms: int
+    ) -> None:
+        points, pause = drag_path(x1, y1, x2, y2, duration_ms)
+
+        def press_move_release() -> None:
+            mouse = self._page.mouse
+            mouse.move(x1, y1)
+            mouse.down()
+            try:
+                if hold_ms > 0:
+                    self._page.wait_for_timeout(hold_ms)
+                for x, y in points:
+                    mouse.move(x, y)
+                    self._page.wait_for_timeout(pause * 1000)
+            finally:
+                mouse.up()
+
+        self._call(press_move_release)
 
     def type_text(self, text: str) -> None:
         self._call(lambda: self._page.keyboard.insert_text(text))
