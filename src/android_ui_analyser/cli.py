@@ -9333,6 +9333,89 @@ def knowledge_stale(
     _run(ctx, go)
 
 
+api_app = typer.Typer(
+    name="api",
+    help=(
+        "Which client versions call which backend endpoint, and what a backend change "
+        "touches. Reads git history; needs no device."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(api_app, name="api")
+
+_API_CONFIG_HELP = "api-usage config (YAML/JSON): the backend repo and every client repo."
+
+
+@api_app.command("check")
+def api_check_cmd(
+    ctx: typer.Context,
+    config: str = typer.Option("aua-api.yaml", "--config", help=_API_CONFIG_HELP),
+    base: str | None = typer.Option(
+        None, "--base", help="Backend ref the change is measured from (default: backend.base)."
+    ),
+    head: str | None = typer.Option(
+        None, "--head", help="Backend ref to check (default: the backend's working tree)."
+    ),
+    base_spec: str | None = typer.Option(
+        None, "--base-spec", help="OpenAPI JSON to use as the base instead of exporting one."
+    ),
+    head_spec: str | None = typer.Option(
+        None, "--head-spec", help="OpenAPI JSON to use as the head instead of exporting one."
+    ),
+    fetch: bool = typer.Option(
+        True, "--fetch/--no-fetch", help="`git fetch --tags` each client repo first."
+    ),
+    client: list[str] = typer.Option([], "--client", help="Only this client; repeatable."),
+) -> None:
+    """Report each backend change beside the client versions and source lines that call it."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .api_usage import check
+
+        result = check(
+            config,
+            engine.config.cache.dir,
+            base=base,
+            head=head,
+            base_spec=base_spec,
+            head_spec=head_spec,
+            fetch=fetch,
+            only=client,
+        )
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@api_app.command("usage")
+def api_usage_cmd(
+    ctx: typer.Context,
+    endpoint: str | None = typer.Argument(
+        None, help="Filter, e.g. `GET /api/v1/items` or just `items`."
+    ),
+    config: str = typer.Option("aua-api.yaml", "--config", help=_API_CONFIG_HELP),
+    fetch: bool = typer.Option(
+        True, "--fetch/--no-fetch", help="`git fetch --tags` each client repo first."
+    ),
+    client: list[str] = typer.Option([], "--client", help="Only this client; repeatable."),
+) -> None:
+    """Every backend call each client makes, with the versions that make it."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .api_usage import usage
+
+        result = usage(
+            config, engine.config.cache.dir, endpoint=endpoint, fetch=fetch, only=client
+        )
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
 prepare_app = typer.Typer(
     name="prepare",
     help="Agree what a test must prove with the agent that wrote the feature, then keep it.",

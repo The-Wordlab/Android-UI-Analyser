@@ -1417,6 +1417,48 @@ CA) — not “no traffic”.
 
 ---
 
+## Backend changes vs. shipped app versions (`aua api`)
+
+No device. `aua api check` exports the backend's OpenAPI spec at a base ref and in the working
+tree, reads every client repository through git at its release tags, and reports each change an
+already-shipped client can feel beside the client versions and source lines that call it:
+
+```yaml
+# aua-api.yaml — relative repo paths resolve against this file
+backend:
+  repo: .
+  base: origin/main
+  spec_command: python scripts/export_openapi.py {out}   # {out}, {repo}, {checkout}
+clients:
+  - name: android
+    repo: ../example-android
+    scanner: retrofit                 # @GET("items") etc. in *.kt / *.java
+    base_path: /api/v1/
+    tags: "v*"                        # one entry per released version…
+    version: {tag_pattern: '^v(\d+\.\d+\.\d+)'}   # …or {file: …, pattern: …}
+    min_version: "3.0.0"              # older versions cannot reach the backend anyway
+    max_versions: 10
+  - name: web
+    repo: ../example-web
+    files: ["src/*"]
+    exclude: ["*.test.*"]
+    pattern: '(?P<path>/api/v1(?:/[A-Za-z0-9_\-{}$]+)+)'   # a `method` group is optional
+```
+
+```bash
+aua api check                         # working tree vs backend.base
+aua api check --base <ref> --head <ref>
+aua api usage "GET /api/v1/items"     # which versions call it, and from where
+```
+
+A finding is a candidate: AUA matched the route, not the fields each client decodes. The
+result's `agent_brief` says how to confirm it in the client's model. A base spec is exported
+from an extracted copy of that ref and cached by commit; client files are cached by blob id, so a
+repeat run reads only what changed. Partial clones (`--filter=blob:none`) are fetched in one
+batch rather than one file at a time.
+
+---
+
 ## Dashboard (sneak-peek headless runs)
 
 Agents often drive a **headless** emulator with no window. The dashboard is a detached service on
@@ -1925,6 +1967,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua emulator recommend-proxy\|ensure-proxy` | Suggest/create a small rootable Google APIs AVD |
 | `aua flags set\|apply` | Feature-flag writes with verify/restart |
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
+| `aua api check\|usage` | Backend OpenAPI changes vs. the client versions that call them (no device) |
 | `aua capture …` | Session capture / export / explain |
 | `aua helper status\|enable\|remove` | Optional on-device helper APK — runs a long flow on the device (rootable targets, off by default) |
 | `aua session start --goal GOAL --contract FILE --apk APP --helper` | One-call DeepSeek helper session: prepare, run ordered checks, apply proof, clean up, return pass/fail; never falls back |
