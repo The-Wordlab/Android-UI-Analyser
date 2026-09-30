@@ -45,6 +45,13 @@ notes, so you can check for a newer version — and read what changed — withou
   command. `daemon.idle_ttl_s` now defaults to unset, meaning the platform's own limit (30
   minutes on Android and iOS); an explicit value still applies to every platform.
 
+### Fixed
+
+- The platform conformance kit's wait check allows 2 seconds instead of 100 ms. The timeout is
+  also the read budget, so a cold process spent it on first-call imports and failed a conforming
+  adapter at `wait`. The prepared text is already on screen, so a fast adapter still answers on
+  the first read.
+
 ## [0.31.1] - 2026-09-30
 
 ### Fixed

@@ -242,9 +242,12 @@ def run_attached_target_conformance(
             _fail("input", f"Engine reported tap target {action.target!r}, expected {tap_point!r}")
         checks.append("engine-tap")
 
+        # The text is already on screen, so a fast target answers on the first read. The
+        # timeout is also the read budget: at 100 ms a cold process spent it on first-call
+        # imports and the wait refused its only read, failing a conforming adapter.
         waited = engine.wait(
             for_=case.element_text,
-            timeout_ms=100,
+            timeout_ms=2000,
             observe=False,
         )
         if not waited.ok:
