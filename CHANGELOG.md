@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-30
+
 ### Added
 
 - Jev types a text the brief quotes after "type exactly", as written and with `submit=false`.
@@ -1637,5 +1639,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.29.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.29.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.30.0...HEAD
 [0.30.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.30.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.31.0

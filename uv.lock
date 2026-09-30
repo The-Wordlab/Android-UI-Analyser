@@ -100,7 +100,7 @@ wheels = [
 
 [[package]]
 name = "android-ui-analyser"
-version = "0.30.0"
+version = "0.31.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -1114,7 +1114,7 @@ name = "cuda-bindings"
 version = "13.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cuda-pathfinder", marker = "(python_full_version < '3.15' and sys_platform != 'win32') or (sys_platform != 'win32' and extra == 'extra-19-android-ui-analyser-all') or (sys_platform != 'win32' and extra == 'extra-19-android-ui-analyser-proxy') or (sys_platform != 'win32' and extra != 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "cuda-pathfinder", marker = "(python_full_version < '3.15' and sys_platform != 'win32') or (python_full_version >= '3.15' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version >= '3.15' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/6b/457ca12dad3ee9bfcc9a545cfd6b64b359ba49de40f776f6e028e678f262/cuda_bindings-13.3.1-cp311-cp311-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c5879712accf6e14bb01aa5e67440eb84998b8d104b509cc7a6dc0b8f656a474", size = 6053539, upload-time = "2026-05-29T23:11:43.19Z" },
@@ -1293,11 +1293,11 @@ name = "fastapi"
 version = "0.141.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "annotated-doc" },
-    { name = "pydantic" },
-    { name = "starlette" },
-    { name = "typing-extensions" },
-    { name = "typing-inspection" },
+    { name = "annotated-doc", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "pydantic", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "starlette", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "typing-extensions", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "typing-inspection", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8a/02/91e3416a8fdd715abb903a952a6bec7cdd8d14eed55d415fc8595524c319/fastapi-0.141.1.tar.gz", hash = "sha256:e8822fc40db1e1858054d7a949a888695bc9bdce70139178e33bd2871a453ca1", size = 425799, upload-time = "2026-07-29T17:18:05.568Z" }
 wheels = [
@@ -2492,7 +2492,7 @@ name = "miniaudio"
 version = "1.71"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi" },
+    { name = "cffi", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d8/d5/e5439dc08561f73656bfeb3340fc64ab63163e101426593d8fb9a025ff1e/miniaudio-1.71.tar.gz", hash = "sha256:ff51e2887bb673e2e757752b586b3dc924d59aa5fbcae9bbc45f4a111bd3262b", size = 1116480, upload-time = "2026-04-29T21:20:38.182Z" }
 wheels = [
@@ -2851,16 +2851,16 @@ name = "mlx-audio"
 version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
-    { name = "miniaudio" },
-    { name = "mlx" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "sounddevice" },
-    { name = "tqdm" },
-    { name = "transformers" },
+    { name = "huggingface-hub", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "miniaudio", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "mlx", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and sys_platform != 'win32') or (python_full_version >= '3.12' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version >= '3.12' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and sys_platform != 'win32') or (python_full_version < '3.12' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version < '3.12' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and sys_platform != 'win32') or (python_full_version >= '3.12' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version >= '3.12' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and sys_platform != 'win32') or (python_full_version < '3.12' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version < '3.12' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "sounddevice", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "tqdm", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "transformers", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ae/d0/6e2e6c548dbc9d4d996e959e3a0e34faf64ca357462733ee94a42046664b/mlx_audio-0.5.0.tar.gz", hash = "sha256:d5aba4b99c006acd735408189d127eaf6ed53be0cad789e2eb51aa57f4f6bf13", size = 1584608, upload-time = "2026-08-17T17:47:57.542Z" }
 wheels = [
@@ -2872,14 +2872,14 @@ name = "mlx-lm"
 version = "0.31.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "jinja2" },
+    { name = "jinja2", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
     { name = "mlx", marker = "sys_platform == 'darwin' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "protobuf" },
-    { name = "pyyaml" },
-    { name = "sentencepiece" },
-    { name = "transformers" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and sys_platform != 'win32') or (python_full_version >= '3.12' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version >= '3.12' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and sys_platform != 'win32') or (python_full_version < '3.12' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version < '3.12' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "protobuf", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "pyyaml", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "sentencepiece", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "transformers", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/84/94/9a38d6b0c6fcca995b9136c94eb7da1e9c5165652edf228b96b29960fa7a/mlx_lm-0.31.3.tar.gz", hash = "sha256:61eb0e3ba09444f77f874aff295401d7ccd20b39495cbbce0c782a15474ce733", size = 304318, upload-time = "2026-04-22T07:37:27.922Z" }
 wheels = [
@@ -2901,22 +2901,22 @@ name = "mlx-vlm"
 version = "0.6.14"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "fastapi" },
-    { name = "llguidance" },
-    { name = "miniaudio" },
-    { name = "mlx" },
-    { name = "mlx-audio" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "opencv-python" },
-    { name = "pillow" },
-    { name = "python-multipart" },
-    { name = "requests" },
-    { name = "starlette" },
-    { name = "tqdm" },
-    { name = "transformers" },
-    { name = "uvicorn" },
-    { name = "websockets" },
+    { name = "fastapi", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "llguidance", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "miniaudio", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "mlx", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "mlx-audio", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and sys_platform != 'win32') or (python_full_version >= '3.12' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version >= '3.12' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and sys_platform != 'win32') or (python_full_version < '3.12' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version < '3.12' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "opencv-python", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "pillow", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "python-multipart", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "requests", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "starlette", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "tqdm", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "transformers", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "uvicorn", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "websockets", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/73/1a/619f62440772a979a68592885c26922070f8761f3d9b8a90e00817905531/mlx_vlm-0.6.14.tar.gz", hash = "sha256:661530e5e9a1b2e41c4546f36c71989d94f51ecafe0b78fabe7dbd1e92ecc9fb", size = 1944376, upload-time = "2026-08-17T17:52:49.602Z" }
 wheels = [
@@ -4122,7 +4122,7 @@ name = "pyobjc-framework-cocoa"
 version = "12.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
+    { name = "pyobjc-core", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/51/34/fbe38a204643aa4e1b91391cdce07a34da565a69171ebcad08de7438a556/pyobjc_framework_cocoa-12.2.1.tar.gz", hash = "sha256:b94b37fe5730e5ae1fb0052912cd174e6ec329b0bfba4a012ae5db1014b5864b", size = 3125751, upload-time = "2026-06-19T16:20:05.159Z" }
 wheels = [
@@ -4141,8 +4141,8 @@ name = "pyobjc-framework-coreml"
 version = "12.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-core", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/98/1e/7d2db3e4468eb04cc92264be83113d86eea4f96302742437de695a445d6d/pyobjc_framework_coreml-12.2.1.tar.gz", hash = "sha256:ef3c2b6a160891b44173235603d10174929656b9c206d6f2f443fe2aa903c2cb", size = 49272, upload-time = "2026-06-19T16:20:18.459Z" }
 wheels = [
@@ -4161,8 +4161,8 @@ name = "pyobjc-framework-quartz"
 version = "12.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-core", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3b/f6/2a8b84dbf1fe7c04dd96ea73d991678d4e09a909f51971ecc51629bb2ab4/pyobjc_framework_quartz-12.2.1.tar.gz", hash = "sha256:b3b8b6f71e66147f8ff9e6213864cc8527e3a0b1ee90835b93ce221f4802d9b0", size = 3215521, upload-time = "2026-06-19T16:21:30.199Z" }
 wheels = [
@@ -4181,10 +4181,10 @@ name = "pyobjc-framework-vision"
 version = "12.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
-    { name = "pyobjc-framework-coreml" },
-    { name = "pyobjc-framework-quartz" },
+    { name = "pyobjc-core", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "pyobjc-framework-coreml", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0e/7a/1fdffff1b6bf124b260a2169869f4b71a08b9f6603698f7dec990d5ae5f3/pyobjc_framework_vision-12.2.1.tar.gz", hash = "sha256:debfd59dd7d962a6053bf733370148c11a9ec44091b517a0966f48d81c305879", size = 72683, upload-time = "2026-06-19T16:22:01.102Z" }
 wheels = [
@@ -5586,7 +5586,7 @@ name = "sounddevice"
 version = "0.5.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi" },
+    { name = "cffi", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ec/db/0c890e2d9aab9ba284021efc02e1d3aebfecab1b611762d7434602209bcf/sounddevice-0.5.6.tar.gz", hash = "sha256:8ec9fbfde2e32f020b167e348f3ab3bac6625a5f15af524d790108ac7147a410", size = 1120094, upload-time = "2026-08-17T07:55:05.048Z" }
 wheels = [
@@ -5796,7 +5796,7 @@ name = "tokenizers"
 version = "0.22.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/73/6f/f80cfef4a312e1fb34baf7d85c72d4411afde10978d4657f8cdd811d3ccc/tokenizers-0.22.2.tar.gz", hash = "sha256:473b83b915e547aa366d1eee11806deaf419e17be16310ac0a14077f1e28f917", size = 372115, upload-time = "2026-01-05T10:45:15.988Z" }
 wheels = [
@@ -6011,16 +6011,16 @@ name = "transformers"
 version = "5.15.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
-    { name = "packaging" },
-    { name = "pyyaml" },
-    { name = "regex" },
-    { name = "safetensors" },
-    { name = "tokenizers" },
-    { name = "tqdm" },
-    { name = "typer" },
+    { name = "huggingface-hub", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and sys_platform != 'win32') or (python_full_version >= '3.12' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version >= '3.12' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and sys_platform != 'win32') or (python_full_version < '3.12' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (python_full_version < '3.12' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (sys_platform == 'win32' and extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "packaging", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "pyyaml", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "regex", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "safetensors", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "tokenizers", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "tqdm", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
+    { name = "typer", marker = "sys_platform != 'win32' or (extra == 'extra-19-android-ui-analyser-all' and extra == 'extra-19-android-ui-analyser-typesafe') or (extra == 'extra-19-android-ui-analyser-proxy' and extra == 'extra-19-android-ui-analyser-typesafe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a6/3f/d89353267d511e18f137dfd7769d07837350c11b88408ce1dfe2e93e56c7/transformers-5.15.0.tar.gz", hash = "sha256:bbf98f57b2ddd7c4ecbccfa2c0069017aa6fd01cc204bd50cbc0eeadcf2a13b8", size = 9377983, upload-time = "2026-08-10T10:27:23.261Z" }
 wheels = [

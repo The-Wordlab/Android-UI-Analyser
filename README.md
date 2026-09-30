@@ -102,11 +102,11 @@ directly from GitHub:
 
 ```bash
 uvx --from \
-  'android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.30.0' \
+  'android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.31.0' \
   aua --version
 ```
 
-`uvx` creates an isolated environment and caches it for later calls. Replace `v0.30.0` with the
+`uvx` creates an isolated environment and caches it for later calls. Replace `v0.31.0` with the
 release you want; no clone, `git pull`, editable environment, or global `aua` executable is needed.
 The command is `uvx --from … aua`, not `uv aua`: the shorter `uvx aua` becomes possible only after
 the distribution is published to PyPI. Until then the explicit Git source keeps the release origin
@@ -324,7 +324,7 @@ Pin a clone-based install to a release instead of tracking `main`:
 
 ```bash
 git fetch --tags
-git checkout v0.30.0
+git checkout v0.31.0
 ./install.sh
 ```
 
@@ -1595,7 +1595,7 @@ Example MCP client config (Claude Desktop / `claude_desktop_config.json`):
       "args": [
         "--quiet",
         "--from",
-        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.30.0",
+        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.31.0",
         "aua",
         "mcp"
       ]
