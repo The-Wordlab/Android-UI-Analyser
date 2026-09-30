@@ -1451,8 +1451,13 @@ aua api check --base <ref> --head <ref>
 aua api usage "GET /api/v1/items"     # which versions call it, and from where
 ```
 
-A finding is a candidate: AUA matched the route, not the fields each client decodes. The
-result's `agent_brief` says how to confirm it in the client's model. A base spec is exported
+A finding is one change to one schema, with every operation it reaches and every client version
+that calls one of them, each version with its own commit and source lines. It is a candidate: AUA
+matched the route, not the fields each client decodes, so the result's `agent_brief` asks the
+agent to classify it per version as `decode_fails`, `data_missing`, `unaffected` or `unknown`.
+`coverage` lists the called operations whose responses the spec does not describe (only their
+removal is visible), each client's `history` says which tags were left out, and `not_checked`
+names what a spec diff cannot see. `unused_changes` are not proof of safety. A base spec is exported
 from an extracted copy of that ref and cached by commit and export command (`--refresh` exports
 again after the exporter's setup changed); client files are cached by blob id, so a repeat run
 reads only what changed. Partial clones (`--filter=blob:none`) are fetched in one

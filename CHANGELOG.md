@@ -24,12 +24,16 @@ notes, so you can check for a newer version — and read what changed — withou
   cannot hold before moving. Adapters declare the new `device.drag` capability.
 - `aua api check` reports what a backend change touches in the apps that call it, with no
   device. It exports the backend's OpenAPI spec before and after the change, reads every
-  configured client repository through git at each release tag, and lists each change — a
-  removed operation, a removed, retyped or now-optional response field, a newly required request
-  parameter or field — beside the client versions and source lines that call that operation.
-  Each run scans only file versions it has not seen, so it brings itself up to date whenever it
-  is used. `aua api usage` answers "which versions call this endpoint". The result carries a
-  brief telling the calling agent how to confirm each candidate in the client's own model.
+  configured client repository through git at each release tag, and lists each change an
+  already-shipped client can feel — a removed operation; a response field removed, retyped, now
+  optional or now nullable; a new value in a response enum; a request parameter or field that is
+  newly required, narrower in type or enum, or no longer nullable — once per changed schema,
+  beside every client version that calls it and that version's own source lines. `coverage`
+  says what the check could not see: untyped responses, versions left out, and what no OpenAPI
+  spec describes. Each run scans only file versions it has not seen, so it brings itself up to
+  date whenever it is used. `aua api usage` answers "which versions call this endpoint". The
+  result tells the calling agent to classify each finding per version as decode fails, data
+  silently missing, unaffected or unknown.
 
 ### Changed
 

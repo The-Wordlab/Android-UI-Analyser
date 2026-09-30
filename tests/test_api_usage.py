@@ -121,6 +121,10 @@ def _config(root: Path, app: Path, backend: Path | None = None, **backend_keys: 
     return _write(root / "aua-api.yaml", "\n".join(lines) + "\n")
 
 
+def _labels(user: dict[str, Any]) -> list[str]:
+    return [v["version"] for v in user["versions"]]
+
+
 def _item_fields(*names: str) -> dict[str, Any]:
     return _op({n: {"type": "string"} for n in names}, required=list(names))
 
@@ -154,15 +158,16 @@ def test_a_change_is_reported_beside_exactly_the_versions_that_call_it(tmp_path)
         fetch=False,
     )
 
-    by_change = {(f["operation"], f["change"]): f for f in result["findings"]}
+    by_change = {(f["operations"][0]["operation"], f["change"]): f for f in result["findings"]}
     removed = by_change[("GET /api/v1/legacy", "operation_removed")]
-    assert [u["versions"] for u in removed["used_by"]] == [["1.0.0"]]
+    assert [_labels(u) for u in removed["used_by"]] == [["1.0.0"]]
     field = by_change[("GET /api/v1/items", "response_field_removed")]
     assert field["field"] == "name"
     [user] = field["used_by"]
-    assert user["versions"] == ["unreleased", "2.0.0", "1.0.0"]
-    assert user["sources"] == ["data/Api.kt:2"]
-    assert user["read_at"]["version"] == "unreleased"
+    assert _labels(user) == ["unreleased", "2.0.0", "1.0.0"]
+    # Every version carries its own sources and commit: versions differ, none stands for another.
+    assert [v["sources"] for v in user["versions"]] == [["data/Api.kt:2"]] * 3
+    assert all(len(v["sha"]) == 40 for v in user["versions"])
     # A removed operation outranks a field change, and nothing the apps never call is a finding.
     assert result["findings"][0]["change"] == "operation_removed"
     assert result["unused_changes"] == ["GET /api/v1/unused: response_field_removed `x`"]
@@ -336,3 +341,79 @@ def test_a_cached_base_spec_is_exported_again_when_its_exporter_changes_or_on_re
     assert removed() == ["name"]  # same commit, same exporter: the cached export stands
     assert removed(refresh=True) == ["name", "price"]
     assert removed(extra=" extra") == ["extra", "name", "price"]  # a new exporter is a new export
+
+
+def test_one_change_to_a_shared_model_is_one_finding_with_every_operation_under_it(tmp_path):
+    # Found on a real backend: one renamed field of a shared model read as 35 separate findings.
+    app = _repo(tmp_path / "example-android")
+    _commit(app, {"data/Api.kt": _retrofit("GET score", "POST chat")}, "2026-01-01T00:00:00")
+    config = _write(
+        tmp_path / "aua-api.yaml",
+        f"backend: {{repo: {app}}}\nclients:\n"
+        f"  - {{name: android, repo: {app}, branch: main, scanner: retrofit, base_path: /api/v1/}}\n",
+    )
+
+    def spec(score: dict[str, Any]) -> dict[str, Any]:
+        def body(name: str) -> dict[str, Any]:
+            schema = {"$ref": f"#/components/schemas/{name}"}
+            return {"responses": {"200": {"content": {"application/json": {"schema": schema}}}}}
+
+        reply = {"type": "object", "properties": {"score": {"$ref": "#/components/schemas/Score"}}}
+        return _spec(
+            {"/api/v1/score": {"get": body("Score")}, "/api/v1/chat": {"post": body("Reply")}},
+            {"Score": {"type": "object", "properties": score}, "Reply": reply},
+        )
+
+    result = check(
+        config,
+        tmp_path / "cache",
+        base_spec=_write(tmp_path / "base.json", spec({"points": {"type": "integer"}})),
+        head_spec=_write(tmp_path / "head.json", spec({})),
+        fetch=False,
+    )
+
+    [finding] = result["findings"]
+    assert (finding["change"], finding["schema"], finding["field"]) == (
+        "response_field_removed",
+        "Score",
+        "points",
+    )
+    assert finding["operations"] == [
+        {"operation": "GET /api/v1/score", "field": "points"},
+        {"operation": "POST /api/v1/chat", "field": "score.points"},
+    ]
+    [user] = finding["used_by"]
+    assert user["versions"][0]["sources"] == [
+        "data/Api.kt:2 (GET /api/v1/score)",
+        "data/Api.kt:4 (POST /api/v1/chat)",
+    ]
+
+
+def test_the_result_says_what_the_check_could_not_see(tmp_path):
+    app = _client_history(tmp_path)
+    config = Path(_config(tmp_path, app))
+    config.write_text(config.read_text() + "    max_versions: 1\n")
+    untyped = {"responses": {"200": {"content": {"application/json": {"schema": {}}}}}}
+    spec = _write(
+        tmp_path / "spec.json",
+        _spec({"/api/v1/items": {"get": untyped}, "/api/v1/orders": {"post": _item_fields("id")}}),
+    )
+
+    result = check(config, tmp_path / "cache", base_spec=spec, head_spec=spec, fetch=False)
+
+    coverage = result["coverage"]
+    # Only removing `GET items` can show there: its body is not described.
+    assert coverage["untyped_called_operations"] == {
+        "count": 1,
+        "operations": ["GET /api/v1/items"],
+    }
+    assert coverage["operations"] == {"base": 2, "called": 2}
+    assert coverage["not_checked"]
+    [android] = result["clients"]
+    assert [v["label"] for v in android["versions"]] == ["unreleased", "2.0.0"]
+    assert android["history"] == {
+        "max_versions": 1,
+        "min_version": None,
+        "tags_not_examined": 1,
+        "tags_below_min_version": 0,
+    }

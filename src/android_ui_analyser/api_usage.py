@@ -29,27 +29,46 @@ from typing import Any
 
 import yaml
 
-from .api_spec_diff import diff_specs, match_operations, normalize_path, operation_key, operations
+from .api_spec_diff import (
+    diff_specs,
+    match_operations,
+    normalize_path,
+    operation_key,
+    operations,
+    untyped_response,
+)
 from .atomic import atomic_write_text
 from .errors import UsageError
 
 AGENT_BRIEF = (
-    "Each finding is a backend change on an operation the listed client versions call. It is a "
-    "candidate, not a verdict: AUA matched the route, not the fields the client reads. For each "
-    "finding and client, read the listed source with `git -C <repo> show <sha>:<file>` (newest "
-    "version first, then the oldest listed), follow the call to the model the client decodes or "
-    "the request it builds, and decide:\n"
-    "- operation_removed: breaks every listed version that can still reach that call.\n"
-    "- response_field_removed / response_field_now_optional: breaks a version only if its model "
-    "declares that field non-optional with no default; an optional, defaulted or undeclared "
-    "field is safe.\n"
-    "- response_field_type_changed: breaks a version whose model declares the old type.\n"
-    "- request_parameter_now_required / request_field_now_required / request_body_now_required: "
-    "breaks every listed version that does not already send it.\n"
-    "Answer per finding and client: breaks / safe / unsure, citing the model line. "
-    "`unused_changes` touch no operation any configured client calls — safe for these clients, "
-    "unknown for any client the config does not list."
+    "Each finding is a backend change that the listed client versions may feel. AUA matched "
+    "routes, not the fields each client reads, so classify every finding for every listed "
+    "client version:\n"
+    "- decode_fails: the version's model cannot take the new shape — a non-optional field "
+    "removed or now null, a type it cannot parse, a strict enum meeting a new value, or a "
+    "request the server now rejects.\n"
+    "- data_missing: decoding succeeds but data or behaviour is silently lost — an optional or "
+    "defaulted field now absent, null or renamed, so the screen shows nothing or the default.\n"
+    "- unaffected: the version's model does not declare the field, or already reads the new "
+    "spelling and type.\n"
+    "- unknown: say what you could not see (custom decoder, generated code, decoder settings).\n"
+    "Read each version's own sources with `git -C <repo> show <sha>:<file>` and follow the call "
+    "to the model it decodes or the request it builds; versions differ, so never infer one from "
+    "another. Decoder settings decide null and unknown-value handling (kotlinx `explicitNulls` "
+    "and `coerceInputValues`, Moshi on null for a non-null property, Swift "
+    "`keyDecodingStrategy`). Cite the model line. `unused_changes` are changes no scanned client "
+    "version calls, which is not proof they are safe: see `coverage.not_checked`."
 )
+
+NOT_CHECKED = [
+    "calls the client patterns do not match: URLs built from constants, concatenation or at "
+    "runtime",
+    "clients, backends and versions this config does not list (each client's `history` says "
+    "which tags were left out)",
+    "fields of the operations in `untyped_called_operations`: only removing them shows",
+    "authentication, headers, status codes, streaming payloads and anything else the OpenAPI "
+    "spec does not describe",
+]
 
 CONFIG_HINT = (
     "Write an api-usage config (YAML or JSON), e.g.\n"
@@ -282,8 +301,13 @@ def _label(
     return label
 
 
-def _refs(client: dict[str, Any], labels: dict[str, str]) -> list[dict[str, Any]]:
-    """The unreleased branch, then the newest tag of each of the newest released versions."""
+def _refs(
+    client: dict[str, Any], labels: dict[str, str]
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """The unreleased branch, then the newest tag of each of the newest released versions.
+
+    Also returns what was left out, so a result can say which versions it never looked at.
+    """
 
     repo = client["repo"]
     refs: list[dict[str, Any]] = []
@@ -293,7 +317,7 @@ def _refs(client: dict[str, Any], labels: dict[str, str]) -> list[dict[str, Any]
         raise UsageError(f"client {client['name']}: branch {branch!r} does not resolve in {repo}")
     refs.append({"label": "unreleased", "ref": branch, "sha": head})
     if not client.get("tags"):
-        return refs
+        return refs, None
     listing = _git(
         repo,
         "for-each-ref",
@@ -304,19 +328,31 @@ def _refs(client: dict[str, Any], labels: dict[str, str]) -> list[dict[str, Any]
     seen: set[str] = set()
     limit = int(client.get("max_versions") or _DEFAULT_MAX_VERSIONS)
     rule = dict(client.get("version") or {})
+    tags = []
     for line in listing.splitlines():
         tag, obj, peeled = (line.split("\0") + ["", ""])[:3]
-        if not fnmatch.fnmatch(tag, str(client["tags"])):
-            continue
-        sha = peeled or obj
+        if fnmatch.fnmatch(tag, str(client["tags"])):
+            tags.append((tag, peeled or obj))
+    below = not_examined = 0
+    for index, (tag, sha) in enumerate(tags):
         label = _label(repo, tag, sha, rule, labels)
-        if label is None or label in seen or _below(label, client.get("min_version")):
+        if label is None or label in seen:
+            continue
+        if _below(label, client.get("min_version")):
+            below += 1
             continue
         seen.add(label)
         refs.append({"label": label, "ref": tag, "sha": sha})
         if len(seen) >= limit:
+            not_examined = len(tags) - index - 1
             break
-    return refs
+    history = {
+        "max_versions": limit,
+        "min_version": client.get("min_version"),
+        "tags_not_examined": not_examined,
+        "tags_below_min_version": below,
+    }
+    return refs, history
 
 
 # -------------------------------------------------------------------------------- scanning
@@ -355,7 +391,7 @@ def scan_client(client: dict[str, Any], cache_dir: Path, *, fetch: bool) -> dict
     blobs: dict[str, list[list[Any]]] = cache.get("blobs") or {}
     labels: dict[str, str] = cache.get("labels") or {}
     fetched = _fetch(repo) if fetch else "skipped"
-    refs = _refs(client, labels)
+    refs, history = _refs(client, labels)
     patterns = [re.compile(str(p), re.MULTILINE) for p in client["pattern"]]
     include = list(client["files"])
     exclude = list(client.get("exclude") or [])
@@ -382,6 +418,7 @@ def scan_client(client: dict[str, Any], cache_dir: Path, *, fetch: bool) -> dict
         "fetch": fetched,
         "files_scanned_now": len(unseen) - unreadable,
         "files_unreadable": unreadable,
+        "history": history,
         "refs": refs,
         "calls": calls,
     }
@@ -470,35 +507,52 @@ def _load_spec_file(path: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def _who_calls(
-    op_key: str, clients: list[dict[str, Any]], routes: dict[str, dict[str, list[str]]]
+    op_keys: list[str], clients: list[dict[str, Any]], routes: dict[str, dict[str, list[str]]]
 ) -> list[dict[str, Any]]:
+    """Per client, every version that calls one of *op_keys*, each with its own sources."""
+
     users = []
+    named = len(op_keys) > 1
     for client in clients:
-        versions: list[str] = []
-        sources: list[str] = []
-        newest: dict[str, Any] = {}
+        versions = []
         for ref in client["refs"]:
-            hits = [
-                f"{c['file']}:{c['line']}"
-                for c in client["calls"][ref["label"]]
-                if op_key in routes[client["name"]].get(f"{c['method']} {c['path']}", [])
-            ]
+            hits = set()
+            for call in client["calls"][ref["label"]]:
+                reached = routes[client["name"]].get(f"{call['method']} {call['path']}", [])
+                for op in op_keys:
+                    if op in reached:
+                        where = f"{call['file']}:{call['line']}"
+                        hits.add(f"{where} ({op})" if named else where)
             if hits:
-                versions.append(ref["label"])
-                if not sources:
-                    sources = sorted(set(hits))
-                    newest = ref
+                versions.append(
+                    {"version": ref["label"], "sha": ref["sha"], "sources": sorted(hits)}
+                )
         if versions:
-            users.append(
-                {
-                    "client": client["name"],
-                    "repo": client["repo"],
-                    "versions": versions,
-                    "read_at": {"version": newest["label"], "sha": newest["sha"]},
-                    "sources": sources,
-                }
-            )
+            users.append({"client": client["name"], "repo": client["repo"], "versions": versions})
     return users
+
+
+def _group(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per change to one declaration: a shared model's field is changed once."""
+
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for change in changes:
+        schema = change.get("schema")
+        name = change.get("schema_field") if schema else change.get("field")
+        scope = schema or change["operation"]
+        key = (change["change"], scope, name, change.get("detail"))
+        group = groups.setdefault(
+            key,
+            {
+                "change": change["change"],
+                "schema": schema,
+                "field": name,
+                "detail": change.get("detail"),
+                "operations": [],
+            },
+        )
+        group["operations"].append({"operation": change["operation"], "field": change.get("field")})
+    return list(groups.values())
 
 
 def _routes(
@@ -516,12 +570,14 @@ def _routes(
     return routes, sorted(k for k in head if not routes[k])
 
 
-def _describe(change: dict[str, Any]) -> str:
-    text = f"{change['operation']}: {change['change']}"
-    if change.get("field"):
-        text += f" `{change['field']}`"
-    if change.get("detail"):
-        text += f" ({change['detail']})"
+def _describe(group: dict[str, Any]) -> str:
+    text = f"{group['schema'] or group['operations'][0]['operation']}: {group['change']}"
+    if group.get("field"):
+        text += f" `{group['field']}`"
+    if group.get("detail"):
+        text += f" ({group['detail']})"
+    if len(group["operations"]) > 1:
+        text += f" in {len(group['operations'])} operations"
     return text
 
 
@@ -541,6 +597,7 @@ def _client_summary(client: dict[str, Any], unmatched: list[str] | None = None) 
         "fetch": client["fetch"],
         "files_scanned_now": client["files_scanned_now"],
         "files_unreadable": client["files_unreadable"],
+        "history": client["history"],
         "versions": [
             {k: ref[k] for k in ("label", "ref", "sha", "calls")} for ref in client["refs"]
         ],
@@ -592,18 +649,20 @@ def check(
         routes[client["name"]], unmatched = _routes(client, known)
         summaries.append(_client_summary(client, unmatched))
     findings, unused = [], []
-    for change in diff["changes"]:
-        users = _who_calls(change["operation"], clients, routes)
+    for group in _group(diff["changes"]):
+        users = _who_calls([o["operation"] for o in group["operations"]], clients, routes)
         if users:
-            findings.append({**change, "used_by": users})
+            findings.append({**group, "used_by": users})
         else:
-            unused.append(_describe(change))
+            unused.append(_describe(group))
     findings.sort(
         key=lambda f: (
             f["change"] != "operation_removed",
             -sum(len(u["versions"]) for u in f["used_by"]),
         )
     )
+    called = sorted({op for r in routes.values() for ops in r.values() for op in ops})
+    untyped = [op for op in called if untyped_response(spec_before, known[op]["op"])]
     commits = []
     if base_info.get("sha") and head_info.get("sha") and base_info["sha"] != head_info["sha"]:
         log = _git(
@@ -619,9 +678,18 @@ def check(
     return {
         "ok": True,
         "summary": (
-            f"{len(diff['changes'])} client-visible backend change(s): {len(findings)} on "
-            f"operations a configured client calls, {len(unused)} on operations none calls."
+            f"{len(diff['changes'])} client-visible backend change(s) in "
+            f"{len(findings) + len(unused)} group(s): {len(findings)} on operations a scanned "
+            f"client version calls, {len(unused)} on operations none of them calls."
         ),
+        "coverage": {
+            "operations": {"base": len(known), "called": len(called)},
+            "untyped_called_operations": {"count": len(untyped), "operations": untyped},
+            "not_checked": NOT_CHECKED,
+        },
+        "findings": findings,
+        "unused_changes": unused,
+        "clients": summaries,
         "backend": {
             "base": base_info,
             "head": head_info,
@@ -629,9 +697,6 @@ def check(
             "added_operations": len(diff["added_operations"]),
             "commits": commits,
         },
-        "clients": summaries,
-        "findings": findings,
-        "unused_changes": unused,
         "agent_brief": AGENT_BRIEF,
     }
 
