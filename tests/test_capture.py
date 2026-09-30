@@ -396,7 +396,6 @@ def test_action_result_capture_hint(tmp_path: Path) -> None:
     device = FakeDevice(
         hierarchy_xml=xml,
         screenshot_bytes=red,
-        screenshots=[red, blue, blue, blue],
         width=50,
         height=50,
         text_index={"Go": (10, 10, 40, 40)},
@@ -410,6 +409,10 @@ def test_action_result_capture_hint(tmp_path: Path) -> None:
     engine.capture_start()
     with engine._acting("tap:Go"):
         device.click(25, 25)
+        # The tap changes the screen, and only the tap. A frame stream advanced on every
+        # sample instead, so a slow runner could see the change before the action was marked
+        # and every frame after it deduped: no kept frame, no hint, however long it waited.
+        device._png = blue
     deadline = time.time() + 2.0
     while time.time() < deadline and not engine._capture.hint_ready():  # type: ignore[union-attr]
         time.sleep(0.05)
