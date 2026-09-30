@@ -36,6 +36,11 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Fixed
 
+- On the web, a button is one clickable element, not one per icon and label inside it. CSS
+  passes `cursor: pointer` down to every child, so a button's `<span>`, `<svg>` and `<path>` were
+  each listed as clickable at the same point with no text to choose between them; on one mobile
+  page half the clickable elements were such repeats. Only the element the pointer cursor starts
+  on is clickable now, and a child with text of its own is still listed, as text.
 - Jev reads the brief only up to the first step that names a tool Jev cannot issue, such as
   `app_force_stop`, until the run has called that tool. Reading the whole brief, Jev did a
   cold-start row's post-restart taps before the restart, and the row could not be judged.

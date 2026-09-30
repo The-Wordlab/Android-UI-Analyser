@@ -227,8 +227,13 @@ _DOM_SNAPSHOT_SCRIPT = r"""
     const overflowX = style.overflowX;
     const scrollable = ((overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight) ||
       ((overflowX === 'auto' || overflowX === 'scroll') && element.scrollWidth > element.clientWidth);
+    // `cursor` is inherited: only the element the pointer starts on is the control, not the
+    // icon and label inside it that show the same cursor.
+    const parent = parentOf(element);
+    const ownPointer = style.cursor === 'pointer' &&
+      !(parent && getComputedStyle(parent).cursor === 'pointer');
     const clickable = interactiveTags.has(element.tagName) || interactiveRoles.has(role) ||
-      typeof element.onclick === 'function' || element.tabIndex >= 0 || style.cursor === 'pointer';
+      typeof element.onclick === 'function' || element.tabIndex >= 0 || ownPointer;
     if (!clickable && !scrollable && !text && !accessibleName && !describedBy && !resourceId) continue;
     const checkable = inputType === 'checkbox' || inputType === 'radio' || role === 'checkbox' ||
       role === 'radio' || role === 'switch';
