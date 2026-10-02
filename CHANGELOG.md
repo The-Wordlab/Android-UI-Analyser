@@ -11,6 +11,15 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- `aua back-gesture-and-analyze` (MCP `back_gesture_and_analyze`) refuses with
+  `gesture_navigation_off` on an Android target using button navigation (`secure
+  navigation_mode` 0 or 1). There the left-edge swipe is an ordinary drag the app receives, not
+  the system back gesture, and it used to be reported ok, so a run comparing Back with the
+  gesture saw two different outcomes from a working app. Use `key back` there; an unknown mode
+  still swipes.
+
 ## [0.32.0] - 2026-09-30
 
 ### Added

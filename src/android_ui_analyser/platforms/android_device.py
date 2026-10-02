@@ -48,6 +48,8 @@ _ACTIVITY_DUMP_SENTINEL = "ACTIVITY MANAGER ACTIVITIES"
 _RECONNECT_WARN_WINDOW_S = 30.0
 _last_reconnect_warn: dict[str, float] = {}
 _SHELL_OUTPUT_LIMIT_BYTES = 256 * 1024
+# `settings get secure navigation_mode` under gesture navigation, the only mode with a back gesture.
+NAVIGATION_MODE_GESTURE = 2
 
 # Ordered by authority: the user-set locale, the settings fallback older/OEM builds
 # populate instead, then the build default.
@@ -524,6 +526,12 @@ class AndroidRuntimeBase(TargetRuntime, ABC):
         Starting one percent inside the edge remains inside the system gesture region while
         avoiding transports that reject coordinate zero; the endpoint crosses far enough for
         Android to commit the back gesture on phone and tablet aspect ratios.
+
+        Only gesture navigation has a system back gesture. Under button navigation the same swipe
+        reaches the app as an ordinary drag: a side drawer opens, or nothing happens. It used to be
+        performed anyway and reported ok, so a run comparing the Back button with the gesture saw
+        two different outcomes and two judges failed a working app, on two clean runs. Refuse it
+        instead; an unknown mode (the setting is unset, or there is no shell) still swipes.
         """
 
         width, height = self.window_size()
@@ -532,10 +540,32 @@ class AndroidRuntimeBase(TargetRuntime, ABC):
                 f"invalid Android display size for a back gesture: {width}x{height}",
                 code="invalid_screen_geometry",
             )
+        mode = self.navigation_mode()
+        if mode is not None and mode != NAVIGATION_MODE_GESTURE:
+            raise DeviceError(
+                f"this device uses button navigation (navigation_mode={mode}), where a left-edge "
+                "swipe is an ordinary drag the app receives, not Android's back gesture",
+                code="gesture_navigation_off",
+                hint=(
+                    "Use `key back` for the system Back. Comparing Back with the gesture needs a "
+                    "target booted with gesture navigation."
+                ),
+            )
         start_x = max(1, min(width - 2, width // 100))
         end_x = max(start_x + 1, min(width - 1, width * 2 // 5))
         y = max(1, min(height - 2, height // 2))
         self.swipe(start_x, y, end_x, y, 300)
+
+    def navigation_mode(self) -> int | None:
+        """Android's `secure navigation_mode`: 0 three-button, 1 two-button, 2 gesture.
+
+        None when the device cannot say: no shell, or a build that never wrote the setting.
+        """
+        try:
+            raw = self.shell("settings get secure navigation_mode").strip()
+        except DeviceError:
+            return None
+        return int(raw) if raw.isdigit() else None
 
     # -- hierarchy selectors (T0/T1) --------------------------------------
     # `rid` is the spelling of the resource-id everywhere else in the vocabulary — the

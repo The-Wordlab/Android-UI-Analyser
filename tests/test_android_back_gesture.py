@@ -50,9 +50,36 @@ def test_android_back_gesture_derives_coordinates_inside_the_adapter(tmp_path) -
     result = engine.back_gesture(observe=False)
 
     assert result.ok is True and result.action == "back-gesture"
-    assert device.calls == [("swipe", (10, 1200, 432, 1200, 300))]
+    assert [call for call in device.calls if call[0] == "swipe"] == [
+        ("swipe", (10, 1200, 432, 1200, 300))
+    ]
     assert AndroidPlatform(make_config()).supports("ui.back_gesture")
     AndroidPlatform(make_config()).validate_runtime(device)
+
+
+def test_android_back_gesture_refuses_button_navigation() -> None:
+    """Under three-button navigation the edge swipe is an app drag, not a system back."""
+    device = FakeDevice(width=720, height=1280)
+    device.shell("settings put secure navigation_mode 0")
+    device.calls.clear()
+
+    with pytest.raises(DeviceError) as caught:
+        device.back_gesture()
+
+    assert caught.value.code == "gesture_navigation_off"
+    assert "key back" in (caught.value.hint or "")
+    assert not [call for call in device.calls if call[0] == "swipe"]
+
+
+def test_android_back_gesture_swipes_under_gesture_navigation() -> None:
+    device = FakeDevice(width=720, height=1280)
+    device.shell("settings put secure navigation_mode 2")
+
+    device.back_gesture()
+
+    assert [call for call in device.calls if call[0] == "swipe"] == [
+        ("swipe", (7, 640, 288, 640, 300))
+    ]
 
 
 def test_android_back_gesture_refuses_invalid_screen_geometry() -> None:
