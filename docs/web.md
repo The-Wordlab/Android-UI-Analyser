@@ -101,6 +101,51 @@ the new agent's first observation. The previous agent's storage, network control
 buffer do not carry over. Attached modes reconnect their transport while preserving the user's
 existing app or browser profile.
 
+### Unpacked Chromium extensions
+
+To test a locally built Manifest V3 extension, add one or more unpacked directories to a
+task-specific isolated config:
+
+```yaml
+device:
+  platform: web
+platforms:
+  web:
+    url: https://example.test/app
+    extension_paths:
+      - /absolute/path/to/extension/dist
+    headless: true
+```
+
+Each directory must contain `manifest.json`. Relative paths resolve from AUA's working
+directory; absolute paths make daemon launches repeatable. Paths containing commas are refused.
+Run `playwright install chromium`: extensions use Playwright's bundled Chromium with its
+`chromium` channel, which supports extensions in headless mode. Installed Chrome/Edge, custom
+executables, Firefox/WebKit, `existing-chrome`/`existing-cdp`, and `service_workers: block` are refused.
+The launch mechanism follows [Playwright's extension support](https://playwright.dev/python/docs/chrome-extensions).
+
+Start with `aua --config /absolute/path/aua-extension.yaml --platform web session start --goal
+"Verify the fixture extension"`. Use ordinary stable-ID actions, assertions and capture evidence.
+`browser pages` also reports `service_workers` URLs for running extension workers. Copy the
+extension ID from `chrome-extension://<id>/worker.js` and use `open-and-analyze
+chrome-extension://<id>/popup.html` (with the actual popup path from the manifest) to inspect
+the popup as a page. This tests its document, not the browser toolbar button. An extension
+without a background worker has no worker row; its content scripts and any tabs it opens are
+still usable through the normal AUA surface.
+
+AUA asks the Playwright driver to create and own a unique temporary persistent profile. No
+profile-path option is accepted, and the user's browser profile is never opened. Closing the
+context, stopping the daemon, or disconnecting the client removes the owned profile. Normal
+actions retain the extension's login/storage for the warm daemon's lifetime.
+
+`session finish` restores the starting **web** storage/URL/controls in a fresh profile and
+reports `extension_state: discarded`; it does not snapshot `chrome.storage`. `browser reset`
+and `browser storage-clear --kind all` also discard extension state. To prevent surprising
+logout, storage import, cache clear, dynamic proxy changes, and HAR controls are refused in
+extension mode because they recreate the context. Configure startup `storage_state` or proxy
+before starting the session. Screenshots, traces, logs, offline/throttling, CORS, and request
+mocks remain available; service-worker requests can bypass page routing.
+
 ### Extension attachment
 
 Use the extension mode when a task needs a login or browser state that already exists in your
@@ -233,7 +278,7 @@ page state, cookies, session storage, and local storage. The context is isolated
 the daemon/runtime closes. If daemon mode is disabled, each standalone CLI invocation starts at the
 configured URL; use one `flow run` call for a multi-step journey.
 
-`storage_state` seeds a context from a Playwright JSON file. AUA reads it but does not write browser
+Without `extension_paths`, `storage_state` seeds a context from a Playwright JSON file. AUA reads it but does not write browser
 state back to disk, so ordinary web actions create no persistent device mutation and require no
 device teardown ledger entry. A goal session snapshots cookies, local/IndexedDB state,
 sessionStorage, the current URL, and AUA browser controls; `session finish` recreates the context

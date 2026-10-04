@@ -1087,6 +1087,14 @@ class Mutation:
 
 
 MUTATION_CATALOGUE: dict[str, Mutation] = {
+    "web_unpacked_extensions": Mutation(
+        "web_unpacked_extensions",
+        "platforms/web_tools.py:_replace_context",
+        None,
+        "Extensions live only in the Playwright driver's temporary persistent profile "
+        "(empty user_data_dir). Closing the context or disconnecting the client closes "
+        "its browser and removes that owned profile. No personal profile is accepted or changed.",
+    ),
     "http_proxy": Mutation(
         "http_proxy",
         "platforms/android_device.py:set_http_proxy",

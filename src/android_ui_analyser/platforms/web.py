@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -135,6 +137,7 @@ class WebPlatform(PlatformAdapter):
             "headless",
             "channel",
             "executable_path",
+            "extension_paths",
             "viewport_width",
             "viewport_height",
             "navigation_timeout_ms",
@@ -211,6 +214,38 @@ class WebPlatform(PlatformAdapter):
         if service_workers not in _SERVICE_WORKERS:
             raise ConfigError("web option service_workers must be 'allow' or 'block'")
         normalized["service_workers"] = service_workers
+        if "extension_paths" in options:
+            paths = options["extension_paths"]
+            if not isinstance(paths, list) or not paths:
+                raise ConfigError("web option extension_paths must be a non-empty list of directories")
+            extensions = []
+            for value in paths:
+                if not isinstance(value, str) or not value.strip():
+                    raise ConfigError("web extension_paths entries must be non-empty strings")
+                path = Path(value).expanduser().resolve()
+                if "," in str(path):
+                    raise ConfigError("web extension_paths cannot contain commas")
+                manifest_path = path / "manifest.json"
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    raise ConfigError(
+                        f"web extension must contain a readable manifest.json: {path}"
+                    ) from None
+                if not isinstance(manifest, dict) or manifest.get("manifest_version") != 3:
+                    raise ConfigError(f"web extension must use Manifest V3: {path}")
+                if str(path) not in extensions:
+                    extensions.append(str(path))
+            if connection != "isolated" or browser != "chromium":
+                raise ConfigError("web extension_paths requires isolated Chromium")
+            if normalized.get("channel") not in {None, "chromium"} or "executable_path" in normalized:
+                raise ConfigError(
+                    "web extension_paths requires Playwright's bundled Chromium",
+                    hint="Remove channel/executable_path and run `playwright install chromium`.",
+                )
+            if service_workers != "allow":
+                raise ConfigError("web extension_paths requires service_workers: allow")
+            normalized["extension_paths"] = extensions
         if "proxy_server" in normalized:
             parsed_proxy = urlsplit(normalized["proxy_server"])
             if (
@@ -236,6 +271,7 @@ class WebPlatform(PlatformAdapter):
                     "headless",
                     "channel",
                     "executable_path",
+                    "extension_paths",
                     "viewport_width",
                     "viewport_height",
                     "navigation_timeout_ms",
@@ -264,6 +300,8 @@ class WebPlatform(PlatformAdapter):
         values.pop("connection", None)
         values.pop("attach_timeout_ms", None)
         values.pop("context_slots", None)
+        if "extension_paths" in values:
+            values["extension_paths"] = tuple(values["extension_paths"])
         password_env = values.pop("proxy_password_env", None)
         if password_env is not None:
             password = os.environ.get(str(password_env))

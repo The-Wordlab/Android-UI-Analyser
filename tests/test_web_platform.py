@@ -297,10 +297,19 @@ def test_web_options_are_closed_typed_and_safe(tmp_path: Path) -> None:
         platform.validate_options({"browser": "firefox", "channel": "firefox"})
 
 
-def test_web_engine_reuses_the_shared_analysis_and_action_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize("with_extension", [False, True])
+def test_web_engine_reuses_the_shared_analysis_and_action_path(
+    tmp_path: Path, with_extension: bool
+) -> None:
     connection = FakeConnection()
-    platform = _adapter(tmp_path, connection, headless=True)
-    engine = Engine(_config(tmp_path, headless=True), platform=platform)
+    options = {"headless": True}
+    if with_extension:
+        extension = tmp_path / "extension"
+        extension.mkdir()
+        (extension / "manifest.json").write_text(json.dumps({"manifest_version": 3}))
+        options["extension_paths"] = [str(extension)]
+    platform = _adapter(tmp_path, connection, **options)
+    engine = Engine(_config(tmp_path, **options), platform=platform)
 
     result = engine.analyze(source="hierarchy", with_ocr=False)
     assert result.screen.package == "example.test"

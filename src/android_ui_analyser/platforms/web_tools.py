@@ -29,6 +29,7 @@ class WebLaunchOptions:
     headless: bool = True
     channel: str | None = None
     executable_path: str | None = None
+    extension_paths: tuple[str, ...] = ()
     viewport_width: int = 1280
     viewport_height: int = 800
     navigation_timeout_ms: int = 30_000
@@ -449,6 +450,17 @@ class PlaywrightConnection:
             raise ConfigError(f"web storage_state does not exist: {state}")
         return str(state)
 
+    def _require_ephemeral_context(self, operation: str) -> None:
+        if self._options.extension_paths:
+            raise ConfigError(
+                f"{operation} is unavailable with web extension_paths",
+                hint=(
+                    "This operation recreates the context and cannot preserve chrome.storage. "
+                    "Use browser reset to explicitly discard extension state, or configure "
+                    "startup storage/proxy before starting the extension session."
+                ),
+            )
+
     def _context_kwargs(self, storage_state: Any = None) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "viewport": {
@@ -515,10 +527,29 @@ class PlaywrightConnection:
         if old is not None:
             old.close()
         self._page_ids.clear()
-        self._context = self._browser.new_context(**self._context_kwargs(storage_state))
+        self._context = None
+        self._page = None
+        if self._options.extension_paths:
+            # Empty user_data_dir asks the Playwright driver to own a unique temporary
+            # profile and remove it when this browser closes (also on client disconnect).
+            # Never accept a caller profile or fall back to the user's installed Chrome.
+            paths = ",".join(self._options.extension_paths)
+            self._context = self._browser_type.launch_persistent_context(
+                "",
+                channel="chromium",
+                headless=self._options.headless,
+                args=[f"--disable-extensions-except={paths}", f"--load-extension={paths}"],
+                **self._context_kwargs(),
+            )
+            if storage_state is not None:
+                self._context.set_storage_state(storage_state)
+        else:
+            self._context = self._browser.new_context(**self._context_kwargs(storage_state))
         self._context.set_default_timeout(self._options.action_timeout_ms)
         self._context.set_default_navigation_timeout(self._options.navigation_timeout_ms)
         self._context.on("page", self._on_page)
+        for existing_page in self._context.pages:
+            self._on_page(existing_page)
         if self._har_replay:
             self._context.route_from_har(
                 str(self._har_replay["path"]),
@@ -527,7 +558,7 @@ class PlaywrightConnection:
             )
         self._context.route("**/*", self._route_handler)
         self._context.set_offline(self._offline)
-        page = self._context.new_page()
+        page = self._context.pages[0] if self._context.pages else self._context.new_page()
         self._page = page
         destination = target_url or self._home_url
         if destination:
@@ -969,6 +1000,7 @@ class PlaywrightConnection:
         return self._call(export)
 
     def storage_import(self, path: str) -> dict[str, Any]:
+        self._require_ephemeral_context("browser storage-import")
         def restore() -> dict[str, Any]:
             source = Path(path).expanduser().resolve()
             if not source.is_file():
@@ -1039,6 +1071,7 @@ class PlaywrightConnection:
         return self._call(clear)
 
     def cache_clear(self) -> dict[str, Any]:
+        self._require_ephemeral_context("browser cache-clear")
         def clear() -> dict[str, Any]:
             state = self._storage_state()
             session = self._session_storage()
@@ -1198,6 +1231,7 @@ class PlaywrightConnection:
         username: str | None,
         password: str | None,
     ) -> dict[str, Any]:
+        self._require_ephemeral_context("browser proxy-set")
         def apply() -> dict[str, Any]:
             state = self._storage_state()
             session = self._session_storage()
@@ -1219,6 +1253,7 @@ class PlaywrightConnection:
         return self._call(apply)
 
     def clear_proxy(self) -> dict[str, Any]:
+        self._require_ephemeral_context("browser proxy-clear")
         def clear() -> dict[str, Any]:
             state = self._storage_state()
             session = self._session_storage()
@@ -1230,6 +1265,7 @@ class PlaywrightConnection:
         return self._call(clear)
 
     def har_start(self, path: str) -> dict[str, Any]:
+        self._require_ephemeral_context("browser har-start")
         def start() -> dict[str, Any]:
             if self._har_record_path:
                 raise ConfigError(f"HAR recording is already active: {self._har_record_path}")
@@ -1247,6 +1283,7 @@ class PlaywrightConnection:
         return self._call(start)
 
     def har_stop(self) -> dict[str, Any]:
+        self._require_ephemeral_context("browser har-stop")
         def stop() -> dict[str, Any]:
             if not self._har_record_path:
                 raise ConfigError("HAR recording is not active")
@@ -1265,6 +1302,7 @@ class PlaywrightConnection:
         return self._call(stop)
 
     def har_replay(self, path: str, *, url: str | None, not_found: str) -> dict[str, Any]:
+        self._require_ephemeral_context("browser har-replay")
         def replay() -> dict[str, Any]:
             source = Path(path).expanduser().resolve()
             if not source.is_file():
@@ -1281,6 +1319,7 @@ class PlaywrightConnection:
         return self._call(replay)
 
     def har_clear(self) -> dict[str, Any]:
+        self._require_ephemeral_context("browser har-clear")
         def clear() -> dict[str, Any]:
             state = self._storage_state()
             session = self._session_storage()
@@ -1412,7 +1451,13 @@ class PlaywrightConnection:
                         "frames": frames,
                     }
                 )
-            return {"ok": True, "action": "browser-pages", "pages": rows}
+            result: dict[str, Any] = {"ok": True, "action": "browser-pages", "pages": rows}
+            if self._options.extension_paths:
+                result["service_workers"] = [
+                    {"url": self._safe_url(str(worker.url))}
+                    for worker in self._context.service_workers
+                ]
+            return result
 
         return self._call(list_pages)
 
@@ -1530,12 +1575,15 @@ class PlaywrightConnection:
                 session_storage=baseline["session_storage"],
                 target_url=baseline["url"],
             )
-            return {
+            result: dict[str, Any] = {
                 "ok": True,
                 "action": "browser-session-restore",
                 "session_id": session_id,
                 "restored": True,
             }
+            if self._options.extension_paths:
+                result["extension_state"] = "discarded"
+            return result
 
         return self._call(finish)
 
@@ -1551,12 +1599,14 @@ class PlaywrightConnection:
                     self._context.close()
             finally:
                 try:
-                    self._browser.close()
+                    if self._browser is not None:
+                        self._browser.close()
                 finally:
                     self._playwright.stop()
 
         try:
-            self._call(shutdown)
+            # Cleanup must not create a replacement page or depend on a live one.
+            self._executor.submit(shutdown).result()
         finally:
             self._closed = True
             self._executor.shutdown(wait=True, cancel_futures=True)
@@ -1564,6 +1614,13 @@ class PlaywrightConnection:
 
 class PlaywrightLauncher:
     def launch(self, url: str, options: WebLaunchOptions) -> WebConnection:
+        if options.extension_paths and (
+            options.browser != "chromium"
+            or options.channel not in {None, "chromium"}
+            or options.executable_path
+            or options.service_workers != "allow"
+        ):
+            raise ConfigError("unpacked extensions require bundled Chromium and service_workers: allow")
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
@@ -1591,6 +1648,8 @@ class PlaywrightLauncher:
                         f"unknown web browser {options.browser!r}",
                         hint="Choose chromium, firefox, or webkit.",
                     )
+                if options.extension_paths:
+                    return playwright, browser_type, None
                 launch_kwargs: dict[str, Any] = {"headless": options.headless}
                 if options.channel:
                     launch_kwargs["channel"] = options.channel

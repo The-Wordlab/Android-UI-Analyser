@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- Isolated web sessions can load unpacked Manifest V3 extensions with
+  `platforms.web.extension_paths`. AUA uses bundled Chromium and a driver-owned temporary
+  profile, reports service-worker URLs in `browser pages`, and discards extension state on
+  session finish/reset. Context-recreating lab controls refuse to silently erase extension login.
+
 ### Fixed
 
 - `aua back-gesture-and-analyze` (MCP `back_gesture_and_analyze`) refuses with
