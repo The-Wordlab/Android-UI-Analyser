@@ -9336,8 +9336,8 @@ def knowledge_stale(
 api_app = typer.Typer(
     name="api",
     help=(
-        "Which client versions call which backend endpoint, and what a backend change "
-        "touches. Reads git history; needs no device."
+        "Test a backend the way its client apps call it, and see which client versions a "
+        "backend change touches. Needs no device."
     ),
     no_args_is_help=True,
 )
@@ -9418,6 +9418,62 @@ def api_usage_cmd(
         typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
     _run(ctx, go)
+
+
+@api_app.command("run")
+def api_run_cmd(
+    ctx: typer.Context,
+    cartridge: str = typer.Argument(..., help="Cartridge YAML; start one with `aua api sample`."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Backend to send it to (default: the cartridge's base_url)."
+    ),
+    input_: list[str] = typer.Option(
+        [], "--input", help="NAME=value, replacing an input's default; repeatable."
+    ),
+    save_expect: bool = typer.Option(
+        False, "--save-expect", help="Record each response's shape in the file as the baseline."
+    ),
+    timeout: float = typer.Option(120.0, "--timeout", help="Seconds each step may take."),
+    max_chars: int = typer.Option(
+        2000,
+        "--max-chars",
+        help="Shorten each response preview to this many characters; 0 keeps all.",
+    ),
+) -> None:
+    """Send a backend the calls a client app makes, with no device. Exit 8 on a failure or break."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .api_cartridge import run
+
+        inputs: dict[str, str] = {}
+        for item in input_:
+            name, sep, value = item.partition("=")
+            if not sep or not name:
+                raise UsageError(f"--input needs NAME=value, got {item!r}")
+            inputs[name] = value
+        result = run(
+            cartridge,
+            base_url=base_url,
+            inputs=inputs,
+            timeout_s=timeout,
+            max_chars=max_chars,
+            save_expect=save_expect,
+        )
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        if not result["ok"]:
+            raise typer.Exit(int(ExitCode.ASSERTION))
+
+    _run(ctx, go)
+
+
+@api_app.command("sample")
+def api_sample_cmd() -> None:
+    """Print an annotated example cartridge to start from."""
+    from .api_cartridge import sample_text
+
+    typer.echo(sample_text(), nl=False)
 
 
 prepare_app = typer.Typer(

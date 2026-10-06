@@ -11,6 +11,18 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `aua api run CARTRIDGE` sends a backend the requests a client app makes, with no device. A
+  cartridge is a short YAML file an agent writes from the app's networking code: the steps in
+  order, values one response hands to the next request (`save: {token: body.access_token}`,
+  then `{{token}}`), inputs a caller can change with `--input`, fresh per-run ids, and secrets
+  read from the environment and never stored. Server-sent event streams are read to the end.
+  `--save-expect` records each response's shape at the end of the file; a later run against a
+  changed backend reports a missing or retyped field as a break and exits 8. The file holds no
+  secrets or recorded values, so a backend developer can run the app's flow without the app.
+  `aua api sample` prints an annotated example to start from.
+
 ## [0.33.0] - 2026-10-04
 
 ### Added

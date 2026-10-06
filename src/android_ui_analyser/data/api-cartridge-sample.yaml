@@ -1,0 +1,88 @@
+# AUA API cartridge: the requests a client app sends to its backend, replayed with no device.
+#
+# This sample is a fictional notes app. To write one for your app, read its networking code:
+#   - the API declarations (Retrofit interfaces, URLSession/Alamofire endpoints, fetch calls)
+#   - the interceptor or client setup that adds the shared headers
+#   - how a fresh install gets its first token (anonymous, guest or test-user sign-in)
+# and copy those calls here in the order a user's flow makes them. `aua proxy flow <n>` shows
+# the exact request when the app runs on a device.
+#
+#   aua api run FILE --base-url http://localhost:8000     # send it to any backend
+#   aua api run FILE --input question="Is it raining?"    # same flow, different input
+#   aua api run FILE --save-expect                        # record the response shapes once
+#
+# Templates:
+#   {{env.NAME}}    read from the environment, never stored in this file
+#   {{input.NAME}}  a default under `inputs`, or `--input NAME=value`
+#   {{fresh.NAME}}  a new UUID each run, the same everywhere within that run
+#   {{NAME}}        a value an earlier step saved
+cartridge: 1
+name: example-notes-ask
+about: Start an anonymous session, save a note, read it back, then ask the assistant about it.
+base_url: https://api.example.com
+env: [EXAMPLE_CLIENT_KEY]
+inputs:
+  note: Buy oat milk and coffee
+  question: What do I need to buy?
+headers:                                   # sent with every step
+  X-Client-Key: "{{env.EXAMPLE_CLIENT_KEY}}"
+  X-Install-Id: "{{fresh.install}}"        # a new install, so a new user, every run
+  X-App-Version: 3.2.0
+steps:
+  - id: session
+    method: POST
+    path: /v1/sessions/anonymous
+    json: {platform: android}
+    save:
+      token: body.access_token             # body.<field>, header.<Name> or events.<event>.<field>
+  - id: create_note
+    method: POST
+    path: /v1/notes
+    headers: {Authorization: "Bearer {{token}}"}
+    json: {text: "{{input.note}}", pinned: false}
+    status: 201                            # leave out to accept any 2xx
+    save:
+      note_id: body.id
+  - id: read_note
+    method: GET
+    path: /v1/notes/{{note_id}}
+    headers: {Authorization: "Bearer {{token}}"}
+  - id: ask
+    method: POST
+    path: /v1/assistant/replies            # answers as a server-sent event stream
+    headers: {Authorization: "Bearer {{token}}", Accept: text/event-stream}
+    json: {note_id: "{{note_id}}", message: "{{input.question}}"}
+    save:
+      reply_id: events.done.reply_id
+
+# Written by `aua api run --save-expect`: each step's response shape. Delete a line to stop
+# checking that field; keep `expect:` the last key in this file.
+expect:
+  session:
+    body:
+      access_token: string
+      expires_in: number
+      user:
+        id: string
+        anonymous: boolean
+  create_note:
+    body:
+      id: string
+      text: string
+      pinned: boolean
+      created_at: string
+  read_note:
+    body:
+      id: string
+      text: string
+      pinned: boolean
+      created_at: string
+      tags:
+      - string
+  ask:
+    events:
+      delta:
+        text: string
+      done:
+        reply_id: string
+        tokens: number
