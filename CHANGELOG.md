@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-06
+
 ### Added
 
 - `aua api run CARTRIDGE` sends a backend the requests a client app makes, with no device. A
@@ -1734,5 +1736,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.32.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.32.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.33.0...HEAD
 [0.33.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.33.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.34.0...HEAD
+[0.34.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.34.0
