@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-07
+
 ### Added
 
 - `aua update --install` installs the latest release over the running `aua`, and
@@ -1748,5 +1750,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.33.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.33.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.34.0...HEAD
 [0.34.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.34.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.35.0
