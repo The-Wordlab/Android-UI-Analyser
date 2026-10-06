@@ -85,7 +85,13 @@ watch the verify-build-notes path succeed before anything is public.
 ```bash
 aua update --check          # human-readable: current version, latest release, how to upgrade
 aua update --check --json   # for automation
+aua update --install        # install the latest release over a `uv tool` install
+aua update --install --version 0.14.0   # or a chosen release
 ```
+
+`--install` only changes a `uv tool` install of a release, reinstalling it at the tag with the
+extras and `--with` packages its receipt recorded. For a clone, `uvx`, a plugin or anything else
+it prints the command to run and exits `10`.
 
 Exit codes, so a CI step can branch without parsing: `0` already on the latest release, `10` a newer
 release exists, `1` the check could not run (offline, rate-limited, no network). `10` is deliberately

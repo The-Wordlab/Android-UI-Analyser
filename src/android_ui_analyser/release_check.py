@@ -119,7 +119,8 @@ def format_status(status: UpdateStatus, *, repo_dir: str | None = None) -> str:
     lines += [
         "",
         "Upgrade:",
-        f"  cd {clone} && git fetch --tags && git checkout {tag} && ./install.sh",
+        "  aua update --install",
+        f"  (from a clone: cd {clone} && git fetch --tags && git checkout {tag} && ./install.sh)",
     ]
     return "\n".join(lines)
 

@@ -169,9 +169,10 @@ codex plugin marketplace upgrade the-wordlab
 codex plugin add android-ui-analyser@the-wordlab
 ```
 
-Permanent CLI installs can check the latest release with `aua update --check`; clone-based installs
-upgrade by checking out the newer tag and re-running `./install.sh`. See
-[Releases and updating](#releases-and-updating) for the automation exit-code contract.
+Permanent CLI installs can check the latest release with `aua update --check` and install it with
+`aua update --install`; clone-based installs upgrade by checking out the newer tag and re-running
+`./install.sh`. See [Releases and updating](#releases-and-updating) for the automation exit-code
+contract.
 
 ### Common setup problems
 
@@ -312,6 +313,21 @@ else
   esac
 fi
 ```
+
+Install the latest release, or a chosen one, over the running `aua`:
+
+```bash
+aua update --install                    # the latest release
+aua update --install --version 0.33.0   # a specific release, newer or older
+```
+
+A `uv tool` install of a release is reinstalled at that tag with the extras and `--with` packages
+its uv receipt recorded, and the user-level skill files that already exist are rewritten by the
+new version. A clone, a `uvx` run, the plugins and any other environment are never changed: the
+result names the exact command for that install instead (`git checkout <tag> && ./install.sh`,
+`uvx --from …@<tag>`, `/plugin update …`). The exit code is `0` when the target is installed or
+already current, `10` when the printed commands still have to run, `1` when the install failed
+and `2` for a version that is not a published release.
 
 Without AUA installed, the equivalent release lookup is one API call:
 

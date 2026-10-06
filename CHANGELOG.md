@@ -11,6 +11,16 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `aua update --install` installs the latest release over the running `aua`, and
+  `--install --version 0.33.0` installs a chosen one. A `uv tool` install of a release is
+  reinstalled at that tag with the extras and `--with` packages its uv receipt recorded, and the
+  user-level skill files that already exist are rewritten by the new version. A git clone, a
+  `uvx` run, the plugins and any other environment are left alone: the result names the exact
+  command for that install. Exit `0` means the target is installed or already current, `10` that
+  the printed commands still have to run, `2` that the version is not a published release.
+
 ## [0.34.0] - 2026-10-06
 
 ### Added

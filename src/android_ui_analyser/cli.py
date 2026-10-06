@@ -2497,19 +2497,50 @@ def update_cmd(
     ),
     as_json: bool = typer.Option(False, "--json", help="Print one machine-readable JSON object."),
     force: bool = typer.Option(False, "--force", help="Bypass the one-hour release cache."),
+    install: bool = typer.Option(
+        False,
+        "--install",
+        help="Install the latest release (or --version) over this aua when it is a uv tool "
+        "install; otherwise print the exact command for this install.",
+    ),
+    version: str | None = typer.Option(
+        None, "--version", help="With --install: the release to install, e.g. 0.33.0."
+    ),
 ) -> None:
-    """Check for a newer AUA release without pulling main or touching a device.
+    """Check for a newer AUA release, or install one, without pulling main or touching a device.
 
     Exit 0 means this version is current, 10 means an update is available, and 1 means the
     check could not run. The distinct update exit lets an automation branch without parsing text.
+    With --install, 0 means the target is now installed, 10 that the printed commands must be run.
     """
     import json
 
     from .release_check import check_for_update, format_status
 
-    # `--check` names the safe operation for scripts; with no future mutating mode to select,
-    # the same check is also the command's default.
+    # `--check` names the safe operation for scripts, and stays the default: installing only
+    # ever happens when --install asks for it.
     _ = check
+    if version and not install:
+        emit_error(UsageError("--version selects what --install installs; add --install"))
+        raise typer.Exit(int(ExitCode.USAGE))
+    if install:
+        from .release_install import format_result
+        from .release_install import install as install_release
+
+        try:
+            result = install_release(version)
+        except AuaError as err:
+            emit_error(err)
+            raise typer.Exit(int(err.exit_code)) from err
+        if as_json:
+            typer.echo(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        else:
+            typer.echo(format_result(result))
+        if not result.get("ok"):
+            raise typer.Exit(int(ExitCode.INTERNAL))
+        if result.get("action") == "manual":
+            raise typer.Exit(10)
+        return
     status = check_for_update(force=force)
 
     repo = Path(__file__).resolve().parents[2]
