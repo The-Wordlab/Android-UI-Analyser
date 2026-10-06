@@ -1465,6 +1465,52 @@ batch rather than one file at a time.
 
 ---
 
+## Test a backend the way the app calls it (`aua api run`)
+
+No device. A **cartridge** is a short YAML file holding the requests a client app sends for one
+user flow: a new install's first sign-in, then the feature's calls, with values such as a token or
+an id passed from one response to the next request. An agent writes it from the app's networking
+code (`aua api sample` prints an annotated example for a fictional app), and anyone working on the
+backend can run it without the app:
+
+```bash
+aua api sample > notes-ask.yaml    # start here, then copy the app's real calls
+# Secrets come from the environment, e.g. `aua config exec --env-file .env -- aua api run …`
+aua api run notes-ask.yaml --base-url http://localhost:8000 --save-expect  # once, on a backend that works
+aua api run notes-ask.yaml --base-url http://localhost:8000                # after every change
+aua api run notes-ask.yaml --input question="Is it raining?"               # same flow, other input
+```
+
+```yaml
+cartridge: 1
+base_url: https://api.example.com
+env: [EXAMPLE_CLIENT_KEY]                # read from the environment, never stored in the file
+inputs: {question: What do I need to buy?}
+headers:
+  X-Client-Key: "{{env.EXAMPLE_CLIENT_KEY}}"
+  X-Install-Id: "{{fresh.install}}"      # a new UUID per run: every run is a new install
+steps:
+  - id: session
+    method: POST
+    path: /v1/sessions/anonymous
+    save: {token: body.access_token}     # body.<field>, header.<Name>, events.<event>.<field>
+  - id: ask
+    method: POST
+    path: /v1/assistant/replies          # a server-sent event stream is read to the end
+    headers: {Authorization: "Bearer {{token}}"}
+    json: {message: "{{input.question}}"}
+```
+
+Each step must answer with its `status` (any 2xx by default) and yield every value it `save`s;
+otherwise the run stops there. `--save-expect` writes each response's shape (field names and
+types, never values) to an `expect:` block at the end of the file. A later run reports a field
+that went missing or changed type as a `break` and exits 8; a field that is now null is a
+`warn`, and new fields are fine. Each step reports its status, time (first byte for a stream)
+and a shortened response with token-like fields hidden. The file holds no secrets and no
+recorded values, so it can be handed to whoever changes the backend.
+
+---
+
 ## Dashboard (sneak-peek headless runs)
 
 Agents often drive a **headless** emulator with no window. The dashboard is a detached service on
@@ -1974,6 +2020,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua flags set\|apply` | Feature-flag writes with verify/restart |
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
 | `aua api check\|usage` | Backend OpenAPI changes vs. the client versions that call them (no device) |
+| `aua api run\|sample` | Send a backend the calls a client app makes, from a cartridge file (no device) |
 | `aua capture …` | Session capture / export / explain |
 | `aua helper status\|enable\|remove` | Optional on-device helper APK — runs a long flow on the device (rootable targets, off by default) |
 | `aua session start --goal GOAL --contract FILE --apk APP --helper` | One-call DeepSeek helper session: prepare, run ordered checks, apply proof, clean up, return pass/fail; never falls back |

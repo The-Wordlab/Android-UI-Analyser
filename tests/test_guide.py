@@ -321,7 +321,7 @@ def test_skill_frontmatter_has_name_and_trigger_description() -> None:
     description = meta["description"].lower()
     for trigger in ("android", "ios simulator", "websites", "web apps", "electron", "mcp"):
         assert trigger in description
-    assert "not for general web research or backend-only tests" in description
+    assert "not for general web research or backend tests except `aua api run`" in description
     assert "explicitly requested tool" in description
 
 

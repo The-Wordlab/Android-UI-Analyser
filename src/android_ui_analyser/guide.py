@@ -27,7 +27,8 @@ SKILL_DESCRIPTION = (
     "Test, inspect and automate Android apps, iOS simulator apps, websites, web apps and "
     "Chromium/Electron UIs with AUA MCP or CLI. Use for UI debugging, screenshots, verifying "
     "new features/fixes and browser console/network diagnostics. "
-    "Not for general web research or backend-only tests. Respect an explicitly requested tool."
+    "Not for general web research or backend tests except `aua api run`. "
+    "Respect an explicitly requested tool."
 )
 
 DEFAULT_SKILL_PATH = Path(".claude/skills/android-ui-analyser/SKILL.md")
@@ -619,6 +620,19 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "the hierarchy as U+FFFD, so no `text:` term alone can confirm it arrived. Both take a "
         "baseline when the wait starts, so the previous turn's response can never satisfy this "
         "one. Still not network idle: this app never is.",
+    ),
+    (
+        "Test a backend the way the app calls it, with no device",
+        "`aua api run CARTRIDGE` sends a backend the requests a client app makes, in order, "
+        "passing values such as a token or an id from one response to the next request. Write "
+        "the cartridge from the app's networking code: its API declarations, the interceptor "
+        "that adds shared headers, and how a new install gets its first token. Start from "
+        "`aua api sample`; `aua proxy flow <n>` shows an exact request while the app runs on a "
+        "device. Secrets stay in the environment as `{{env.NAME}}` (`aua config exec "
+        "--env-file`), and `--input NAME=value` repeats the flow with other input. Run it once "
+        "with `--save-expect` against a backend that works; a later run exits 8 when a field "
+        "went missing or changed type. The file holds no secrets or recorded values, so it can "
+        "go to whoever changes the backend.",
     ),
     (
         "Use verified network isolation, not airplane mode",
