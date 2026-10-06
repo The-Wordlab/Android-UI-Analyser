@@ -27,9 +27,17 @@ from typing import Any
 from . import __version__
 from .atomic import atomic_write_text
 
-__all__ = ["LATEST_RELEASE_URL", "UpdateStatus", "check_for_update", "format_status"]
+__all__ = [
+    "LATEST_RELEASE_URL",
+    "UpdateStatus",
+    "check_for_update",
+    "format_status",
+    "release_exists",
+    "version_key",
+]
 
 LATEST_RELEASE_URL = "https://api.github.com/repos/The-Wordlab/Android-UI-Analyser/releases/latest"
+RELEASE_BY_TAG_URL = "https://api.github.com/repos/The-Wordlab/Android-UI-Analyser/releases/tags/"
 
 # Release notes are meant to be read by a human at a terminal, not archived. The cap keeps a
 # pathological body out of the cache file and out of an automation's log.
@@ -116,10 +124,21 @@ def format_status(status: UpdateStatus, *, repo_dir: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def release_exists(tag: str, *, timeout: float = 5.0) -> bool | str:
+    """True when ``tag`` is a published release, False when GitHub has none, else the error."""
+    try:
+        _get_json(RELEASE_BY_TAG_URL + tag, timeout)
+    except urllib.error.HTTPError as exc:
+        return False if exc.code == 404 else _http_message(exc)
+    except (OSError, ValueError) as exc:
+        return f"could not reach GitHub: {exc}"
+    return True
+
+
 # --- version comparison -------------------------------------------------------------------
 
 
-def _version_key(
+def version_key(
     text: str,
 ) -> tuple[tuple[int, int, int], int, tuple[tuple[int, int | str], ...]] | None:
     """Return a comparison key for the SemVer form used by release tags.
@@ -147,6 +166,10 @@ def _version_key(
 
 
 def _fetch_latest(timeout: float) -> dict[str, Any]:
+    return _get_json(LATEST_RELEASE_URL, timeout)
+
+
+def _get_json(url: str, timeout: float) -> dict[str, Any]:
     headers = {
         "Accept": "application/vnd.github+json",
         # GitHub rejects requests without one.
@@ -158,7 +181,7 @@ def _fetch_latest(timeout: float) -> dict[str, Any]:
         # is never stored, echoed or returned — it only ever leaves as this header.
         headers["Authorization"] = f"Bearer {token}"
 
-    request = urllib.request.Request(LATEST_RELEASE_URL, headers=headers)
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         body = response.read()
     payload = json.loads(body.decode("utf-8", errors="replace"))
@@ -265,8 +288,8 @@ def _status(release: dict[str, Any], *, checked_at: str, from_cache: bool) -> Up
         )
 
     latest = tag.removeprefix("v").removeprefix("V")
-    installed_key = _version_key(__version__)
-    latest_key = _version_key(latest)
+    installed_key = version_key(__version__)
+    latest_key = version_key(latest)
     error = None
     if installed_key is None or latest_key is None:
         error = f"cannot compare version {__version__} with release {latest}"

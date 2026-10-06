@@ -151,8 +151,8 @@ def test_the_release_cache_avoids_repeat_calls_and_force_bypasses_it(
     ],
 )
 def test_versions_use_semver_precedence(left: str, right: str, is_less: bool) -> None:
-    left_key = release_check._version_key(left)
-    right_key = release_check._version_key(right)
+    left_key = release_check.version_key(left)
+    right_key = release_check.version_key(right)
     assert left_key is not None and right_key is not None
     assert (left_key < right_key) is is_less
 
