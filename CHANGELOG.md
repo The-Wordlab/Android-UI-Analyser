@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- `aua api map` and `aua api map new` expand a home-relative cache directory. The default
+  `~/.cache/…` was used as written, leaving a literal `~` folder in the directory the command ran
+  from.
+
 ## [0.36.0] - 2026-10-07
 
 ### Added

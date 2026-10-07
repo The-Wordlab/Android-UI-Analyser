@@ -209,6 +209,22 @@ def test_status_shows_what_each_version_still_lacks(config: Path) -> None:
     assert found["_"]["releases_not_mapped"] == []
 
 
+def test_a_home_relative_cache_dir_is_expanded_not_created_in_the_cwd(
+    config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default `cache.dir` is `~/.cache/…`; unexpanded, it left a literal `~` folder."""
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    new_version(config, "~/.cache/aua", "android", "1.0.0", fetch=False)
+    status(config, "~/.cache/aua", fetch=False)
+
+    assert not (work / "~").exists()
+    assert (tmp_path / "home" / ".cache" / "aua" / "api-usage").is_dir()
+
+
 def test_a_frozen_version_can_grow_but_reports_any_edit(config: Path) -> None:
     folder = Path(_new(config, "1.0.0")["path"])
     with pytest.raises(UsageError, match="no schema endpoints or no flows"):

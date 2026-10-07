@@ -195,7 +195,9 @@ def status(
             for _, meta in metas
             if meta.get("version") and meta.get("commit")
         ]
-        scan = scan_client(client, Path(cache_dir) / "api-usage", fetch=fetch, extra_refs=extra)
+        scan = scan_client(
+            client, Path(cache_dir).expanduser() / "api-usage", fetch=fetch, extra_refs=extra
+        )
         base = _base(client)
         versions = []
         for folder, meta in metas:
@@ -282,7 +284,9 @@ def new_version(
     if source is not None:
         old = _read_yaml(source / _VERSION_FILE)
         refs.append({"label": str(from_version), "ref": old.get("tag"), "sha": old.get("commit")})
-    scan = scan_client(client, Path(cache_dir) / "api-usage", fetch=False, extra_refs=refs)
+    scan = scan_client(
+        client, Path(cache_dir).expanduser() / "api-usage", fetch=False, extra_refs=refs
+    )
     base = _base(client)
     calls = _calls(scan, version, base)
 
