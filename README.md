@@ -1525,6 +1525,53 @@ that went missing or changed type as a `break` and exits 8; a field that is now 
 and a shortened response with token-like fields hidden. The file holds no secrets and no
 recorded values, so it can be handed to whoever changes the backend.
 
+A stream step also reports `event_ms`: when each kind of event first arrived, so the time to the
+first reply text (a `delta` event, say) is visible apart from the stream merely starting.
+
+### Versioned maps: simulate a specific app version
+
+To answer "does version 3.1 of the app still work with my backend change?" without an emulator,
+keep a map next to the `aua-api.yaml` config (`map: aua-map` by default): one folder per client
+version, each holding a `schema.yaml` (what that version needs back from every endpoint it calls)
+and the `flows/` it runs. AUA runs no model here. The calling agent reads the client's code at the
+version's tag and writes the files; AUA finds tags, diffs versions, reports what is still
+unmapped, and checks every response against that version's schema.
+
+```bash
+aua api map                                   # mapped versions, what each lacks, releases not mapped
+aua api map new android 3.1.0 --from 3.2.0    # tag + commit, the calls to map (file:line at the tag),
+                                              # and which calls and API files changed since 3.2.0
+aua api run aua-map/android/3.1.0/flows/chat.yaml --base-url http://localhost:8000
+aua api map freeze android 3.1.0              # once it passes against a backend that works
+aua api map new android next --ref main       # unreleased code: mapped, never frozen
+```
+
+```yaml
+# aua-map/android/3.1.0/schema.yaml — written from that version's data models
+endpoints:
+  "POST /v1/notes":
+    response:
+      body:
+        id: string                    # required: absent or null, 3.1 cannot decode the reply
+        state: enum(draft, published) # a value 3.1 does not know is a break
+        pinned?: boolean              # optional: may be absent or null
+        title: string?                # must be present, may be null
+  "POST /v1/assistant/replies":
+    response:
+      events:
+        done: {reply_id: string}      # an event 3.1 needs in every stream
+        tool?: {name: string}         # one it decodes only when sent
+```
+
+A flow inside a version folder is checked against that schema: each step reports which endpoint
+it matched, a `decode_fails` break for a required field that is missing, null, retyped or an
+unknown enum value, and `optional_absent` for optional fields the backend left out. Label steps
+with `screen: Chat` to read the result screen by screen. A released version's code never changes,
+so `freeze` records every schema endpoint and flow; a later edit to one is reported by
+`aua api map` and `aua api run`, while newly mapped endpoints and flows are additions and freeze
+on the next `freeze`. Inside a one-line `{…}` mapping, quote anything with a `?`
+(`{"name?": string}`), as YAML requires.
+
 ---
 
 ## Dashboard (sneak-peek headless runs)
@@ -2037,6 +2084,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
 | `aua api check\|usage` | Backend OpenAPI changes vs. the client versions that call them (no device) |
 | `aua api run\|sample` | Send a backend the calls a client app makes, from a cartridge file (no device) |
+| `aua api map [new\|freeze]` | Versioned per-release schemas and flows an agent writes from the client's code (no device) |
 | `aua capture …` | Session capture / export / explain |
 | `aua helper status\|enable\|remove` | Optional on-device helper APK — runs a long flow on the device (rootable targets, off by default) |
 | `aua session start --goal GOAL --contract FILE --apk APP --helper` | One-call DeepSeek helper session: prepare, run ordered checks, apply proof, clean up, return pass/fail; never falls back |

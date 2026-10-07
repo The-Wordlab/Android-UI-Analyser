@@ -325,6 +325,107 @@ def _compare_events(expected: dict[str, Any], actual: dict[str, Any]) -> list[di
     return found
 
 
+# --- version schemas ---------------------------------------------------------------------------
+
+_ENUM = re.compile(r"^enum\((.*)\)$")
+_SCALARS = {"string": (str,), "number": (int, float), "boolean": (bool,)}
+
+
+def _kind(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, int | float):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    return "an array" if isinstance(value, list) else "an object"
+
+
+def _finding(level: str, where: str, change: str) -> dict[str, str]:
+    effect = "decode_fails" if level == "break" else "data_missing"
+    return {"level": level, "where": where, "change": change, "effect": effect}
+
+
+def check_contract(schema: Any, value: Any, where: str = "body") -> list[dict[str, str]]:
+    """What a client version whose models are ``schema`` would hit on ``value``.
+
+    ``name`` is required: absent or null, the version cannot decode the response (a break).
+    ``name?`` is optional: null is fine, and absent is reported as ``absent`` rather than as a
+    warning, since an optional field is often absent on purpose (no image, no reminder).
+    ``name: string?`` must be present but may be null.
+    """
+    if schema == "any":
+        return []
+    if isinstance(schema, dict):
+        if not isinstance(value, dict):
+            return [_finding("break", where, f"is {_kind(value)}, this version needs an object")]
+        found: list[dict[str, str]] = []
+        for raw_key, sub in schema.items():
+            key = str(raw_key)
+            optional = key.endswith("?")
+            name = key[:-1] if optional else key
+            at = f"{where}.{name}"
+            nullable = isinstance(sub, str) and sub.strip().endswith("?")
+            if name in value and value[name] is None and nullable:
+                continue
+            if value.get(name) is None:
+                if not optional:
+                    gone = "missing" if name not in value else "null"
+                    found.append(_finding("break", at, f"{gone}: this version cannot decode it"))
+                elif name not in value:
+                    found.append(_finding("absent", at, "absent: this version shows nothing here"))
+                continue
+            found += check_contract(sub, value[name], at)
+        return found
+    if isinstance(schema, list):
+        if not isinstance(value, list):
+            return [_finding("break", where, f"is {_kind(value)}, this version needs an array")]
+        unique: dict[tuple[str, str], dict[str, str]] = {}
+        for item in value if schema else []:
+            for f in check_contract(schema[0], item, f"{where}[]"):
+                unique.setdefault((f["where"], f["change"]), f)
+        return list(unique.values())
+    enum = _ENUM.fullmatch(str(schema).strip())
+    if enum:
+        allowed = [v.strip() for v in enum.group(1).split(",") if v.strip()]
+        if value not in allowed:
+            known = ", ".join(allowed)
+            return [_finding("break", where, f"is {value!r}, this version knows only {known}")]
+        return []
+    types = _SCALARS.get(str(schema).strip().removesuffix("?"))
+    if types is None:
+        raise UsageError(
+            f"unknown schema type {schema!r} at {where}",
+            hint="Use string, number, boolean, any, enum(a, b), a mapping or a one-item list.",
+        )
+    if (isinstance(value, bool) and bool not in types) or not isinstance(value, types):
+        need = str(schema).strip().removesuffix("?")
+        return [_finding("break", where, f"is {_kind(value)}, this version needs a {need}")]
+    return []
+
+
+def check_response(
+    contract: dict[str, Any], body: Any, events: list[tuple[str, Any]]
+) -> list[dict[str, str]]:
+    found: list[dict[str, str]] = []
+    if "body" in contract:
+        found += check_contract(contract["body"], body)
+    # `done:` is an event the version needs in every stream; `tool_start?:` one it reads if sent.
+    for raw_name, sub in (contract.get("events") or {}).items():
+        name = str(raw_name).removesuffix("?")
+        sent = [data for event, data in events if event == name]
+        if not sent and not str(raw_name).endswith("?"):
+            found.append(_finding("break", f"events.{name}", "never sent: this version needs it"))
+        unique: dict[tuple[str, str], dict[str, str]] = {}
+        for data in sent:
+            for f in check_contract(sub, data, f"events.{name}"):
+                unique.setdefault((f["where"], f["change"]), f)
+        found += unique.values()
+    return found
+
+
 # --- running -----------------------------------------------------------------------------------
 
 
@@ -441,6 +542,10 @@ def run(
             hint="Add them under `inputs:` with a default value.",
         )
 
+    from .api_map import endpoint_key, version_context
+
+    mapped = version_context(doc["_path"])
+    schema = mapped["schema"] if mapped else {}
     ctx = _Context(env={n: env[n] for n in env_names}, inputs=declared)
     secrets = [v for v in ctx.env.values() if len(v) >= 4]
     expect_doc = doc.get("expect") or {}
@@ -559,6 +664,15 @@ def run(
                 findings += compare(wanted["body"], actual.get("body", "unknown"))
             if "events" in wanted:
                 findings += _compare_events(wanted["events"], actual.get("events") or {})
+            if mapped:
+                key = endpoint_key(row["method"], step["path"])
+                row["schema"] = key if key in schema else None
+                if key in schema:
+                    checked = check_response(schema[key].get("response") or {}, body, events)
+                    absent = [f["where"] for f in checked if f["level"] == "absent"]
+                    if absent:
+                        row["optional_absent"] = absent
+                    findings += [f for f in checked if f["level"] != "absent"]
             if findings:
                 row["findings"] = findings
             row["ok"] = not any(f["level"] == "break" for f in findings)
@@ -574,6 +688,17 @@ def run(
         "breaks": breaks,
         "warnings": warns,
     }
+    if mapped:
+        out["version"] = {k: v for k, v in mapped.items() if k != "schema"}
+        out["not_in_schema"] = sorted(
+            {f"{r['method']} {r['path']}" for r in results if "schema" in r and r["schema"] is None}
+        )
+        if mapped.get("changed_since_freeze"):
+            out["warning"] = (
+                "frozen entries of this version's map changed since: "
+                + ", ".join(mapped["changed_since_freeze"])
+                + ". A released version's code never changes, so check what was edited."
+            )
     if save_expect and failed:
         out["expect"] = "not saved: a step failed, and a failed run is no baseline"
     elif save_expect:

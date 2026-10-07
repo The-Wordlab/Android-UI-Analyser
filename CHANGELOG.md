@@ -13,6 +13,20 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- `aua api map` keeps a versioned map of what each client version sends its backend and needs
+  back, so a backend developer can check a specific app version without an emulator. Each
+  version folder holds a `schema.yaml`, written by the calling agent from that version's data
+  models at its release tag, and the `flows/` it runs. `aua api map new <client> <version>
+  [--from <version>]` finds the tag and commit, lists the calls to map with their source lines at
+  the tag, and, from an earlier map, which calls and API files changed between the two tags.
+  `aua api map` reports each version's unmapped calls and the releases not mapped yet, and
+  `aua api map freeze` records every schema endpoint and flow of a release so a later edit is
+  reported, while new entries can still be added. AUA runs no model; the agent reads the code.
+- A cartridge flow inside a map version is checked against that version's schema: a required
+  field that is missing, null, retyped or an unknown `enum(…)` value is a `decode_fails` break,
+  optional fields (`name?`) the backend left out are listed as `optional_absent`, `name: type?`
+  must be present but may be null, and a stream's events are required (`done:`) or decoded only
+  when sent (`tool?:`).
 - A stream step reports `event_ms`, when each kind of server-sent event first arrived, so the
   time to the first reply text is visible apart from the stream merely starting. Steps take a
   `screen:` label that the result repeats.

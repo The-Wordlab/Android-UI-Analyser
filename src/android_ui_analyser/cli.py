@@ -9507,6 +9507,99 @@ def api_sample_cmd() -> None:
     typer.echo(sample_text(), nl=False)
 
 
+api_map_app = typer.Typer(
+    name="map",
+    help=(
+        "Versioned API maps: per client version, a schema of what it needs back and the flows it "
+        "runs. The agent writes them from the client's source at the release tag; AUA finds tags, "
+        "diffs versions, reports what is unmapped and freezes released versions."
+    ),
+    invoke_without_command=True,
+)
+api_app.add_typer(api_map_app, name="map")
+
+
+@api_map_app.callback()
+def api_map_status_cmd(
+    ctx: typer.Context,
+    config: str = typer.Option("aua-api.yaml", "--config", help=_API_CONFIG_HELP),
+    client: str | None = typer.Option(None, "--client", help="Only this client."),
+    fetch: bool = typer.Option(
+        True, "--fetch/--no-fetch", help="`git fetch --tags` each client repo first."
+    ),
+) -> None:
+    """Every mapped version: complete, untouched since frozen, and which calls are unmapped."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .api_map import status
+
+        result = status(config, engine.config.cache.dir, only=client, fetch=fetch)
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@api_map_app.command("new")
+def api_map_new_cmd(
+    ctx: typer.Context,
+    client: str = typer.Argument(..., help="Client name from the config, e.g. android."),
+    version: str = typer.Argument(..., help="The release's version, e.g. 3.1.0."),
+    from_version: str | None = typer.Option(
+        None, "--from", help="Copy this mapped version, and list what changed since it."
+    ),
+    ref: str | None = typer.Option(
+        None, "--ref", help="Map unreleased code at this branch or commit instead of a tag."
+    ),
+    config: str = typer.Option("aua-api.yaml", "--config", help=_API_CONFIG_HELP),
+    fetch: bool = typer.Option(True, "--fetch/--no-fetch", help="`git fetch --tags` first."),
+) -> None:
+    """Create a version's folder and list the calls (with source lines) the agent must map."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .api_map import new_version
+
+        result = new_version(
+            config,
+            engine.config.cache.dir,
+            client,
+            version,
+            ref=ref,
+            from_version=from_version,
+            fetch=fetch,
+        )
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@api_map_app.command("freeze")
+def api_map_freeze_cmd(
+    ctx: typer.Context,
+    client: str = typer.Argument(..., help="Client name from the config."),
+    version: str = typer.Argument(..., help="The mapped release to freeze."),
+    config: str = typer.Option("aua-api.yaml", "--config", help=_API_CONFIG_HELP),
+    force: bool = typer.Option(
+        False, "--force", help="Freeze again after a deliberate fix to an already frozen map."
+    ),
+) -> None:
+    """Fingerprint a released version's folder, so any later edit to it is reported."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .api_map import freeze
+
+        typer.echo(json.dumps(freeze(config, client, version, force=force), indent=2))
+
+    _run(ctx, go)
+
+
 prepare_app = typer.Typer(
     name="prepare",
     help="Agree what a test must prove with the agent that wrote the feature, then keep it.",

@@ -635,6 +635,18 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "go to whoever changes the backend.",
     ),
     (
+        "Simulate one app version against a backend with a versioned map",
+        "For \"does version X still work with this backend change\", run `aua api map` first and "
+        "reuse what is mapped. Otherwise `aua api map new <client> <version> --from <nearest "
+        "mapped>` names the tag, the calls to map with their file:line, and what changed since. "
+        "Read the code at that tag (`git show <tag>:<file>` or a temporary worktree; never switch "
+        "the user's checkout), write each called endpoint's response models into the version's "
+        "`schema.yaml` (`name` required, `name?` optional, `name: string?` nullable, `enum(a, "
+        "b)`, `any`), and the flows into `flows/` with `screen:` labels. `aua api run` on such a "
+        "flow reports `decode_fails` per screen. When it passes against a backend that works, "
+        "`aua api map freeze` a release: its entries never change, but new ones may be added.",
+    ),
+    (
         "Use verified network isolation, not airplane mode",
         "Android may keep Wi-Fi active after `airplane on`, so that command is never proof the "
         "device is offline. Use `aua network offline --verify`: it snapshots airplane, Wi-Fi, "
