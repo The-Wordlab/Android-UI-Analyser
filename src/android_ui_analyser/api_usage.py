@@ -146,7 +146,9 @@ def load_config(path: str | Path) -> dict[str, Any]:
             client["pattern"] = [client["pattern"]]
         if any("(?P<path>" not in str(p) for p in client["pattern"]):
             raise UsageError(f"client {client['name']}: every `pattern` needs a named group `path`")
-    return {"file": str(file), "backend": backend, "clients": clients}
+    # Where `aua api map` keeps each client version's schema and flows.
+    api_map = str((here / str(raw.get("map") or "aua-map")).expanduser().resolve())
+    return {"file": str(file), "backend": backend, "clients": clients, "map": api_map}
 
 
 # ------------------------------------------------------------------------------------- git
@@ -301,6 +303,35 @@ def _label(
     return label
 
 
+def _tags(client: dict[str, Any]) -> list[tuple[str, str]]:
+    """The client's release tags, newest first, each with the commit it points at."""
+
+    listing = _git(
+        client["repo"],
+        "for-each-ref",
+        "--sort=-creatordate",
+        "--format=%(refname:strip=2)%00%(objectname)%00%(*objectname)",
+        "refs/tags",
+    )
+    tags = []
+    for line in listing.splitlines():
+        tag, obj, peeled = (line.split("\0") + ["", ""])[:3]
+        if fnmatch.fnmatch(tag, str(client.get("tags") or "")):
+            tags.append((tag, peeled or obj))
+    return tags
+
+
+def find_release(client: dict[str, Any], version: str) -> dict[str, Any] | None:
+    """The newest tag whose version label is *version*, however old: ``{label, ref, sha}``."""
+
+    rule = dict(client.get("version") or {})
+    labels: dict[str, str] = {}
+    for tag, sha in _tags(client) if client.get("tags") else []:
+        if _label(client["repo"], tag, sha, rule, labels) == version:
+            return {"label": version, "ref": tag, "sha": sha}
+    return None
+
+
 def _refs(
     client: dict[str, Any], labels: dict[str, str]
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
@@ -318,21 +349,10 @@ def _refs(
     refs.append({"label": "unreleased", "ref": branch, "sha": head})
     if not client.get("tags"):
         return refs, None
-    listing = _git(
-        repo,
-        "for-each-ref",
-        "--sort=-creatordate",
-        "--format=%(refname:strip=2)%00%(objectname)%00%(*objectname)",
-        "refs/tags",
-    )
     seen: set[str] = set()
     limit = int(client.get("max_versions") or _DEFAULT_MAX_VERSIONS)
     rule = dict(client.get("version") or {})
-    tags = []
-    for line in listing.splitlines():
-        tag, obj, peeled = (line.split("\0") + ["", ""])[:3]
-        if fnmatch.fnmatch(tag, str(client["tags"])):
-            tags.append((tag, peeled or obj))
+    tags = _tags(client)
     below = not_examined = 0
     for index, (tag, sha) in enumerate(tags):
         label = _label(repo, tag, sha, rule, labels)
@@ -379,8 +399,17 @@ def _scan_text(
     return sorted(calls, key=lambda call: call[2])
 
 
-def scan_client(client: dict[str, Any], cache_dir: Path, *, fetch: bool) -> dict[str, Any]:
-    """Every call the client makes at each of its refs: ``{label: [call, ...]}``."""
+def scan_client(
+    client: dict[str, Any],
+    cache_dir: Path,
+    *,
+    fetch: bool,
+    extra_refs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Every call the client makes at each of its refs: ``{label: [call, ...]}``.
+
+    ``extra_refs`` (``{label, ref, sha}``) adds versions outside the newest-tags window.
+    """
 
     repo = client["repo"]
     store = cache_dir / f"client-{_signature(client)}.json"
@@ -392,6 +421,8 @@ def scan_client(client: dict[str, Any], cache_dir: Path, *, fetch: bool) -> dict
     labels: dict[str, str] = cache.get("labels") or {}
     fetched = _fetch(repo) if fetch else "skipped"
     refs, history = _refs(client, labels)
+    known = {ref["label"] for ref in refs}
+    refs += [dict(ref) for ref in extra_refs or [] if ref["label"] not in known]
     patterns = [re.compile(str(p), re.MULTILINE) for p in client["pattern"]]
     include = list(client["files"])
     exclude = list(client.get("exclude") or [])
