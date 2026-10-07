@@ -10,6 +10,7 @@ compared: ids, timestamps and generated text differ on every run.
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import re
@@ -327,6 +328,34 @@ def _compare_events(expected: dict[str, Any], actual: dict[str, Any]) -> list[di
 # --- running -----------------------------------------------------------------------------------
 
 
+class _EventClock:
+    """When each kind of server-sent event first arrived, measured while the stream is read."""
+
+    def __init__(self, started: float) -> None:
+        self.started = started
+        self.first: dict[str, int] = {}
+        self._decode = codecs.getincrementaldecoder("utf-8")(errors="replace").decode
+        self._tail = ""
+        self._name = "message"
+        self._data = False
+
+    def feed(self, chunk: bytes, *, final: bool = False) -> None:
+        now = round((time.perf_counter() - self.started) * 1000)
+        *lines, self._tail = (self._tail + self._decode(chunk, final)).split("\n")
+        if final:
+            lines += [self._tail, ""]
+        for line in lines:
+            line = line.rstrip("\r")
+            if not line:
+                if self._data:
+                    self.first.setdefault(self._name, now)
+                self._name, self._data = "message", False
+            elif line.startswith("event:"):
+                self._name = line[6:].strip() or "message"
+            elif line.startswith("data:"):
+                self._data = True
+
+
 def _redact(value: Any, secrets: list[str]) -> Any:
     if isinstance(value, dict):
         return {
@@ -430,6 +459,8 @@ def run(
                 "method": step["method"].upper(),
                 "path": step["path"],
             }
+            if step.get("screen"):
+                row["screen"] = step["screen"]
             results.append(row)
             if failed:
                 row["ok"] = False
@@ -461,11 +492,20 @@ def run(
                 with client.stream(
                     row["method"], url, headers=headers, params=query, **payload
                 ) as resp:
+                    clock = (
+                        _EventClock(started)
+                        if "text/event-stream" in resp.headers.get("content-type", "")
+                        else None
+                    )
                     chunks = []
                     for chunk in resp.iter_bytes():
                         if first_byte is None:
                             first_byte = time.perf_counter()
+                        if clock:
+                            clock.feed(chunk)
                         chunks.append(chunk)
+                    if clock:
+                        clock.feed(b"", final=True)
                     raw = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
             except httpx.HTTPError as exc:
                 row["ok"], failed = False, True
@@ -485,6 +525,8 @@ def run(
             if is_stream:
                 row["first_byte_ms"] = round(((first_byte or time.perf_counter()) - started) * 1000)
                 row["events"] = len(events)
+                if clock:
+                    row["event_ms"] = clock.first
             row["response"] = _clip(_preview(body, raw, events, secrets), max_chars)
 
             want = step.get("status")

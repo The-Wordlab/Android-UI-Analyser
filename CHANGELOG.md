@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- A stream step reports `event_ms`, when each kind of server-sent event first arrived, so the
+  time to the first reply text is visible apart from the stream merely starting. Steps take a
+  `screen:` label that the result repeats.
+
 ## [0.35.0] - 2026-10-07
 
 ### Added

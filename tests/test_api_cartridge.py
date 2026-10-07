@@ -292,6 +292,35 @@ def test_mistakes_in_a_cartridge_are_usage_errors(
         run(path, env={})
 
 
+def test_a_stream_reports_when_each_kind_of_event_first_arrived(tmp_path: Path) -> None:
+    stream = (
+        'event: start\ndata: {"id": "r"}\n\n'
+        'event: delta\ndata: {"text": "a"}\n\n'
+        'event: delta\ndata: {"text": "b"}\n\n'
+        'event: done\ndata: {"tokens": 3}'  # the last event has no blank line after it
+    )
+    flow = tmp_path / "stream.yaml"
+    flow.write_text(
+        json.dumps(
+            {
+                "cartridge": 1,
+                "base_url": "https://api.example.com",
+                "steps": [{"id": "ask", "method": "POST", "path": "/v1/replies"}],
+            }
+        )
+    )
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(
+            200, content=stream.encode(), headers={"content-type": "text/event-stream"}
+        )
+    )
+
+    step = run(flow, env={}, transport=transport)["steps"][0]
+
+    assert list(step["event_ms"]) == ["start", "delta", "done"]
+    assert all(isinstance(ms, int) and ms >= 0 for ms in step["event_ms"].values())
+
+
 class _Server:
     """A real local backend for the CLI, whose one answer the test can change."""
 
