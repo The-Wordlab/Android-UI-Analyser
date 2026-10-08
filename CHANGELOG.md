@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-10-08
+
 ### Fixed
 
 - `aua api map` and `aua api map new` expand a home-relative cache directory. The default
@@ -1782,5 +1784,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.35.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.35.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.36.0...HEAD
 [0.36.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.36.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.36.1...HEAD
+[0.36.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.36.1
