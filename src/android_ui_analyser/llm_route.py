@@ -5,8 +5,9 @@ model the way OpenRouter does (``openai/gpt-6-luna``). :func:`prepare` picks the
 keys that exist and returns the exact URL, headers and body for it:
 
 * an ``openai/*`` model whose price is known goes to api.openai.com when ``OPENAI_API_KEY`` is
-  set -- a company key is cheaper than OpenRouter's resale of the same model -- unless the request
-  combines function tools with reasoning, which OpenAI's chat completions refuse;
+  set -- a company key is cheaper than OpenRouter's resale of the same model. A request that
+  combines function tools with reasoning, which OpenAI's chat completions refuse, goes to its
+  Responses API instead, and the answer comes back in chat-completions shape;
 * everything else, and every OpenAI model without that key, goes through OpenRouter.
 
 OpenAI does not report what a request cost, so :meth:`Call.finish` writes the price into
@@ -135,11 +136,132 @@ def _reasons_with_tools(payload: Mapping[str, Any]) -> bool:
     """OpenAI's chat completions refuse function tools with reasoning on for GPT-6 models.
 
     Live 2026-09-23: "Function tools with reasoning_effort are not supported for gpt-6-luna in
-    /v1/chat/completions ... set reasoning_effort to 'none'". OpenRouter serves the same request,
-    so it stays there rather than being answered differently depending on which key exists.
+    /v1/chat/completions. To use function tools, use /v1/responses". Such a request used to stay
+    on OpenRouter, which made every judge (a forced tool call with reasoning on) depend on
+    OpenRouter credit even with a company key: from 2026-10-05 an exhausted OpenRouter balance
+    stopped every QA judgement for a week. It now goes to the Responses API.
     """
     reasoning = payload.get("reasoning") or {}
     return bool(payload.get("tools")) and reasoning.get("enabled") is not False and bool(reasoning)
+
+
+def _responses_part(part: Any, role: str) -> Any:
+    """One chat content part in the Responses API's shape."""
+    if not isinstance(part, dict):
+        return part
+    if part.get("type") == "text":
+        kind = "output_text" if role == "assistant" else "input_text"
+        return {"type": kind, "text": part.get("text") or ""}
+    if part.get("type") == "image_url":
+        image = part.get("image_url")
+        item = {"type": "input_image", "image_url": image.get("url") if isinstance(image, dict) else image}
+        if isinstance(image, dict) and image.get("detail"):
+            item["detail"] = image["detail"]
+        return item
+    return part
+
+
+def _as_text(content: Any) -> str:
+    if isinstance(content, list):
+        return "".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+    return "" if content is None else str(content)
+
+
+def _responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Chat messages as Responses input items: tool calls and their results are items of their own."""
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        if role == "tool":
+            items.append({"type": "function_call_output", "call_id": message.get("tool_call_id"),
+                          "output": _as_text(message.get("content"))})
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content = [_responses_part(part, role) for part in content]
+        if content not in (None, "", []):
+            items.append({"role": role, "content": content})
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            items.append({"type": "function_call", "call_id": call.get("id"), "name": function.get("name"),
+                          "arguments": function.get("arguments") or "{}"})
+    return items
+
+
+def _responses_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
+    """*payload*, in OpenRouter's chat shape, as an OpenAI Responses API request."""
+    chat = _openai_body(payload, model)
+    body: dict[str, Any] = {"model": model, "input": _responses_input(chat.get("messages") or []),
+                            # Nothing a QA judge sends needs to be kept on OpenAI's side.
+                            "store": False}
+    reasoning = payload.get("reasoning") or {}
+    # A token budget (the judge's answer reserve) has no OpenAI equivalent; QA's judges run at
+    # low effort, which is also the lowest effort that still reasons.
+    body["reasoning"] = {"effort": chat.get("reasoning_effort") or reasoning.get("effort") or "low"}
+    if "max_completion_tokens" in chat:
+        body["max_output_tokens"] = chat["max_completion_tokens"]
+    tools = []
+    for tool in chat.get("tools") or []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if not isinstance(function, dict):
+            continue
+        converted = {"type": "function", "name": function.get("name"),
+                     "parameters": function.get("parameters") or {"type": "object", "properties": {}},
+                     # Chat completions default to non-strict schemas; Responses default to strict.
+                     "strict": bool(function.get("strict", False))}
+        if function.get("description"):
+            converted["description"] = function["description"]
+        tools.append(converted)
+    if tools:
+        body["tools"] = tools
+    choice = chat.get("tool_choice")
+    if isinstance(choice, dict) and isinstance(choice.get("function"), dict):
+        body["tool_choice"] = {"type": "function", "name": choice["function"].get("name")}
+    elif isinstance(choice, str):
+        body["tool_choice"] = choice
+    if "parallel_tool_calls" in chat:
+        body["parallel_tool_calls"] = chat["parallel_tool_calls"]
+    response_format = chat.get("response_format")
+    if isinstance(response_format, dict) and response_format.get("type") == "json_schema":
+        schema = response_format.get("json_schema") or {}
+        body["text"] = {"format": {"type": "json_schema", "name": schema.get("name") or "answer",
+                                   "schema": schema.get("schema") or {}, "strict": bool(schema.get("strict", False))}}
+    elif isinstance(response_format, dict) and response_format.get("type") == "json_object":
+        body["text"] = {"format": {"type": "json_object"}}
+    return body
+
+
+def _chat_answer(response: dict[str, Any]) -> dict[str, Any]:
+    """A Responses API answer in chat-completions shape, which every AUA caller reads."""
+    text: list[str] = []
+    calls: list[dict[str, Any]] = []
+    for item in response.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "message":
+            text += [str(part.get("text") or "") for part in item.get("content") or []
+                     if isinstance(part, dict) and part.get("type") == "output_text"]
+        elif item.get("type") == "function_call":
+            calls.append({"id": item.get("call_id"), "type": "function",
+                          "function": {"name": item.get("name"), "arguments": item.get("arguments") or "{}"}})
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(text) or None}
+    if calls:
+        message["tool_calls"] = calls
+    finish = "tool_calls" if calls else ("length" if response.get("status") == "incomplete" else "stop")
+    usage = response.get("usage") or {}
+    prompt, completion = int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
+    return {
+        "id": response.get("id"), "object": "chat.completion", "model": response.get("model"),
+        "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+        "usage": {
+            "prompt_tokens": prompt, "completion_tokens": completion,
+            "total_tokens": int(usage.get("total_tokens") or prompt + completion),
+            "prompt_tokens_details": {
+                "cached_tokens": int((usage.get("input_tokens_details") or {}).get("cached_tokens") or 0)},
+            "completion_tokens_details": {
+                "reasoning_tokens": int((usage.get("output_tokens_details") or {}).get("reasoning_tokens") or 0)},
+        },
+    }
 
 
 def prepare(
@@ -160,7 +282,7 @@ def prepare(
     only_openai = bool(direct) and "/" not in requested
     if only_openai and not openai_key:
         raise RouteError(f"{requested} is an OpenAI model id: set {OPENAI_KEY}")
-    if direct and openai_key and (only_openai or not _reasons_with_tools(payload)):
+    if direct and openai_key:
 
         def priced(answer: dict[str, Any]) -> dict[str, Any]:
             usage = answer.get("usage")
@@ -169,8 +291,11 @@ def prepare(
             answer.setdefault("provider", "OpenAI")
             return answer
 
-        return Call("openai", f"{OPENAI_URL}/chat/completions",
-                    {"Authorization": f"Bearer {openai_key}"}, _openai_body(payload, direct), priced)
+        headers = {"Authorization": f"Bearer {openai_key}"}
+        if _reasons_with_tools(payload):
+            return Call("openai", f"{OPENAI_URL}/responses", headers, _responses_body(payload, direct),
+                        lambda answer: priced(_chat_answer(answer)))
+        return Call("openai", f"{OPENAI_URL}/chat/completions", headers, _openai_body(payload, direct), priced)
     key = openrouter_key or next((environ[name] for name in OPENROUTER_KEYS if environ.get(name)), None)
     if not key:
         wanted = f"{OPENROUTER_KEYS[0]}" + (f" or {OPENAI_KEY}" if direct else "")

@@ -11,6 +11,15 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Changed
+
+- With `OPENAI_API_KEY` set, an OpenAI model request that combines function tools with reasoning
+  (every hosted judge vote: a forced verdict tool with reasoning on) now goes to OpenAI's
+  Responses API instead of OpenRouter, and its answer comes back in chat-completions shape with
+  its price in `usage.cost`. OpenAI's chat completions refuse that combination, so these requests
+  used to depend on OpenRouter even with a company key, and an exhausted OpenRouter balance
+  stopped every judgement. Without the key nothing changes.
+
 ## [0.36.1] - 2026-10-08
 
 ### Fixed
