@@ -31,7 +31,9 @@ from typing import Any
 
 from experiments.aua_controller.action_evidence import judge_action_history
 from experiments.aua_controller.agent_loop import definitive_selector_miss, run_agent
+from experiments.aua_controller.bounded_navigator import BoundedNavigator
 from experiments.aua_controller.compaction import FrameCompactor
+from experiments.aua_controller.decisions_navigator import DecisionsNavigator
 from experiments.aua_controller.hosted import BACKENDS, validate_endpoint, validate_request_config
 from experiments.aua_controller.hosted_projection import hosted_model_view
 from experiments.aua_controller.judgement import (
@@ -1197,6 +1199,10 @@ async def run_realapp(
     """Return the run result; also written to ``<output>/result.json`` and ``verdict.md``."""
     if backend not in BACKENDS:
         raise RunError("unknown backend")
+    if nav_engine not in {"chat", "typesafe", "decisions"}:
+        raise RunError("unknown navigator engine")
+    if nav_engine == "decisions" and not os.environ.get("OPENAI_API_KEY"):
+        raise RunError("Decisions requires OPENAI_API_KEY before session setup")
     if fresh_app and not apk:
         raise RunError("fresh_app needs --apk: a booted AVD has no app to clear")
     if existing_session_id and (fresh_app or apk or prelaunch_setup_flows or flags):
@@ -1337,7 +1343,7 @@ async def run_realapp(
     recording_started = False
     decider: Decider | None = None
     namer_decider: Decider | None = None
-    navigator: TypeSafeNavigator | None = None
+    navigator: BoundedNavigator | None = None
     system_one_judge: TypeSafeJudge | None = None
     recording_path = (output / "journey.mp4").resolve()
     aua_artifacts_dir = (
@@ -1834,8 +1840,9 @@ async def run_realapp(
         compactor = FrameCompactor(max_elements=max_elements)
         # The navigator answers the narrow "which control" steps and declines everything
         # else, so `host_next` returning None simply leaves the step with the chat model.
-        if nav_engine == "typesafe":
-            navigator = TypeSafeNavigator(
+        if nav_engine in {"typesafe", "decisions"}:
+            navigator_class = DecisionsNavigator if nav_engine == "decisions" else TypeSafeNavigator
+            navigator = navigator_class(
                 goal, tools=tools,
                 min_confidence=nav_min_confidence, shadow=nav_shadow,
                 action_space=nav_action_space,
@@ -2129,7 +2136,7 @@ async def run_realapp(
         for role, system_one in (("navigator", navigator), ("judge", system_one_judge)):
             if system_one is not None:
                 usage = system_one.report()
-                result["cost"][role] = {"model": usage["model"], "provider": "typesafe",
+                result["cost"][role] = {"model": usage["model"], "provider": usage.get("provider", "typesafe"),
                                         "usd": usage["usd"], "estimated": True, "decider": usage}
                 if role == "navigator":
                     result["navigator"] = usage
@@ -2373,13 +2380,15 @@ def main() -> int:
                         help="Stronger manifest candidate to ask when the judge cannot produce "
                              "its schema. Repeatable; tried in the order given.")
     parser.add_argument("--no-judge", action="store_true")
-    parser.add_argument("--nav-engine", choices=("chat", "typesafe"), default="chat",
-                        help="chat: every step is decided by the controller model. typesafe: a "
+    parser.add_argument("--nav-engine", choices=("chat", "typesafe", "decisions"), default="chat",
+                        help="decisions: GPT-6 Luna's decision endpoint, sent the step's screenshot, "
+                             "answers the moves it is confident of; the controller model takes the rest. "
+                             "chat: every step is decided by the controller model. typesafe: a "
                              "TypeSafe System One model answers the moves it is confident of and "
                              "hands every other step, every stop and every string the brief does "
                              "not quote back to the controller model.")
     parser.add_argument("--nav-shadow", action="store_true",
-                        help="With --nav-engine typesafe, record what the navigator would have "
+                        help="With --nav-engine decisions or typesafe, record what the navigator would have "
                              "done without letting it act. Proves the gate on real screens.")
     parser.add_argument("--nav-min-confidence", type=float, default=0.85,
                         help="Confidence a System One move, and the control or text it acts on, must "

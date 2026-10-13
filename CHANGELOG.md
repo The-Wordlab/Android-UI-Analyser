@@ -11,6 +11,16 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `run_realapp --nav-engine decisions` puts GPT-6 Luna's decision endpoint in front of the
+  controller model. Each step it sees sends the step's screenshot and the controls on screen as
+  typed choices; it takes the move only above the confidence gate and hands every other step to the
+  controller model in the same conversation. Its requests and answers go to
+  `controller/system-one-turns.jsonl`, and each `host-decisions.jsonl` row now names the navigator
+  and the request it made (`navigator_call`, `navigator_attempt`), so a reader can pair a step with
+  its decision request. Needs `OPENAI_API_KEY`. Jev (`typesafe`) shares the same bounded navigator.
+
 ### Changed
 
 - With `OPENAI_API_KEY` set, an OpenAI model request that combines function tools with reasoning

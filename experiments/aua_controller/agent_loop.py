@@ -430,6 +430,16 @@ async def run_agent(
                     decision["error"] = _error_text(exc)
                     raise
                 finally:
+                    # Name the navigator and link the request it made, so a reader can pair this
+                    # step with the request and response in the navigator's own transcript.
+                    for key in ("engine", "provider", "model"):
+                        value = getattr(host_next, key, None)
+                        if isinstance(value, str):
+                            decision[key] = value
+                    provider_turn = getattr(host_next, "last_decision", None)
+                    if isinstance(provider_turn, dict):
+                        decision["navigator_call"] = provider_turn.get("call")
+                        decision["navigator_attempt"] = provider_turn.get("attempt")
                     decision["duration_ms"] = (time.monotonic() - tick) * 1000
                     report["host_decision_ms"].append(decision["duration_ms"])
                     _append(output / "host-decisions.jsonl", decision)
