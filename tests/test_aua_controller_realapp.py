@@ -1158,6 +1158,21 @@ def test_realapp_records_setup_failures_and_still_cleans_up(tmp_path):
     assert (tmp_path / "run" / "result.json").exists()
 
 
+def test_the_first_look_after_setup_keeps_a_screenshot(tmp_path):
+    """The decision model answers from a screenshot, so a first screen without one is never asked."""
+    class SetUpAua(FakeAua):
+        async def call_tool(self, name, arguments):
+            if name == "flow_run":
+                self.calls.append((name, arguments))
+                return {"ok": True}
+            return await super().call_tool(name, arguments)
+
+    aua = SetUpAua()
+    run(tmp_path, aua, FakeModel([], {}), setup_flows=[("steps: []", {})])
+    first = next(arguments for name, arguments in aua.calls if name == "analyze_screen")
+    assert first == {"source": "hierarchy", "no_cache": True, "with_image": True}
+
+
 def test_realapp_refuses_a_dirty_output_directory(tmp_path):
     (tmp_path / "run").mkdir()
     (tmp_path / "run" / "old.txt").write_text("x")

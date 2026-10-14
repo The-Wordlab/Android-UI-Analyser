@@ -1602,7 +1602,10 @@ async def run_realapp(
             if proved is not None:
                 result[setup_proof[0]] = proved
         if flags or setup_flows or observation_frame(launched) is None:
-            initial = await call("analyze_screen", {"source": "hierarchy", "no_cache": True}, "setup")
+            # With a screenshot: the decision model answers from one, so a first screen without
+            # it was handed to the chat model unasked, and a review showed no "before" frame.
+            initial = await call("analyze_screen", {"source": "hierarchy", "no_cache": True, "with_image": True},
+                                 "setup")
         else:
             assert launched is not None
             initial = launched
