@@ -632,7 +632,11 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "--env-file`), and `--input NAME=value` repeats the flow with other input. Run it once "
         "with `--save-expect` against a backend that works; a later run exits 8 when a field "
         "went missing or changed type. The file holds no secrets or recorded values, so it can "
-        "go to whoever changes the backend.",
+        "go to whoever changes the backend. `--session NAME` keeps the user across runs: what "
+        "steps `save`d and the `{{install.NAME}}` ids, so a step marked `once: true` (the "
+        "sign-in) is skipped and the next run goes on in the same chat, against the same "
+        "backend. Each run's calls are logged in full under the session; `aua api session "
+        "export NAME` zips it, sign-in included, for someone else to `import` and continue.",
     ),
     (
         "Simulate one app version against a backend with a versioned map",

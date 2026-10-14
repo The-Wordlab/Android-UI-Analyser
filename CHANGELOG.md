@@ -19,6 +19,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- `aua api run --session NAME` keeps one user across runs: what the steps saved (the sign-in
+  token, a chat id) and the `{{install.NAME}}` ids (a device id), so the next run is the same
+  user on the same install. A step marked `once: true`, the sign-in, is skipped when the session
+  holds every value it saves, and a step can save what it sent (`request.json.<field>`). Every
+  call is logged in full, secrets and tokens hidden, with a copy of the flow and its map version.
+  `aua api session export NAME` zips a session, sign-in included, for someone else to
+  `aua api session import` and continue; `list` and `delete` manage them, and a session unused
+  for 14 days is removed.
 - A `host-decisions.jsonl` row records `navigator_declined` when the navigator handed the step on,
   including a step it never asked about (`screenshot_unavailable`, `too_few_controls`, ...).
 - `experiments.aua_controller.replay_question_shapes` replays saved QA screens through the

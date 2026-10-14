@@ -10,6 +10,7 @@
 #   aua api run FILE --base-url http://localhost:8000     # send it to any backend
 #   aua api run FILE --input question="Is it raining?"    # same flow, different input
 #   aua api run FILE --save-expect                        # record the response shapes once
+#   aua api run FILE --session bug-12                     # keep this user for the next runs
 #
 # Templates:
 #   {{env.NAME}}     read from the environment, never stored in this file

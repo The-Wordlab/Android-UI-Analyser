@@ -1504,11 +1504,12 @@ env: [EXAMPLE_CLIENT_KEY]                # read from the environment, never stor
 inputs: {question: What do I need to buy?}
 headers:
   X-Client-Key: "{{env.EXAMPLE_CLIENT_KEY}}"
-  X-Install-Id: "{{fresh.install}}"      # a new UUID per run: every run is a new install
+  X-Install-Id: "{{install.id}}"         # one UUID per install: per --session, else per run
 steps:
   - id: session
     method: POST
     path: /v1/sessions/anonymous
+    once: true                           # skipped when a --session already holds the token
     save: {token: body.access_token}     # body.<field>, header.<Name>, events.<event>.<field>
   - id: ask
     method: POST
@@ -1528,6 +1529,35 @@ recorded values, so it can be handed to whoever changes the backend.
 
 A stream step also reports `event_ms`: when each kind of event first arrived, so the time to the
 first reply text (a `delta` event, say) is visible apart from the stream merely starting.
+
+### Keep one user across runs (`--session`)
+
+Without a session every run is a new install and a new user. With one, the next run is the same
+user on the same install, so you can fix the backend and go on from where the last run stopped:
+
+```bash
+aua api run chat.yaml --base-url http://localhost:8000 --session bug-12   # signs in, chats
+# …fix the backend, restart it…
+aua api run continue-chat.yaml --session bug-12    # same user, same chat, same backend
+aua api session list                               # sessions, what each kept, when each goes
+aua api session export bug-12                      # bug-12.aua-session.zip, to hand it over
+aua api session import bug-12.aua-session.zip      # on their machine, to continue it there
+aua api session delete bug-12
+```
+
+A session keeps every value its runs `save` (the token, a chat id) and every `{{install.NAME}}`
+id, which stays the same for the whole session (a device id). A step marked `once: true`, the
+sign-in, is skipped when the session already holds every value it saves, and a step can save
+what it sent (`request.json.<field>`), such as the question a follow-up needs as context. Later
+runs go to the backend the session started on, since its user exists only there.
+
+Each run is logged in full in the session's `runs/`: every request and response, secrets and
+tokens hidden, beside a copy of the flow and of the map version it was checked against. So an
+export holds what someone needs to continue: the sign-in, the logs, the flows and the schema;
+the client's keys are never in it, and the receiver uses their own. Sessions live in
+`~/.android-ui-analyser/api-sessions/`, readable only by you, and one nobody has used for 14
+days is removed. An export holds a live sign-in: send it only to people who may act as that
+user.
 
 ### Versioned maps: simulate a specific app version
 
@@ -2085,6 +2115,7 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 | `aua proxy start\|stop` / `aua mock …` | HTTPS mitm record/map/replay (`[proxy]` extra) |
 | `aua api check\|usage` | Backend OpenAPI changes vs. the client versions that call them (no device) |
 | `aua api run\|sample` | Send a backend the calls a client app makes, from a cartridge file (no device) |
+| `aua api session list\|export\|import\|delete` | Users `aua api run --session` keeps across runs, with their call logs; zip one to hand it over |
 | `aua api map [new\|freeze]` | Versioned per-release schemas and flows an agent writes from the client's code (no device) |
 | `aua capture …` | Session capture / export / explain |
 | `aua helper status\|enable\|remove` | Optional on-device helper APK — runs a long flow on the device (rootable targets, off by default) |

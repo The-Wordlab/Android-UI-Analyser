@@ -9470,6 +9470,11 @@ def api_run_cmd(
         "--max-chars",
         help="Shorten each response preview to this many characters; 0 keeps all.",
     ),
+    session: str | None = typer.Option(
+        None,
+        "--session",
+        help="Run as session NAME: the same user and install as its last run, every call logged.",
+    ),
 ) -> None:
     """Send a backend the calls a client app makes, with no device. Exit 8 on a failure or break."""
 
@@ -9484,14 +9489,19 @@ def api_run_cmd(
             if not sep or not name:
                 raise UsageError(f"--input needs NAME=value, got {item!r}")
             inputs[name] = value
-        result = run(
-            cartridge,
-            base_url=base_url,
-            inputs=inputs,
-            timeout_s=timeout,
-            max_chars=max_chars,
-            save_expect=save_expect,
-        )
+        options: dict[str, Any] = {
+            "base_url": base_url,
+            "inputs": inputs,
+            "timeout_s": timeout,
+            "max_chars": max_chars,
+            "save_expect": save_expect,
+        }
+        if session:
+            from . import api_session
+
+            result = api_session.run(session, cartridge, **options)
+        else:
+            result = run(cartridge, **options)
         typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
         if not result["ok"]:
             raise typer.Exit(int(ExitCode.ASSERTION))
@@ -9505,6 +9515,70 @@ def api_sample_cmd() -> None:
     from .api_cartridge import sample_text
 
     typer.echo(sample_text(), nl=False)
+
+
+api_session_app = typer.Typer(
+    name="session",
+    help=(
+        "Sessions `aua api run --session NAME` keeps: one user and install across runs, with "
+        "every call logged. Zip one to hand it over; unused ones go after two weeks."
+    ),
+    no_args_is_help=True,
+)
+api_app.add_typer(api_session_app, name="session")
+
+
+def _api_session_out(ctx: typer.Context, call: Callable[[], dict[str, Any]]) -> None:
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        typer.echo(json.dumps(call(), indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@api_session_app.command("list")
+def api_session_list_cmd(ctx: typer.Context) -> None:
+    """Every kept session: its backend, runs, what it kept, and when it will be removed."""
+    from . import api_session
+
+    _api_session_out(ctx, api_session.list_sessions)
+
+
+@api_session_app.command("export")
+def api_session_export_cmd(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="The session to hand over."),
+    out: str | None = typer.Option(
+        None, "--out", "-o", help="Zip to write (default: ./NAME.aua-session.zip)."
+    ),
+) -> None:
+    """Zip a session (its sign-in, call logs, flows and map) for someone else to continue."""
+    from . import api_session
+
+    _api_session_out(ctx, lambda: api_session.export(name, out))
+
+
+@api_session_app.command("import")
+def api_session_import_cmd(
+    ctx: typer.Context,
+    zip_path: str = typer.Argument(..., help="A zip `aua api session export` made."),
+) -> None:
+    """Unpack a handed-over session, then continue it with `aua api run FLOW --session NAME`."""
+    from . import api_session
+
+    _api_session_out(ctx, lambda: api_session.import_zip(zip_path))
+
+
+@api_session_app.command("delete")
+def api_session_delete_cmd(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="The session to remove, with its logs."),
+) -> None:
+    """Remove a session now, with its sign-in and logs."""
+    from . import api_session
+
+    _api_session_out(ctx, lambda: api_session.delete(name))
 
 
 api_map_app = typer.Typer(
