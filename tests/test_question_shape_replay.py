@@ -5,7 +5,12 @@ import asyncio
 
 import httpx
 from experiments.aua_controller.bounded_navigator import INPUT_TOOL, TAP_TOOL
-from experiments.aua_controller.replay_question_shapes import FlatReplay, label_of, matches
+from experiments.aua_controller.replay_question_shapes import (
+    BoundsReplay,
+    FlatReplay,
+    label_of,
+    matches,
+)
 from PIL import Image
 
 
@@ -24,7 +29,7 @@ class Client:
 def screen(tmp_path):
     path = tmp_path / "screen.png"
     Image.new("RGB", (90, 160), "white").save(path)
-    return {"observation": {"screen": {"package": "com.example"}, "meta": {"fingerprint": "f", "raw_image": str(path)},
+    return {"observation": {"screen": {"package": "com.example", "width": 90, "height": 160}, "meta": {"fingerprint": "f", "raw_image": str(path)},
                             "elements": [{"id": "el:send", "text": "Send", "clickable": True, "bounds": [0, 0, 10, 10]},
                                          {"id": "el:box", "text": "Ask", "editable": True, "clickable": True,
                                           "bounds": [0, 20, 90, 40]}]}}
@@ -47,3 +52,11 @@ def test_the_flat_list_is_one_question_and_types_the_quoted_text(tmp_path):
     label = label_of({"tool": INPUT_TOOL, "arguments": {"id": "el:box", "text": "Cat"}}, frame["observation"])
     assert matches(proposal, label, frame["observation"])
     assert not matches(proposal, {**label, "text": "Dog"}, frame["observation"])
+
+
+def test_the_bounds_variant_gives_each_element_its_place_and_the_screen_its_size(tmp_path):
+    navigator = BoundsReplay("Press Send.", api_key="k", tools=[TAP_TOOL], action_space="full")
+    shown = navigator._state(screen(tmp_path))["this_is_the_new_screen"]
+    assert shown["screen_size"] == [90, 160]
+    assert shown["elements"] == [{"text": "Send", "bounds": [0, 0, 10, 10]},
+                                 {"text": "Ask", "editable": True, "bounds": [0, 20, 90, 40]}]

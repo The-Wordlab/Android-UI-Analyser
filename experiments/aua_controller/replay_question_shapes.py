@@ -30,6 +30,7 @@ from experiments.aua_controller.bounded_navigator import (
     FIELD_SUFFIX,
     INPUT_TOOL,
     OPERATIONS,
+    READABLE,
     SCROLL_TOOL,
     TAP_TOOL,
     WAIT_TOOL,
@@ -41,7 +42,6 @@ from experiments.aua_controller.decisions_navigator import DecisionsNavigator
 from experiments.aua_controller.judgement import frame_screenshot, screenshot_index
 from experiments.aua_controller.run_realapp import CONTROLLER_TOOLS
 
-QUESTION_SHAPES = ("split", "flat")
 GOOD = {"PASS", "PASS_WITH_WARNING"}
 READS = {"analyze_screen", "session_progress", "expect_and_analyze", "app_status", "has"}
 
@@ -80,6 +80,28 @@ class FlatReplay(Replay):
             return None
         turn, answers = asked
         return turn, unfold(answers["move"])
+
+
+class BoundsReplay(Replay):
+    """The split questions, with each element's pixel bounds and the screen size, as the chat model gets them."""
+
+    def _state(self, compact):
+        state = super()._state(compact)
+        observation = (compact or {}).get("observation") or {}
+        screen = observation.get("screen") or {}
+        elements = []
+        for element in observation.get("elements") or []:
+            kept = {key: element[key] for key in READABLE if element.get(key) not in (None, "")}
+            if kept and element.get("bounds"):
+                kept["bounds"] = element["bounds"]
+            if kept:
+                elements.append(kept)
+        state["this_is_the_new_screen"] = {**state["this_is_the_new_screen"], "elements": elements,
+                                           "screen_size": [screen.get("width"), screen.get("height")]}
+        return state
+
+
+VARIANTS = {"split": Replay, "flat": FlatReplay, "bounds": BoundsReplay}
 
 
 def unfold(move) -> dict:
@@ -201,13 +223,13 @@ def offered_tools(controller: Path) -> list[str]:
 
 
 async def replay_row(controller: Path, goal: str, plan: list[dict], sampled: set[int], out: Path,
-                     key: str, gate: asyncio.Semaphore) -> list[dict]:
+                     key: str, gate: asyncio.Semaphore, variants: list[str]) -> list[dict]:
     tools = offered_tools(controller)
     name = "__".join(controller.parts[-5:-2])
-    navigators = {shape: (FlatReplay if shape == "flat" else Replay)(goal, api_key=key, tools=tools, action_space="full",
-                                manifest_path=controller.parent / "aua/manifest.json",
-                                transcript_path=out / shape / f"{name}.jsonl")
-                  for shape in QUESTION_SHAPES}
+    navigators = {shape: VARIANTS[shape](goal, api_key=key, tools=tools, action_space="full",
+                                         manifest_path=controller.parent / "aua/manifest.json",
+                                         transcript_path=out / shape / f"{name}.jsonl")
+                  for shape in variants}
     results = []
     for entry in plan:
         if entry["observation"] is None:
@@ -244,9 +266,9 @@ class _nothing:
         return False
 
 
-def summarise(results: list[dict]) -> dict:
+def summarise(results: list[dict], variants: list[str]) -> dict:
     summary = {}
-    for shape in QUESTION_SHAPES:
+    for shape in variants:
         acted = [r for r in results if r[shape]["acted"]]
         right = [r for r in acted if r[shape]["right_kind_and_operand"]]
         finished = [r for r in results if r[shape]["kind"] == "finished" and (r[shape]["gate"] or 0) >= 0.85]
@@ -276,8 +298,13 @@ async def main() -> int:
     parser.add_argument("--screens", type=int, default=400)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--parallel", type=int, default=8)
+    parser.add_argument("--variants", default="split,flat",
+                        help=f"comma-separated, from {', '.join(VARIANTS)}")
     parser.add_argument("--dry-run", action="store_true", help="sample and count; send nothing")
     args = parser.parse_args()
+    variants = args.variants.split(",")
+    if not variants or any(v not in VARIANTS for v in variants):
+        parser.error(f"--variants takes names from {', '.join(VARIANTS)}")
     import os
     key = os.environ.get("OPENAI_API_KEY", "")
     plans = [(controller, goal, plan_row(controller)) for controller, goal in rows(args.artifacts)]
@@ -296,11 +323,11 @@ async def main() -> int:
         by_row.setdefault(i, set()).add(step)
     args.out.mkdir(parents=True, exist_ok=True)
     gate = asyncio.Semaphore(args.parallel)
-    batches = await asyncio.gather(*(replay_row(plans[i][0], plans[i][1], plans[i][2], steps, args.out, key, gate)
+    batches = await asyncio.gather(*(replay_row(plans[i][0], plans[i][1], plans[i][2], steps, args.out, key, gate, variants)
                                      for i, steps in by_row.items()))
     results = [r for batch in batches for r in batch]
     (args.out / "screens.json").write_text(json.dumps(results, indent=1), encoding="utf-8")
-    summary = summarise(results)
+    summary = summarise(results, variants)
     (args.out / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     print(json.dumps(summary, indent=1))
     return 0

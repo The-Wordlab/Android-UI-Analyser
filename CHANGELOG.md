@@ -24,7 +24,10 @@ notes, so you can check for a newer version — and read what changed — withou
 - `experiments.aua_controller.replay_question_shapes` replays saved QA screens through the
   decision model with the split questions and with one flat list, scored against what each
   passing run did. On 643 screens, split acted correctly on 198 and flat on 134, with 10 and 9
-  wrong, so the navigator keeps the split questions.
+  wrong, so the navigator keeps the split questions. `--variants split,bounds` adds each
+  element's pixel bounds and the screen size, as the chat model gets them. On 641 screens bounds
+  acted correctly on 189 and wrongly on 9 to split's 194 and 11, inside split's own rerun spread
+  (198 and 10), for 11% more cost, so the decision model still gets no bounds.
 
 ## [0.37.0] - 2026-10-14
 
