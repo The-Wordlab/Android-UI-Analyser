@@ -6,7 +6,7 @@ The label is the move the run made on that screen. Only rows whose verdict was P
 PASS_WITH_WARNING are used, so the labels come from runs that got where they were going.
 
     aua config exec --env-file .env --require OPENAI_API_KEY -- \\
-        python -m experiments.aua_controller.replay_question_shapes --artifacts ../luzia-aua-qa/artifacts --out /tmp/ab
+        python -m experiments.aua_controller.replay_question_shapes --artifacts ../qa-repo/artifacts --out /tmp/ab
 
 It spends real Decisions requests: one per sampled screen per shape.
 
