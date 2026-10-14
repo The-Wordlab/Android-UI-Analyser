@@ -21,6 +21,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 - A `host-decisions.jsonl` row records `navigator_declined` when the navigator handed the step on,
   including a step it never asked about (`screenshot_unavailable`, `too_few_controls`, ...).
+- `experiments.aua_controller.replay_question_shapes` replays saved QA screens through the
+  decision model with the split questions and with one flat list, scored against what each
+  passing run did. On 643 screens, split acted correctly on 198 and flat on 134, with 10 and 9
+  wrong, so the navigator keeps the split questions.
 
 ## [0.37.0] - 2026-10-14
 
