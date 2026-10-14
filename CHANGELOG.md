@@ -38,6 +38,8 @@ notes, so you can check for a newer version — and read what changed — withou
 - A step that expects an error reply (`status: 404`) is no longer held to the endpoint's schema.
   The schema describes what the version decodes on success, so the error body produced false
   `optional_absent` entries, or `decode_fails` when a field was required.
+- A `save:` that reads a null stops the run there, as a missing value does. It used to be passed
+  on as the text `null`, so the next step called `/notes/null` and failed somewhere else.
 
 ## [0.36.1] - 2026-10-08
 

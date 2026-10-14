@@ -642,13 +642,18 @@ def run(
 
             saved: list[str] = []
             for name, source in (step.get("save") or {}).items():
+                got: Any = None
                 try:
-                    ctx.saved[name] = _extract(source, body, resp.headers, events)
-                    saved.append(name)
+                    got = _extract(source, body, resp.headers, events)
+                    why = f"`{source}` is null"
                 except KeyError:
+                    why = f"the response has no `{source}`"
+                if got is None:
                     row["ok"], failed = False, True
-                    row["error"] = f"could not save `{name}`: the response has no `{source}`"
+                    row["error"] = f"could not save `{name}`: {why}"
                     break
+                ctx.saved[name] = got
+                saved.append(name)
             if failed:
                 continue
             if saved:

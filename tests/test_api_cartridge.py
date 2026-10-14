@@ -168,6 +168,15 @@ def test_a_value_the_response_lacks_cannot_be_saved(cartridge: Path) -> None:
     assert result["steps"][2]["error"] == "not run: an earlier step failed"
 
 
+def test_a_null_cannot_be_saved_as_the_next_steps_id(cartridge: Path) -> None:
+    """A null id used to be sent on as the string "null" (`/v1/notes/null`)."""
+    result = _run(cartridge, NotesBackend({"note": {"id": None}}))
+
+    create = result["steps"][1]
+    assert create["error"] == "could not save `note_id`: `body.id` is null"
+    assert result["steps"][2]["error"] == "not run: an earlier step failed"
+
+
 def test_a_backend_change_a_client_would_feel_is_a_break(cartridge: Path) -> None:
     changed = NotesBackend({"note": {"pinned": _GONE, "created_at": 1700000000}, "tokens": "12"})
     result = _run(cartridge, changed)
