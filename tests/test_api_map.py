@@ -331,6 +331,21 @@ def test_an_error_response_the_flow_expects_is_not_held_to_the_success_schema(
     assert result["ok"] is True
 
 
+def test_a_204_has_no_body_to_decode(config: Path) -> None:
+    """Retrofit hands a 204 or 205 back without running the converter: nothing to decode."""
+    folder = Path(_new(config, "1.0.0")["path"])
+    flow = _fill(folder)
+    doc = {**FLOW, "steps": [{"id": "open", "method": "GET", "path": "/v1/notes/{{input.id}}"}]}
+    flow.write_text(yaml.safe_dump({**doc, "inputs": {"id": "n-1"}}, sort_keys=False))
+    transport = httpx.MockTransport(lambda request: httpx.Response(204))
+
+    result = run(flow, env={}, transport=transport)
+
+    (opened,) = result["steps"]
+    assert opened["status"] == 204 and opened["schema"] == "GET /v1/notes/{}"
+    assert "findings" not in opened and result["ok"] is True
+
+
 def test_a_version_the_backend_still_serves_passes(config: Path) -> None:
     flow = _fill(Path(_new(config, "1.0.0")["path"]))
     note = {"id": "n-1", "state": "draft", "pinned": None, "tags": [], "extra": 1}

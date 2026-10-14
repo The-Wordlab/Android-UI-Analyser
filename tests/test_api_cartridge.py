@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -166,6 +167,22 @@ def test_a_value_the_response_lacks_cannot_be_saved(cartridge: Path) -> None:
     create = result["steps"][1]
     assert create["error"] == "could not save `note_id`: the response has no `body.id`"
     assert result["steps"][2]["error"] == "not run: an earlier step failed"
+
+
+def test_now_is_the_current_utc_time(tmp_path: Path) -> None:
+    """Backends reject client timestamps far from their clock, so a fixed input goes stale."""
+    flow = tmp_path / "events.yaml"
+    step = {"id": "send", "method": "POST", "path": "/events", "json": {"at": "{{now}}"}}
+    flow.write_text(yaml.safe_dump({"cartridge": 1, "base_url": "https://x.test", "steps": [step]}))
+    sent: list[Any] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content)["at"])
+        return httpx.Response(200, json={})
+
+    assert run(flow, env={}, transport=httpx.MockTransport(handle))["ok"] is True
+    at = datetime.strptime(sent[0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    assert abs((datetime.now(UTC) - at).total_seconds()) < 5
 
 
 def test_a_null_cannot_be_saved_as_the_next_steps_id(cartridge: Path) -> None:

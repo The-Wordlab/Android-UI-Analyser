@@ -15,6 +15,7 @@
 #   {{env.NAME}}    read from the environment, never stored in this file
 #   {{input.NAME}}  a default under `inputs`, or `--input NAME=value`
 #   {{fresh.NAME}}  a new UUID each run, the same everywhere within that run
+#   {{now}}         the current UTC time, e.g. 2026-01-31T09:30:00Z
 #   {{NAME}}        a value an earlier step saved
 cartridge: 1
 name: example-notes-ask

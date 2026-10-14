@@ -18,6 +18,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -135,6 +136,8 @@ class _Context:
     fresh: dict[str, str] = field(default_factory=dict)
 
     def lookup(self, name: str) -> Any:
+        if name == "now":
+            return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         scope, _, key = name.partition(".")
         if scope == "env" and key:
             return self.env[key]
@@ -673,8 +676,9 @@ def run(
                 key = schema_key(row["method"], step["path"], schema)
                 row["schema"] = key
                 # The schema is what the version decodes on success; an error reply the flow
-                # expects (`status: 404`) goes down the app's error path instead.
-                if key and resp.is_success:
+                # expects (`status: 404`) goes down the app's error path instead, and a 204 or
+                # 205 has no body to decode.
+                if key and resp.is_success and resp.status_code not in (204, 205):
                     checked = check_response(schema[key].get("response") or {}, body, events)
                     absent = [f["where"] for f in checked if f["level"] == "absent"]
                     if absent:

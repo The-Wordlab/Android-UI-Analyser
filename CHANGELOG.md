@@ -21,6 +21,9 @@ notes, so you can check for a newer version — and read what changed — withou
   and the request it made (`navigator_call`, `navigator_attempt`), so a reader can pair a step with
   its decision request. Needs `OPENAI_API_KEY`. Jev (`typesafe`) shares the same bounded navigator.
 
+- `{{now}}` in an `aua api run` flow is the current UTC time (`2026-01-31T09:30:00Z`). A backend
+  that rejects a client timestamp far from its own clock made a fixed input fail days later.
+
 ### Changed
 
 - With `OPENAI_API_KEY` set, an OpenAI model request that combines function tools with reasoning
@@ -40,6 +43,8 @@ notes, so you can check for a newer version — and read what changed — withou
   `optional_absent` entries, or `decode_fails` when a field was required.
 - A `save:` that reads a null stops the run there, as a missing value does. It used to be passed
   on as the text `null`, so the next step called `/notes/null` and failed somewhere else.
+- A 204 or 205 reply is no longer checked against the endpoint's schema: there is no body to
+  decode, so a required field read as missing.
 
 ## [0.36.1] - 2026-10-08
 

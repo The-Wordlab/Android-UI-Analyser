@@ -1518,7 +1518,8 @@ steps:
 ```
 
 Each step must answer with its `status` (any 2xx by default) and yield every value it `save`s;
-otherwise the run stops there. `--save-expect` writes each response's shape (field names and
+otherwise the run stops there (a saved null counts as missing). `{{now}}` is the current UTC
+time, for backends that reject a stale client timestamp. `--save-expect` writes each response's shape (field names and
 types, never values) to an `expect:` block at the end of the file. A later run reports a field
 that went missing or changed type as a `break` and exits 8; a field that is now null is a
 `warn`, and new fields are fine. Each step reports its status, time (first byte for a stream)
