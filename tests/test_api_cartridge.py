@@ -194,6 +194,80 @@ def test_a_null_cannot_be_saved_as_the_next_steps_id(cartridge: Path) -> None:
     assert result["steps"][2]["error"] == "not run: an earlier step failed"
 
 
+def test_carried_values_keep_one_install_and_skip_its_sign_in(cartridge: Path) -> None:
+    saved: dict[str, Any] = {}
+    install: dict[str, str] = {}
+    first, second = NotesBackend(), NotesBackend()
+    _run(cartridge, first, saved=saved, install=install)
+    result = _run(cartridge, second, saved=saved, install=install)
+
+    assert result["ok"] is True, result
+    assert result["steps"][0] == {
+        "id": "session",
+        "method": "POST",
+        "path": "/v1/sessions/anonymous",
+        "ok": True,
+        "skipped": "once: token already known",
+    }
+    # The second run is the same install, signed in with the token the first run got.
+    assert [r.url.path for r in second.requests] == [
+        "/v1/notes",
+        "/v1/notes/n-1",
+        "/v1/assistant/replies",
+    ]
+    assert second.requests[0].headers["X-Install-Id"] == first.requests[0].headers["X-Install-Id"]
+    assert second.requests[0].headers["Authorization"] == first.requests[1].headers["Authorization"]
+    assert install == {"id": first.requests[0].headers["X-Install-Id"]}
+    assert set(saved) == {"token", "note_id", "reply_id"}
+
+
+def test_once_needs_something_to_save(tmp_path: Path) -> None:
+    flow = tmp_path / "once.yaml"
+    step = {"id": "sign_in", "method": "POST", "path": "/sign-in", "once": True}
+    flow.write_text(yaml.safe_dump({"cartridge": 1, "steps": [step]}))
+
+    with pytest.raises(UsageError, match="`once: true` needs `save:`"):
+        api_cartridge.load(flow)
+
+
+def test_a_step_can_save_what_it_sent(tmp_path: Path) -> None:
+    """A later run continues a conversation with the question this one asked."""
+    flow = tmp_path / "ask.yaml"
+    step = {
+        "id": "ask",
+        "method": "POST",
+        "path": "/ask",
+        "json": {"question": "{{input.q}}"},
+        "save": {"asked": "request.json.question"},
+    }
+    doc = {"cartridge": 1, "base_url": "https://x.test", "inputs": {"q": "Why?"}, "steps": [step]}
+    flow.write_text(yaml.safe_dump(doc))
+    saved: dict[str, Any] = {}
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+    assert run(flow, env={}, transport=transport, saved=saved)["ok"] is True
+    assert saved == {"asked": "Why?"}
+
+
+def test_a_log_holds_every_call_in_full_with_no_secret_or_token(cartridge: Path) -> None:
+    exchanges: list[dict[str, Any]] = []
+    _run(cartridge, NotesBackend(), exchanges=exchanges, max_chars=10)
+
+    assert [e["step"] for e in exchanges] == ["session", "create_note", "read_note", "ask"]
+    create = exchanges[1]
+    assert create["request"]["method"] == "POST"
+    assert create["request"]["url"] == "https://api.example.com/v1/notes"
+    assert create["request"]["json"] == {"text": "Buy oat milk and coffee", "pinned": False}
+    assert create["request"]["headers"]["Authorization"] == "***"
+    assert create["response"]["status"] == 201
+    assert create["response"]["body"]["text"] == "Buy oat milk and coffee"
+    # Not shortened like the printed preview: the whole stream is there.
+    assert [e["event"] for e in exchanges[3]["response"]["events"]] == ["delta", "delta", "done"]
+    logged = json.dumps(exchanges)
+    assert ENV["EXAMPLE_CLIENT_KEY"] not in logged
+    assert "tok-" not in logged
+
+
 def test_a_backend_change_a_client_would_feel_is_a_break(cartridge: Path) -> None:
     changed = NotesBackend({"note": {"pinned": _GONE, "created_at": 1700000000}, "tokens": "12"})
     result = _run(cartridge, changed)

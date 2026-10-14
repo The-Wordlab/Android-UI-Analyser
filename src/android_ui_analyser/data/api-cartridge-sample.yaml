@@ -12,11 +12,12 @@
 #   aua api run FILE --save-expect                        # record the response shapes once
 #
 # Templates:
-#   {{env.NAME}}    read from the environment, never stored in this file
-#   {{input.NAME}}  a default under `inputs`, or `--input NAME=value`
-#   {{fresh.NAME}}  a new UUID each run, the same everywhere within that run
-#   {{now}}         the current UTC time, e.g. 2026-01-31T09:30:00Z
-#   {{NAME}}        a value an earlier step saved
+#   {{env.NAME}}     read from the environment, never stored in this file
+#   {{input.NAME}}   a default under `inputs`, or `--input NAME=value`
+#   {{fresh.NAME}}   a new UUID each run, the same everywhere within that run
+#   {{install.NAME}} a UUID kept for the whole `--session`; without one, new each run
+#   {{now}}          the current UTC time, e.g. 2026-01-31T09:30:00Z
+#   {{NAME}}         a value an earlier step saved
 cartridge: 1
 name: example-notes-ask
 about: Start an anonymous session, save a note, read it back, then ask the assistant about it.
@@ -27,15 +28,17 @@ inputs:
   question: What do I need to buy?
 headers:                                   # sent with every step
   X-Client-Key: "{{env.EXAMPLE_CLIENT_KEY}}"
-  X-Install-Id: "{{fresh.install}}"        # a new install, so a new user, every run
+  X-Install-Id: "{{install.id}}"           # one install, so one user, per session
   X-App-Version: 3.2.0
 steps:
   - id: session
     method: POST
     path: /v1/sessions/anonymous
     json: {platform: android}
+    once: true                             # skipped when a --session already holds `token`
     save:
-      token: body.access_token             # body.<field>, header.<Name> or events.<event>.<field>
+      token: body.access_token             # body.<field>, header.<Name>, events.<event>.<field>
+                                           # or request.json.<field> (what this step sent)
   - id: create_note
     method: POST
     path: /v1/notes

@@ -99,8 +99,13 @@ def load(path: str | Path) -> dict[str, Any]:
             if not _SAVE_NAME.match(str(name)) or not isinstance(source, str):
                 raise UsageError(
                     f"{where}: save `{name}` needs a plain name and a source such as "
-                    "`body.id`, `header.Location` or `events.done.id`"
+                    "`body.id`, `header.Location`, `events.done.id` or `request.json.text`"
                 )
+        if "once" in step and (not isinstance(step["once"], bool) or not step.get("save")):
+            raise UsageError(
+                f"{where}: `once: true` needs `save:`; the step is skipped when every value it "
+                "saves is already known, e.g. a sign-in whose token a `--session` kept"
+            )
     for key in ("headers", "inputs"):
         if key in doc and not isinstance(doc[key], dict):
             raise UsageError(f"top-level `{key}` must be a mapping")
@@ -134,6 +139,7 @@ class _Context:
     inputs: dict[str, Any]
     saved: dict[str, Any] = field(default_factory=dict)
     fresh: dict[str, str] = field(default_factory=dict)
+    install: dict[str, str] = field(default_factory=dict)
 
     def lookup(self, name: str) -> Any:
         if name == "now":
@@ -145,6 +151,8 @@ class _Context:
             return self.inputs[key]
         if scope == "fresh" and key:
             return self.fresh.setdefault(key, str(uuid.uuid4()))
+        if scope == "install" and key:
+            return self.install.setdefault(key, str(uuid.uuid4()))
         if name in self.saved:
             return self.saved[name]
         raise _Unsaved(name)
@@ -208,11 +216,19 @@ def _dig(value: Any, parts: list[str]) -> Any:
     return value
 
 
-def _extract(source: str, body: Any, headers: httpx.Headers, events: list[tuple[str, Any]]) -> Any:
+def _extract(
+    source: str,
+    body: Any,
+    headers: httpx.Headers,
+    events: list[tuple[str, Any]],
+    sent: dict[str, Any],
+) -> Any:
     kind, _, rest = source.partition(".")
     parts = rest.split(".") if rest else []
     if kind == "body":
         return _dig(body, parts)
+    if kind == "request":
+        return _dig(sent, parts)
     if kind == "header" and rest:
         if rest not in headers:
             raise KeyError(rest)
@@ -490,6 +506,42 @@ def _preview(body: Any, raw: str, events: list[tuple[str, Any]], secrets: list[s
     return str(_redact(raw, secrets))
 
 
+def _exchange(
+    step: dict[str, Any],
+    row: dict[str, Any],
+    url: str,
+    headers: dict[str, str],
+    query: Any,
+    payload: dict[str, Any],
+    resp: httpx.Response,
+    body: Any,
+    raw: str,
+    events: list[tuple[str, Any]],
+    ctx: _Context,
+) -> dict[str, Any]:
+    """One step's request and response in full for a log, every secret and token hidden."""
+    request: dict[str, Any] = {"method": row["method"], "url": url, "headers": headers}
+    if query:
+        request["query"] = query
+    if "json" in payload:
+        request["json"] = payload["json"]
+    elif "content" in payload:
+        request["body"] = payload["content"].decode(errors="replace")
+    response: dict[str, Any] = {"status": resp.status_code, "ms": row["ms"]}
+    response["headers"] = dict(resp.headers)
+    if events:
+        response["events"] = [{"event": name, "data": data} for name, data in events]
+    elif body is not None:
+        response["body"] = body
+    elif raw:
+        response["text"] = raw
+    tokens = [v for k, v in ctx.saved.items() if _SECRET_KEY.search(k) and isinstance(v, str)]
+    secrets = [v for v in [*ctx.env.values(), *tokens] if len(v) >= 4]
+    out = {"step": step["id"], "screen": step.get("screen"), "request": request}
+    out["response"] = response
+    return {k: v for k, v in _redact(out, secrets).items() if v is not None}
+
+
 def run(
     path: str | Path,
     *,
@@ -500,12 +552,20 @@ def run(
     max_chars: int = 2000,
     save_expect: bool = False,
     transport: httpx.BaseTransport | None = None,
+    saved: dict[str, Any] | None = None,
+    install: dict[str, str] | None = None,
+    exchanges: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Send every step in order and report what each response looked like.
 
     A step fails, and the run stops there, when its status is not the step's ``status`` (any
     2xx by default) or a value it must ``save`` is absent. Shape differences against the
     file's ``expect`` block are reported per step without stopping the run.
+
+    ``saved`` and ``install`` carry one client install across runs: the values earlier runs
+    saved and the ids ``{{install.NAME}}`` made. The run reads and updates both. A step marked
+    ``once`` is skipped when every value it saves is already there. ``exchanges`` receives each
+    request and response in full, secrets hidden, for a log.
     """
     doc = load(path)
     env = os.environ if env is None else env
@@ -550,6 +610,10 @@ def run(
     mapped = version_context(doc["_path"])
     schema = mapped["schema"] if mapped else {}
     ctx = _Context(env={n: env[n] for n in env_names}, inputs=declared)
+    if saved is not None:
+        ctx.saved = saved
+    if install is not None:
+        ctx.install = install
     secrets = [v for v in ctx.env.values() if len(v) >= 4]
     expect_doc = doc.get("expect") or {}
     shared_headers = doc.get("headers") or {}
@@ -573,6 +637,10 @@ def run(
             if failed:
                 row["ok"] = False
                 row["error"] = "not run: an earlier step failed"
+                continue
+            if step.get("once") and all(name in ctx.saved for name in step["save"]):
+                row["ok"] = True
+                row["skipped"] = "once: " + ", ".join(step["save"]) + " already known"
                 continue
             try:
                 url = base + _render_path(step["path"], ctx)
@@ -636,6 +704,10 @@ def run(
                 if clock:
                     row["event_ms"] = clock.first
             row["response"] = _clip(_preview(body, raw, events, secrets), max_chars)
+            if exchanges is not None:
+                exchanges.append(
+                    _exchange(step, row, url, headers, query, payload, resp, body, raw, events, ctx)
+                )
 
             want = step.get("status")
             if (resp.status_code != want) if want is not None else not resp.is_success:
@@ -643,11 +715,11 @@ def run(
                 row["error"] = f"status {resp.status_code}, expected {want or '2xx'}"
                 continue
 
-            saved: list[str] = []
+            kept: list[str] = []
             for name, source in (step.get("save") or {}).items():
                 got: Any = None
                 try:
-                    got = _extract(source, body, resp.headers, events)
+                    got = _extract(source, body, resp.headers, events, payload)
                     why = f"`{source}` is null"
                 except KeyError:
                     why = f"the response has no `{source}`"
@@ -656,11 +728,11 @@ def run(
                     row["error"] = f"could not save `{name}`: {why}"
                     break
                 ctx.saved[name] = got
-                saved.append(name)
+                kept.append(name)
             if failed:
                 continue
-            if saved:
-                row["saved"] = saved
+            if kept:
+                row["saved"] = kept
 
             actual: dict[str, Any] = (
                 {"events": events_shape(events)} if is_stream else {"body": shape(body)}
