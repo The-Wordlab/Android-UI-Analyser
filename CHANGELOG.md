@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-14
+
 ### Fixed
 
 - `run_realapp`'s first look after setup flows or flags now keeps a screenshot. The decision
@@ -1851,5 +1853,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.36.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.36.1
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.37.0...HEAD
 [0.37.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.37.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.38.0
