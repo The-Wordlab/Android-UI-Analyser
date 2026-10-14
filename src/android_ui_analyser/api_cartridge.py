@@ -542,7 +542,7 @@ def run(
             hint="Add them under `inputs:` with a default value.",
         )
 
-    from .api_map import endpoint_key, version_context
+    from .api_map import schema_key, version_context
 
     mapped = version_context(doc["_path"])
     schema = mapped["schema"] if mapped else {}
@@ -665,9 +665,11 @@ def run(
             if "events" in wanted:
                 findings += _compare_events(wanted["events"], actual.get("events") or {})
             if mapped:
-                key = endpoint_key(row["method"], step["path"])
-                row["schema"] = key if key in schema else None
-                if key in schema:
+                key = schema_key(row["method"], step["path"], schema)
+                row["schema"] = key
+                # The schema is what the version decodes on success; an error reply the flow
+                # expects (`status: 404`) goes down the app's error path instead.
+                if key and resp.is_success:
                     checked = check_response(schema[key].get("response") or {}, body, events)
                     absent = [f["where"] for f in checked if f["level"] == "absent"]
                     if absent:

@@ -30,6 +30,15 @@ notes, so you can check for a newer version — and read what changed — withou
   used to depend on OpenRouter even with a company key, and an exhausted OpenRouter balance
   stopped every judgement. Without the key nothing changes.
 
+### Fixed
+
+- `aua api run` checks a step against its version's schema when the flow calls a constant path:
+  `GET /notes/inbox` is now checked as the schema's `GET /notes/{}` instead of being reported
+  under `not_in_schema`. An exact entry still wins.
+- A step that expects an error reply (`status: 404`) is no longer held to the endpoint's schema.
+  The schema describes what the version decodes on success, so the error body produced false
+  `optional_absent` entries, or `decode_fails` when a field was required.
+
 ## [0.36.1] - 2026-10-08
 
 ### Fixed

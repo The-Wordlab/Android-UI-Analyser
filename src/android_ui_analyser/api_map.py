@@ -62,6 +62,27 @@ def endpoint_key(method: str, path: str) -> str:
     return operation_key(method, normalize_path(_TEMPLATE.sub("{x}", path)))
 
 
+def schema_key(method: str, path: str, schema: dict[str, Any]) -> str | None:
+    """The schema entry a request is checked against: its own key, else the entry whose `{}`
+    segments cover the request's literal ones (`GET /notes/inbox` is `GET /notes/{}`)."""
+    key = endpoint_key(method, path)
+    if key in schema:
+        return key
+    verb, _, route = key.partition(" ")
+    parts = route.split("/")
+
+    def covers(candidate: str) -> bool:
+        their_verb, _, their_route = candidate.partition(" ")
+        theirs = their_route.split("/")
+        return (
+            their_verb == verb
+            and len(theirs) == len(parts)
+            and all(seg in ("{}", mine) for seg, mine in zip(theirs, parts, strict=True))
+        )
+
+    return min(filter(covers, schema), key=lambda c: c.count("{}"), default=None)
+
+
 def _client(config: dict[str, Any], name: str) -> dict[str, Any]:
     for client in config["clients"]:
         if client["name"] == name:

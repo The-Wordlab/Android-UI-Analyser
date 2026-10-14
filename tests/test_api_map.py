@@ -297,6 +297,40 @@ def test_a_flow_in_a_version_folder_is_checked_against_that_version(config: Path
     assert result["not_in_schema"] == ["POST /v1/notes/{{id}}/share"]
 
 
+def test_a_literal_path_segment_is_checked_against_the_templated_endpoint(config: Path) -> None:
+    """Apps call constant paths too; `/v1/notes/inbox` is the `GET /v1/notes/{id}` the app makes."""
+    folder = Path(_new(config, "1.0.0")["path"])
+    flow = _fill(folder)
+    doc = {**FLOW, "steps": [{"id": "inbox", "method": "GET", "path": "/v1/notes/inbox"}]}
+    flow.write_text(yaml.safe_dump(doc, sort_keys=False))
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"title": "x"}))
+
+    result = run(flow, env={}, transport=transport)
+
+    (inbox,) = result["steps"]
+    assert inbox["schema"] == "GET /v1/notes/{}"
+    assert [f["where"] for f in inbox["findings"]] == ["body.id"]
+    assert result["not_in_schema"] == []
+
+
+def test_an_error_response_the_flow_expects_is_not_held_to_the_success_schema(
+    config: Path,
+) -> None:
+    """A step that expects a 404 gets an error body; the version's schema describes success."""
+    folder = Path(_new(config, "1.0.0")["path"])
+    flow = _fill(folder)
+    gone = {"id": "gone", "method": "GET", "path": "/v1/notes/{{input.id}}", "status": 404}
+    doc = {**FLOW, "inputs": {"id": "deleted"}, "steps": [gone]}
+    flow.write_text(yaml.safe_dump(doc, sort_keys=False))
+    transport = httpx.MockTransport(lambda request: httpx.Response(404, json={"detail": "nope"}))
+
+    result = run(flow, env={}, transport=transport)
+
+    (gone,) = result["steps"]
+    assert gone["ok"] is True and "findings" not in gone and "optional_absent" not in gone
+    assert result["ok"] is True
+
+
 def test_a_version_the_backend_still_serves_passes(config: Path) -> None:
     flow = _fill(Path(_new(config, "1.0.0")["path"]))
     note = {"id": "n-1", "state": "draft", "pinned": None, "tags": [], "extra": 1}
