@@ -283,10 +283,11 @@ def test_a_host_decision_names_its_navigator_and_the_request_it_made(tmp_path):
 
     class Navigator:
         engine, provider, model = "decisions", "openai", "gpt-6-luna"
-        last_decision = None
+        last_decision = last_declined = None
 
         async def __call__(self, latest):
             self.last_decision = next(turns, None)
+            self.last_declined = None if (self.last_decision or {}).get("call") else "request_failed"
             return action() if self.last_decision and self.last_decision.get("call") else None
 
     async def execute(tool, arguments):
@@ -296,3 +297,4 @@ def test_a_host_decision_names_its_navigator_and_the_request_it_made(tmp_path):
     decisions = records(tmp_path / "run/host-decisions.jsonl")
     assert [(d["engine"], d["provider"], d["model"]) for d in decisions][0] == ("decisions", "openai", "gpt-6-luna")
     assert [(d.get("navigator_call"), d.get("navigator_attempt")) for d in decisions][:2] == [(1, 1), (None, 2)]
+    assert [d.get("navigator_declined") for d in decisions][:2] == [None, "request_failed"]

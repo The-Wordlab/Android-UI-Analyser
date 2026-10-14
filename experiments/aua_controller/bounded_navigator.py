@@ -364,6 +364,7 @@ class BoundedNavigator:
         self._last_activity: str | None = None
         self.proposals: list[dict[str, Any]] = []
         self.declined: dict[str, int] = {}
+        self.last_declined: str | None = None  # why the latest step was handed on, if it was
         self.requests = 0
         self.input_tokens = 0
         self.request_ms: list[float] = []
@@ -371,6 +372,7 @@ class BoundedNavigator:
 
     def _decline(self, why: str) -> None:
         self.declined[why] = self.declined.get(why, 0) + 1
+        self.last_declined = why
 
     def observed(self, tool: str, arguments: Mapping[str, Any] | None = None) -> None:
         """Record what the run did on this step, in the words the model itself answers in.
@@ -415,7 +417,7 @@ class BoundedNavigator:
     async def __call__(self, result: Any) -> dict[str, Any] | None:
         from experiments.aua_controller.compaction import compact_frame
 
-        self.last_decision = None
+        self.last_decision = self.last_declined = None
         compact = compact_frame(result, keep_ids=True)
         observation = compact.get("observation") if isinstance(compact, Mapping) else None
         meta = observation.get("meta") if isinstance(observation, Mapping) else None

@@ -74,7 +74,9 @@ def test_missing_image_and_unoffered_tool_never_make_a_paid_request(screen):
     client = Client()
     no_image = copy.deepcopy(screen)
     no_image["observation"]["meta"].pop("raw_image")
-    assert asyncio.run(nav(client)(no_image)) is None
+    navigator = nav(client)
+    assert asyncio.run(navigator(no_image)) is None
+    assert navigator.last_declined == "screenshot_unavailable", "the step says why it was never asked"
     navigator = DecisionsNavigator("Open settings", api_key="test", http_client=client, tools=["session_finish"])
     assert asyncio.run(navigator(screen)) is None
     assert not client.calls

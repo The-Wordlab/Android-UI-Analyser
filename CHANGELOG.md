@@ -11,6 +11,17 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- `run_realapp`'s first look after setup flows or flags now keeps a screenshot. The decision
+  model answers from a screenshot, so it never saw the first step of such a run (a Simplification
+  row always has setup), and the review had no "before" frame for it.
+
+### Added
+
+- A `host-decisions.jsonl` row records `navigator_declined` when the navigator handed the step on,
+  including a step it never asked about (`screenshot_unavailable`, `too_few_controls`, ...).
+
 ## [0.37.0] - 2026-10-14
 
 ### Added

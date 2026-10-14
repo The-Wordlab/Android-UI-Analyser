@@ -440,6 +440,10 @@ async def run_agent(
                     if isinstance(provider_turn, dict):
                         decision["navigator_call"] = provider_turn.get("call")
                         decision["navigator_attempt"] = provider_turn.get("attempt")
+                    # A step the navigator handed on, even one it never asked about, says why.
+                    declined = getattr(host_next, "last_declined", None)
+                    if isinstance(declined, str):
+                        decision["navigator_declined"] = declined
                     decision["duration_ms"] = (time.monotonic() - tick) * 1000
                     report["host_decision_ms"].append(decision["duration_ms"])
                     _append(output / "host-decisions.jsonl", decision)
