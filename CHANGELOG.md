@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-10-15
+
 ### Added
 
 - An API cartridge step `- flow: sign-in.yaml` runs that cartridge's steps in its place, with
@@ -1862,5 +1864,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.37.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.37.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.38.0...HEAD
 [0.38.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.38.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.39.0...HEAD
+[0.39.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.39.0
