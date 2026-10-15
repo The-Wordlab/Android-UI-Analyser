@@ -249,6 +249,82 @@ def test_a_step_can_save_what_it_sent(tmp_path: Path) -> None:
     assert saved == {"asked": "Why?"}
 
 
+def test_a_flow_step_runs_a_shared_cartridge_in_its_place(tmp_path: Path) -> None:
+    """A sign-in written once: every flow starts with it, and it also runs on its own."""
+    sign_in = {
+        "cartridge": 1,
+        "env": ["EXAMPLE_CLIENT_KEY"],
+        "inputs": {"who": "guest"},
+        "headers": {"X-Client-Key": "{{env.EXAMPLE_CLIENT_KEY}}"},
+        "steps": [
+            {
+                "id": "sign_in",
+                "method": "POST",
+                "path": "/sign-in",
+                "json": {"as": "{{input.who}}"},
+                "once": True,
+                "save": {"token": "body.token"},
+            }
+        ],
+    }
+    add_note = {
+        "cartridge": 1,
+        "base_url": "https://notes.example.test",
+        "steps": [
+            {"flow": "sign-in.yaml"},
+            {
+                "id": "add",
+                "method": "POST",
+                "path": "/notes",
+                "headers": {"Authorization": "Bearer {{token}}"},
+            },
+        ],
+    }
+    for name, doc in (("sign-in.yaml", sign_in), ("add-note.yaml", add_note)):
+        (tmp_path / name).write_text(yaml.safe_dump(doc))
+    sent: list[httpx.Request] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={"token": "tok-1"})
+
+    transport = httpx.MockTransport(backend)
+    flow = tmp_path / "add-note.yaml"
+    result = run(flow, env=ENV, inputs={"who": "tester"}, transport=transport)
+
+    assert result["ok"] is True, result
+    assert [s["id"] for s in result["steps"]] == ["sign_in", "add"]
+    # The shared step sends what it sends on its own: its headers, its input.
+    assert sent[0].headers["X-Client-Key"] == ENV["EXAMPLE_CLIENT_KEY"]
+    assert json.loads(sent[0].content) == {"as": "tester"}
+    assert "X-Client-Key" not in sent[1].headers
+    assert sent[1].headers["Authorization"] == "Bearer tok-1"
+    with pytest.raises(UsageError, match="EXAMPLE_CLIENT_KEY"):
+        run(flow, env={}, transport=transport)
+    alone = run(tmp_path / "sign-in.yaml", env=ENV, base_url="https://x.test", transport=transport)
+    assert [s["id"] for s in alone["steps"]] == ["sign_in"]
+
+
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        ({"flow": "loop.yaml"}, "includes itself"),
+        ({"flow": "../sign-in.yaml"}, "in the same folder"),
+        ({"flow": "common/sign-in.yaml"}, "in the same folder"),
+        ({"flow": "sign-in.yaml", "once": True}, "in the same folder"),
+        ({"flow": "missing.yaml"}, "no cartridge at"),
+    ],
+)
+def test_a_flow_step_names_one_cartridge_beside_it(
+    tmp_path: Path, step: dict[str, Any], message: str
+) -> None:
+    flow = tmp_path / "loop.yaml"
+    flow.write_text(yaml.safe_dump({"cartridge": 1, "steps": [step]}))
+
+    with pytest.raises(UsageError, match=message):
+        api_cartridge.load(flow)
+
+
 def test_a_log_holds_every_call_in_full_with_no_secret_or_token(cartridge: Path) -> None:
     exchanges: list[dict[str, Any]] = []
     _run(cartridge, NotesBackend(), exchanges=exchanges, max_chars=10)

@@ -19,6 +19,9 @@
 #   {{install.NAME}} a UUID kept for the whole `--session`; without one, new each run
 #   {{now}}          the current UTC time, e.g. 2026-01-31T09:30:00Z
 #   {{NAME}}         a value an earlier step saved
+#
+# A step `- flow: sign-in.yaml` runs that cartridge's steps in its place, so a sign-in every
+# flow starts with is written once, in a file beside them that also runs on its own.
 cartridge: 1
 name: example-notes-ask
 about: Start an anonymous session, save a note, read it back, then ask the assistant about it.

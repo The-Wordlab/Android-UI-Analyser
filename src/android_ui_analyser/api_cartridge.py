@@ -56,8 +56,12 @@ def sample_text() -> str:
 # --- loading -----------------------------------------------------------------------------------
 
 
-def load(path: str | Path) -> dict[str, Any]:
-    """Read and check a cartridge; every mistake is a usage error that names the step."""
+def load(path: str | Path, _within: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """Read and check a cartridge; every mistake is a usage error that names the step.
+
+    A ``flow: other.yaml`` step is replaced by that cartridge's steps, so a sign-in every flow
+    starts with is written once. ``_within`` holds the cartridges being loaded around this one.
+    """
     p = Path(path).expanduser()
     if not p.is_file():
         raise UsageError(f"no cartridge at {p}", hint="Start one with `aua api sample > FILE`.")
@@ -73,6 +77,10 @@ def load(path: str | Path) -> dict[str, Any]:
     steps = doc.get("steps")
     if not isinstance(steps, list) or not steps:
         raise UsageError(f"{p} has no steps")
+    for key in ("headers", "inputs"):
+        if key in doc and not isinstance(doc[key], dict):
+            raise UsageError(f"top-level `{key}` must be a mapping")
+    steps = doc["steps"] = _include(doc, p, (*_within, p.resolve()))
     seen: set[str] = set()
     for n, step in enumerate(steps, 1):
         where = f"step {n}"
@@ -106,14 +114,42 @@ def load(path: str | Path) -> dict[str, Any]:
                 f"{where}: `once: true` needs `save:`; the step is skipped when every value it "
                 "saves is already known, e.g. a sign-in whose token a `--session` kept"
             )
-    for key in ("headers", "inputs"):
-        if key in doc and not isinstance(doc[key], dict):
-            raise UsageError(f"top-level `{key}` must be a mapping")
     expect = doc.get("expect")
     if expect is not None and not isinstance(expect, dict):
         raise UsageError("`expect` must map step ids to response shapes")
     doc["_path"] = str(p)
     return doc
+
+
+def _include(doc: dict[str, Any], p: Path, within: tuple[Path, ...]) -> list[Any]:
+    """The steps, with each ``flow:`` step replaced by the steps of the cartridge it names.
+
+    Those steps send what they send on their own: their file's headers go onto each of them,
+    and its inputs, secrets and expected shapes join this file's, which win on a clash.
+    ``doc["_includes"]`` lists every cartridge pulled in, so a session can keep a copy.
+    """
+    steps: list[Any] = []
+    for step in doc["steps"]:
+        if not (isinstance(step, dict) and "flow" in step):
+            steps.append(step)
+            continue
+        ref = step["flow"]
+        if set(step) != {"flow"} or not isinstance(ref, str) or Path(ref).name != ref:
+            raise UsageError(
+                f"`flow: {ref}` takes the file name of a cartridge in the same folder and "
+                "nothing else, e.g. `- flow: sign-in.yaml`"
+            )
+        target = p.parent / ref
+        if target.resolve() in within:
+            raise UsageError(f"{p.name} includes itself through `flow: {ref}`")
+        inner = load(target, within)
+        top = inner.get("headers") or {}
+        steps += [{**s, "headers": {**top, **(s.get("headers") or {})}} for s in inner["steps"]]
+        for key in ("inputs", "expect"):
+            doc[key] = {**(inner.get(key) or {}), **(doc.get(key) or {})}
+        doc["env"] = [*(doc.get("env") or []), *(inner.get("env") or [])]
+        doc["_includes"] = [*doc.get("_includes", []), *inner.get("_includes", []), str(target)]
+    return steps
 
 
 def _references(node: Any) -> set[str]:
