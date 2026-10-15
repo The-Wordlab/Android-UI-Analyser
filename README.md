@@ -1530,6 +1530,25 @@ recorded values, so it can be handed to whoever changes the backend.
 A stream step also reports `event_ms`: when each kind of event first arrived, so the time to the
 first reply text (a `delta` event, say) is visible apart from the stream merely starting.
 
+### Write a shared sign-in once (`flow:`)
+
+A step that says `- flow: sign-in.yaml` is replaced by that cartridge's steps, so the sign-in
+every flow starts with lives in one file beside them:
+
+```yaml
+steps:
+  - flow: sign-in.yaml      # its steps, sent with its own headers, inputs and secrets
+  - id: create_note
+    method: POST
+    path: /v1/notes
+    headers: {Authorization: "Bearer {{token}}"}
+```
+
+The shared file is a cartridge like any other, so it also runs on its own: `aua api run
+sign-in.yaml --session dev` signs in and does nothing else, and every later run with
+`--session dev` is that user. A session keeps a copy of the shared file beside its flow, so a
+handed-over session still finds it.
+
 ### Keep one user across runs (`--session`)
 
 Without a session every run is a new install and a new user. With one, the next run is the same

@@ -170,6 +170,23 @@ def test_a_handed_over_session_continues_the_same_chat(tmp_path: Path) -> None:
     assert backend.threads == {"t-0": ["Hello", "Hello"]}
 
 
+def test_a_handed_over_flow_still_finds_the_sign_in_it_starts_with(tmp_path: Path) -> None:
+    mine, theirs, backend = tmp_path / "mine", tmp_path / "theirs", ChatBackend()
+    _flow(tmp_path / "flows", {**CHAT, "steps": CHAT["steps"][:1]}, "sign-in.yaml")
+    chat = {**CHAT, "steps": [{"flow": "sign-in.yaml"}, CHAT["steps"][1]]}
+    _run(mine, _flow(tmp_path / "flows", chat), backend)
+
+    zipped = api_session.export("bug-123", tmp_path / "bug.zip", root=mine)
+    imported = api_session.import_zip(zipped["zip"], root=theirs)
+    flows = [Path(f) for f in imported["flows"]]
+    result = _run(theirs, flows[0], backend)
+
+    assert [f.name for f in flows] == ["chat.yaml", "sign-in.yaml"]
+    assert result["ok"] is True, result
+    assert result["steps"][0]["skipped"] == "once: token already known"
+    assert len(backend.users) == 1
+
+
 def test_an_import_never_writes_outside_its_session(tmp_path: Path) -> None:
     zipped = tmp_path / "evil.zip"
     with zipfile.ZipFile(zipped, "w") as zf:

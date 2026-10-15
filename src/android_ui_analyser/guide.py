@@ -636,7 +636,9 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         "steps `save`d and the `{{install.NAME}}` ids, so a step marked `once: true` (the "
         "sign-in) is skipped and the next run goes on in the same chat, against the same "
         "backend. Each run's calls are logged in full under the session; `aua api session "
-        "export NAME` zips it, sign-in included, for someone else to `import` and continue.",
+        "export NAME` zips it, sign-in included, for someone else to `import` and continue. A "
+        "`- flow: sign-in.yaml` step runs that cartridge's steps in its place, so a sign-in "
+        "every flow starts with is written once and also runs on its own.",
     ),
     (
         "Simulate one app version against a backend with a versioned map",

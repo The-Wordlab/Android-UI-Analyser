@@ -164,6 +164,8 @@ def _copy_flow(session: Session, flow: Path) -> Path:
         dest = version / "flows" / flow.name
     _mkdir(dest.parent)
     shutil.copyfile(flow, dest)
+    for shared in api_cartridge.load(flow).get("_includes", []):  # its `flow:` steps' cartridges
+        shutil.copyfile(shared, dest.parent / Path(shared).name)
     return dest
 
 

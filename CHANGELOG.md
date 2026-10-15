@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- An API cartridge step `- flow: sign-in.yaml` runs that cartridge's steps in its place, with
+  its own headers, inputs and secrets, so a sign-in every flow starts with is written once in a
+  file beside them. That file still runs on its own, e.g. to sign a `--session` in and do
+  nothing else, and a session keeps a copy of it so a handed-over flow still finds it.
+
 ## [0.38.0] - 2026-10-14
 
 ### Fixed
