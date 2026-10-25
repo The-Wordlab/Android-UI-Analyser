@@ -115,7 +115,7 @@ on both success and failure; the requested screenshot/evidence file is retained.
 
 | Works | Not yet |
 |---|---|
-| `ui.tree`, `ui.input`, `ui.screenshot`, `ui.read_deadline`, `ui.peek` (dashboard tiles) | `device.logs` (unified log diagnostics) |
+| `ui.tree`, `ui.input`, `ui.query_batch`, `ui.screenshot`, `ui.read_deadline`, `ui.peek` (dashboard tiles) | `device.logs` (unified log diagnostics) |
 | `device.touch` (held touches, single-attempt taps), `device.drag` (AXe swipe; no hold before moving) | `device.recording` (`simctl io recordVideo`) |
 | `app.lifecycle`, `app.links`, `app.status`, `app.install` | `virtual_targets` (`aua virtual-target …` boot/create/delete) |
 | `device.clipboard`, `device.location` | `device.orientation`, `device.keyboard`, `device.clock`, `device.airplane`, `app.files` |
@@ -165,6 +165,20 @@ grant access to arbitrary server-side or remote-config flags: the app must use t
 
 Offline simulation and physical iPhones remain unsupported by this adapter. AUA does not change
 the Mac's network to simulate a disconnected iPhone.
+
+## Compound wait performance
+
+A predicate such as `--until 'rid:result,!rid:spinner,text:Done'` evaluates its accessibility
+terms against one fresh AXe tree per poll. The snapshot is discarded after that poll; later
+polls and post-action observations read again. This reduces repeated native calls and prevents
+conditions from different transition frames being combined into one successful check. Existing
+OCR checks for visible text and deadline enforcement still apply.
+
+An alternating comparison on one warm simulator (Xcode 27.1, AXe 1.8.0, three pairs) measured a
+three-condition wait including its final observation at a median **3.22 s before, 2.31 s after**
+(28% lower). Full accessibility reads fell from four to two: one for the predicate, one for the
+returned observation. All six comparison runs returned observations. These figures describe this
+local workload, not every device or UI flow.
 
 ## Troubleshooting
 

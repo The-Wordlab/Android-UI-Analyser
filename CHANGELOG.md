@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Changed
+
+- Compound iOS simulator waits evaluate their accessibility conditions from one fresh
+  AXe tree per poll, reducing native calls and avoiding mixed frames during transitions.
+  The optional `ui.query_batch` runtime capability preserves the existing selector path
+  on other adapters; failed reads never establish that an element is absent.
+
 ### Added
 
 - `--platform ios-device` captures screenshots from connected physical iPhones and iPads

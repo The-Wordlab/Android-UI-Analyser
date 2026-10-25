@@ -312,6 +312,24 @@ class TargetRuntime(ABC):
 
         raise DeviceError("semantic text search is unsupported by this target runtime")
 
+    def find_texts(
+        self,
+        queries: Sequence[tuple[str, str]],
+        *,
+        match: MatchMode | str = MatchMode.contains,
+        ignore_case: bool = False,
+    ) -> list[Bounds | None]:
+        """Match ordered ``(text, field)`` queries; adapters may share one native read.
+
+        The baseline preserves Android's native selector behavior. An adapter whose
+        selector reads a whole tree can override this to use one fresh snapshot.
+        Results must correspond one-for-one to queries; no snapshot survives this call.
+        """
+        return [
+            self.find_text(text, by=by, match=match, ignore_case=ignore_case)
+            for text, by in queries
+        ]
+
     # -- optional metadata ------------------------------------------------
 
     def app_version(self, app_id: str) -> str | None:

@@ -849,3 +849,41 @@ def test_ios_drag_is_axes_single_pointer_swipe_and_refuses_a_hold(
     assert caught.value.code == "drag_hold_unsupported"
     assert len(host.argv_of("axe", "swipe")) == 1
     assert not host.argv_of("axe", "touch")
+
+
+def test_batched_selectors_share_one_fresh_ios_tree(adapter, host):
+    runtime = adapter.connect(UDID)
+    queries = [("Continue", "text"), ("emailField", "rid"), ("Ghost", "text")]
+    expected = [runtime.find_text(text, by=by) for text, by in queries]
+    host.calls.clear()
+    assert runtime.find_texts(queries) == expected
+    assert len(host.argv_of("axe", "describe-ui")) == 1
+
+    # A later query must read again: the target can change without an AUA action.
+    host.describe_override = fixture_roots()
+    host.describe_override[0]["children"][0]["children"] = []
+    assert runtime.find_texts(queries) == [None, None, None]
+    assert len(host.argv_of("axe", "describe-ui")) == 2
+    assert runtime.find_texts([]) == []
+    assert len(host.argv_of("axe", "describe-ui")) == 2
+
+
+def test_batched_ios_predicate_does_not_mix_two_transition_frames(adapter, host, monkeypatch):
+    from test_ios_tree import node
+
+    runtime = adapter.connect(UDID)
+    frames = [
+        [node("StaticText", 0, 0, 30, 20, AXLabel="Old page")],
+        [node("StaticText", 0, 0, 30, 20, AXLabel="New page")],
+    ]
+    reads = []
+
+    def describe(*extra):
+        reads.append(extra)
+        return frames[min(len(reads) - 1, 1)]
+
+    monkeypatch.setattr(runtime, "_describe_ui", describe)
+    queries = [("Old page", "text"), ("New page", "text")]
+    assert [value is not None for value in runtime.find_texts(queries)] == [True, False]
+    assert [value is not None for value in runtime.find_texts(queries)] == [False, True]
+    assert len(reads) == 2

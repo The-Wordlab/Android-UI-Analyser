@@ -238,6 +238,7 @@ class AndroidPlatform(PlatformAdapter):
             "webview",
             "ui.back_gesture",
             "ui.input",
+            "ui.query_batch",
             "ui.read_deadline",
             "ui.peek",
             "ui.screenshot",

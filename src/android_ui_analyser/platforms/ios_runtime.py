@@ -191,6 +191,26 @@ class IOSSimulatorRuntime(TargetRuntime):
             by=by,
         )
 
+    def find_texts(
+        self,
+        queries: Sequence[tuple[str, str]],
+        *,
+        match: MatchMode | str = MatchMode.contains,
+        ignore_case: bool = False,
+    ) -> list[Bounds | None]:
+        if not queries:
+            return []
+        # AXe reads the full tree even for a single selector. Keep one poll's terms
+        # on the same frame, without reusing it for a later poll or after an action.
+        raw = json.dumps(self._describe_ui())
+        return [
+            ios_tree.find_bounds(
+                raw, geometry=self._geometry, query=text,
+                match=match, ignore_case=ignore_case, by=by,
+            )
+            for text, by in queries
+        ]
+
     # -- input --------------------------------------------------------------------------------
 
     def _native(self, x: int, y: int) -> tuple[str, str]:

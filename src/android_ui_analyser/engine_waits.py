@@ -1312,14 +1312,36 @@ def await_predicate(
 
     def evaluate() -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
-        for term in terms:
+        ui_indexes = [i for i, term in enumerate(terms) if term.by not in {"net", "log"}]
+        batch: dict[int, bool] | None = None
+        batch_error: DeviceError | None = None
+        if len(ui_indexes) > 1 and self.platform.supports("ui.query_batch"):
+            query_device = self.platform.runtime_capability("ui.query_batch", device)
+            try:
+                found = query_device.find_texts(
+                    [(terms[i].value, terms[i].by) for i in ui_indexes],
+                    match=mode, ignore_case=ignore_case,
+                )
+                if len(found) != len(ui_indexes):
+                    raise DeviceError(
+                        "Batched UI query returned the wrong number of results",
+                        code="invalid_platform_result",
+                    )
+                batch = dict(zip(ui_indexes, (bounds is not None for bounds in found), strict=True))
+            except DeviceError as exc:
+                # A failed shared read establishes neither presence nor absence. Use the
+                # ordinary error policy below for every affected term; never retry singly.
+                batch_error = exc
+        for index, term in enumerate(terms):
             if term.by == "net":
                 present = _net_present(term.value)
             elif term.by == "log":
                 present = _log_present(term.value)
             else:
                 try:
-                    present = (
+                    if batch_error is not None:
+                        raise batch_error
+                    present = batch[index] if batch is not None else (
                         _wait_input_runtime(self, device).find_text(
                             term.value, match=mode, ignore_case=ignore_case, by=term.by
                         )

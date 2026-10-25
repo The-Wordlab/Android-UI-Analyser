@@ -71,6 +71,19 @@ Back up the ledger and its key together. Losing or corrupting that key cannot be
 re-entering the same options: restore the original key as well. AUA retains the pending undo and
 names the missing identity proof; `--force` does not authorize a different endpoint or boot.
 
+## Optional batched selector queries
+
+An adapter may declare `ui.query_batch` and implement
+`TargetRuntime.find_texts(queries, *, match="contains", ignore_case=False)`. Queries are ordered
+`(text, field)` pairs; return one canonical bounds tuple or `None` per query. The runtime contract
+is registered in `platforms/contracts.py`. A wrong result count is an explicit error.
+
+The default helper delegates to `find_text` and preserves Android's native matching behavior.
+The iOS implementation reads one fresh AXe tree for all conditions in a poll. Never retain that
+snapshot across calls or actions. Other adapters keep their existing individual-query path until
+they opt in. A failed batch does not retry individual reads or count as evidence of absence.
+CLI and MCP compound waits both use the same engine implementation.
+
 ## Attached-target contract
 
 An adapter that passes the API-v1 attached-target profile declares:

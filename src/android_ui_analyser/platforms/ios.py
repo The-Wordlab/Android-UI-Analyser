@@ -67,6 +67,7 @@ class IOSPlatform(PlatformAdapter):
             "device.drag",
             "device.touch",
             "ui.input",
+            "ui.query_batch",
             "ui.peek",
             "ui.read_deadline",
             "ui.screenshot",
