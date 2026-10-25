@@ -778,7 +778,7 @@ BRIEF_SESSION_PROTOCOL: list[tuple[str, str]] = [
         "`aua session finish`. It returns a compact verdict by default; incomplete closure exits "
         "nonzero and stays active with an exact next call. Use `--allow-incomplete` only to abandon "
         "the goal, and `--full` or `full_review_call` only for the full timeline. In its review, "
-        "`top_level_calls` counts caller-visible invocations = `lifecycle_calls` + `task_calls`; "
+        "`top_level_calls` = caller-visible invocations = `lifecycle_calls` + `task_calls`; "
         "`journal_events` adds `folded_internal_events` such as an action-bound wait. "
         "`reporting_call_included` is false; `top_level_calls_including_reporting_call` adds it.",
     ),
@@ -1734,11 +1734,26 @@ def render_markdown(*, brief: bool = False) -> str:
         "data container; use the relative path from `db list`. Configured `flags` deeplinks "
         "verify UserDefaults (handle an initial Open-in prompt through the UI). "
         "Flow `prefs_write` accepts an explicit `<bundle-id>.plist`, with the original restored "
-        "at session cleanup. Physical iPhones and network-offline control remain unsupported. "
+        "at session cleanup. Network-offline control remains unsupported. Physical iPhone "
+        "screenshots use the separate `ios-device` adapter described below. "
         "Logs, recording and `virtual-target` provisioning are not available on iOS yet; those "
         "calls return `platform_capability_unsupported`. Details: `docs/ios.md`."
     )
 
+    p.append("")
+    p.append("## Physical iPhones and iPads (`--platform ios-device`)")
+    p.append(
+        "Read-only screenshot capture uses Xcode's `devicectl device capture screenshot`, "
+        "without AXe or a helper app. Connect, trust and unlock the phone; enable Developer Mode. "
+        "Start `aua --platform ios-device --serial <UDID> session start --goal 'Capture current screen' "
+        "--no-start-emulator`. The returned `observation.meta.raw_image` is the current PNG; "
+        "inspect it visually. `aua --platform ios-device screenshot /tmp/current.png` captures "
+        "another frame through the same lease. Finish with `aua --platform ios-device session finish "
+        "--phase-done 'phase_1=Current screen captured and visually inspected'`. "
+        "Only `ui.screenshot` is supported: no hierarchy, element handles, taps, app identity, "
+        "or semantic assertions. Unsupported device/Xcode combinations and locked phones return "
+        "typed errors; they never fall back to another device. Details: `docs/ios.md`."
+    )
     p.append("")
     p.append("## Web browsers (`--platform web`)")
     p.append(
@@ -2269,23 +2284,23 @@ Use AUA MCP or CLI (plugin adds no `aua` to `PATH`). Act by ID, not guessed pixe
 
 ## Select the platform first
 
-CLI: put `--platform android|ios|web` before every subcommand, or use `device.platform`
+CLI: put `--platform android|ios|ios-device|web` before every subcommand, or set `device.platform`
 in a task config with `--config PATH`. Keep that config throughout.
-MCP uses its server's configured platform; `session_start` cannot switch it. Use a matching
-server or CLI; check capabilities before platform-specific operations.
+MCP uses its server's platform; `session_start` cannot switch it. Use a matching server or
+CLI; check capabilities before platform-specific operations.
 
 - Android: default; selects/provisions a free device. `--app` selects; `--apk` installs.
 - iOS: macOS, Xcode 26+, AXe and a booted simulator. Use `aua --platform ios session start
   --goal "<goal>" --app <bundle-id> --no-provision-target`. No physical iPhones, automatic
   provisioning, `--headed`, recording, native logs, offline control or microphone injection.
   Finish releases ownership, leaving the simulator booted.
+- iPhone/iPad screenshots only: `--platform ios-device`; see `aua guide`.
 - Web: isolated Chromium/Firefox/WebKit needs the `web` extra and a Playwright browser.
   Configure `platforms.web.url`; omit `device.serial` for agent slots. For `--headed`,
   set `platforms.web.headless: false`. Reuse logins/apps via `connection: existing-chrome`
   (approved Chrome tab, extension only) or `existing-cdp` (local `cdp_endpoint`, `web` extra,
   no browser download). Attachments are exclusive; use `page_url` to select the exact CDP page.
   Read inline `meta.browser_diagnostics` for console/errors/network; absent data proves nothing.
-  Controls: `aua browser`; attachment has fewer capabilities.
   MCP: `aua --platform web --config PATH mcp --tool-profile web`.
 
 ## Operating loop
@@ -2307,9 +2322,9 @@ server or CLI; check capabilities before platform-specific operations.
    End with MCP `session_finish` or CLI `aua session finish` (compact), attaching final facts;
    never analyze for bookkeeping. Incomplete finish stays active; `--allow-incomplete`
    abandons; `--full` gives evidence. Stop only targets this session started.
-   Use `review.accounting`, not estimates: `top_level_calls` counts caller-visible invocations =
+   Use `review.accounting`, not estimates: `top_level_calls` = caller-visible invocations =
    `lifecycle_calls` + `task_calls`; `journal_events` adds `folded_internal_events` (action-bound wait).
-   `reporting_call_included` is false; `top_level_calls_including_reporting_call` adds this review/finish.
+   `reporting_call_included` is false; `top_level_calls_including_reporting_call` adds this call.
 
 No scenario, or after manual checks: MCP `prepare_start` → `prepare_answer` → `prepare_run`;
 CLI `aua prepare start` → `answer` → `run`. Produces contract verdict, evidence and `flow_repair`.
@@ -2322,7 +2337,7 @@ yields an unmapped `satisfied_action_until` arrival.
   It frees dead owners; omit `--serial`; switching or transfer is explicit.
   Shared-process workers need distinct `AUA_CACHE__DIR`; keep the shared lease registry.
   Reuse the warm daemon.
-- Inspect screenshots; report unsupported evidence. Read the guide for Android recording.
+- Inspect screenshots; report missing evidence. Android recording: `aua guide`.
 - Secrets: `aua config exec --env-file PATH --require NAME -- COMMAND ARGS` or MCP
   `credential_request`; private Save/Cancel, never expose values or shell-source .env.
 - Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only**.

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
 import re
 import shlex
+import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -27,7 +29,7 @@ from .memory import (
     is_destructive_step,
 )
 from .platforms.identity import TargetRef
-from .schema import AnalyzeResult
+from .schema import AnalyzeResult, Meta, ObservationContract, PathKind, Screen, ScreenSource, Tier
 from .selectors import match_selector
 
 if TYPE_CHECKING:
@@ -150,11 +152,62 @@ def _rollback_new_bootstrap(self: Engine) -> None:
     self._session_bootstrap_animation = None
 
 
+def _session_observation(self: Engine, *, no_cache: bool = False) -> AnalyzeResult:
+    """Capture honest visual evidence when an adapter has screenshots but no UI tree."""
+    if self.platform.supports("ui.tree"):
+        return self.analyze(source="hierarchy", with_ocr=False, no_cache=no_cache)
+    started = time.perf_counter()
+    adapter = self.platform.adapter_capability("ui.screenshot")
+    device = self.device
+    image = adapter.capture_screenshot(device)
+    path = self._default_annotate_path(device.serial, suffix="screenshot")
+    image.save(path)
+    fingerprint = hashlib.sha256(image.png_bytes).hexdigest()
+    observed = AnalyzeResult(
+        screen=Screen(width=image.width, height=image.height, source=ScreenSource.vision),
+        elements=[],
+        meta=Meta(
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            tier_used=Tier.vision, path=PathKind.vision, via="screenshot-only",
+            raw_image=path, device_serial=device.serial, fingerprint=fingerprint,
+            observation_contract=ObservationContract(
+                fingerprint=fingerprint, produced_by="session_screenshot",
+                reusable=False, analyze_needed=False, evidence_fresh=True,
+                elements_available=False, readiness="not_checked", image_path=path,
+                reason="Fresh screenshot only; this adapter has no UI hierarchy or element handles.",
+            ),
+        ),
+    )
+    self._last_analyze_result = observed
+    self._last_analyze_image = image
+    return observed
+
+
+def _screenshot_only_call() -> dict[str, Any]:
+    return {
+        "kind": "screenshot", "cli": "aua screenshot",
+        "mcp": {"tool": "screenshot", "arguments": {}},
+        "reason": (
+            "Review the saved screenshot visually. This adapter cannot inspect elements or navigate. "
+            "Capture again only if a newer frame is needed; otherwise finish with observed facts."
+        ),
+        "executes": False,
+    }
+
+
 def _goal_session_plan(self: Engine, goal: str, observation: AnalyzeResult) -> Any:
     """Build the shared CLI/MCP goal plan from an observation already in hand."""
     from .capabilities import capabilities_for_goal
     from .flows import Flow, FlowStore, anchor_paths, resolve_params
-    from .session import plan_goal_session
+    from .session import GoalCall, GoalSessionPlan, plan_goal_session
+
+    if not self.platform.supports("ui.tree") and self.platform.supports("ui.screenshot"):
+        return GoalSessionPlan(
+            goal=goal, observation=observation,
+            observation_note="A fresh screenshot is saved in observation.meta.raw_image; no UI elements were inspected.",
+            recommended_call=GoalCall(**_screenshot_only_call()),
+            warnings=["Screenshot-only adapter: app identity, navigation, and semantic assertions are unavailable."],
+        )
 
     mem = self._memory
     app: AppMap | None = None
@@ -465,7 +518,7 @@ def _session_start_impl(
                 self._adopt_recovered_launch_observation(launched, observation)
                 self._finish_launch_content_observation(launched)
                 observation = launched.observation
-        observed = observation or self.analyze(source="hierarchy", with_ocr=False)
+        observed = observation or _session_observation(self)
         if package and launch_app and observed.screen.package != package:
             # A launch readback must never combine the requested package with a hierarchy
             # captured from the app we just left. Discard every speculative/cached seam and
@@ -1159,6 +1212,8 @@ def _phase_recommended_call(
     avoid_deeplinks: bool = False,
 ) -> dict[str, Any] | None:
     """Return one safe exact call for a phase, using only the supplied fresh frame."""
+    if not self.platform.supports("ui.tree") and self.platform.supports("ui.screenshot"):
+        return _screenshot_only_call()
     avoid_deeplinks = avoid_deeplinks or any(
         re.search(r"\bdeep[ -]?links?\b", constraint, flags=re.IGNORECASE)
         for constraint in getattr(phase, "constraints", [])
@@ -2091,7 +2146,7 @@ def session_finish(
         )
     ]
     if blocking_phases and not allow_incomplete:
-        fresh = self.analyze(source="hierarchy", with_ocr=False, no_cache=True)
+        fresh = _session_observation(self, no_cache=True)
         contract_observation = fresh
         if state.contract is not None:
             state, contract_verdict = self._complete_contract_phase_from_observation(

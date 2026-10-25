@@ -1230,8 +1230,21 @@ aua --platform ios app launch com.example.app --arg --uitesting --until rid:home
 
 Elements, ids, `has`/`wait`, flows and maps behave as on Android; `resource_id` is the
 `accessibilityIdentifier`, `key back` performs the iOS back gesture, and `aua install` takes an
-`iphonesimulator` `.app` bundle. Physical iPhones are not supported. Details, the capability table
+`iphonesimulator` `.app` bundle. Details, the capability table
 and troubleshooting: [docs/ios.md](docs/ios.md).
+
+Physical iPhone/iPad screenshots use the separate `ios-device` adapter, without AXe:
+
+```bash
+aua --platform ios-device --serial <UDID> session start --goal 'Capture current screen' --no-start-emulator
+# View observation.meta.raw_image; save a newer frame if needed:
+aua --platform ios-device screenshot /tmp/current.png
+aua --platform ios-device session finish --phase-done 'phase_1=Current screen captured and visually inspected'
+```
+
+This requires a connected, trusted device with Developer Mode and an Xcode version supporting
+CoreDevice screenshot capture. It exposes only `ui.screenshot`: no UI hierarchy, taps, or app
+navigation. The screenshot preserves the screen currently open on the phone.
 
 ## Web browsers
 

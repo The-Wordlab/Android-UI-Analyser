@@ -15,6 +15,10 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- `--platform ios-device` captures screenshots from connected physical iPhones and iPads
+  using Xcode's CoreDevice command, through the existing CLI/MCP screenshot and session
+  interfaces. Sessions return PNG evidence without claiming hierarchy or input support;
+  locked, disconnected and unsupported-device failures are explicit.
 - An API cartridge step `- flow: sign-in.yaml` runs that cartridge's steps in its place, with
   its own headers, inputs and secrets, so a sign-in every flow starts with is written once in a
   file beside them. That file still runs on its own, e.g. to sign a `--session` in and do

@@ -1,4 +1,4 @@
-# iOS simulators
+# iOS simulators and physical-device screenshots
 
 `aua` drives iOS simulators with the same agent-facing surface it offers for Android: `analyze`
 returns elements with stable ids, and every `*-and-analyze` action, `has`, `wait`, `goto`, flows
@@ -30,10 +30,45 @@ platforms:
 | **AXe** (`aua --platform ios doctor --fix`, or `brew tap cameroncooke/axe && brew trust cameroncooke/axe && brew install axe`) | `axe describe-ui` reads the accessibility tree of a booted simulator; `axe tap/swipe/type/key/button` sends HID input. A current Homebrew refuses an untrusted tap, which is why the one-liner has the `trust` step. |
 | A **booted simulator**, or a simulator name/UDID to boot | `aua --platform ios doctor` shows what is available and booted. |
 
-Physical iPhones are not supported: AXe drives simulators only. A normal unpinned session selects
+A normal unpinned simulator session selects
 a free booted simulator; it does not provision one. Omit `--headed`, which this adapter does not
 support. Finish releases the lease without shutting down the simulator. For MCP, select iOS in
 the server's config or environment before launch; `session_start` cannot switch platforms.
+
+AXe drives simulators only. Physical iPhones and iPads use the separate screenshot-only
+`ios-device` adapter below.
+
+## Capture a physical iPhone or iPad
+
+Requires a paired, connected device with Developer Mode enabled, and an Xcode/device
+combination exposing `devicectl device capture screenshot`. Unlock the phone and accept
+Trust This Computer if prompted. No helper is installed and the current app is left open.
+
+```bash
+aua --platform ios-device --serial <UDID> session start \
+  --goal 'Capture current screen' --no-start-emulator
+# View the returned observation.meta.raw_image. Capture a newer frame only if needed:
+aua --platform ios-device screenshot /tmp/current.png
+aua --platform ios-device session finish \
+  --phase-done 'phase_1=Current screen captured and visually inspected'
+```
+
+CLI and MCP use the same `ui.screenshot` implementation, including normal session leasing,
+evidence and cleanup. MCP callers select `device.platform: ios-device` and `device.serial`
+through configuration, then use `session_start`, `screenshot`, and `session_finish`.
+`aua --platform ios-device doctor` reports discovery status. Use an explicit UDID to
+select the intended screen when multiple phones are connected.
+
+This adapter exposes only screenshots. It cannot read the accessibility hierarchy, identify
+the foreground app, tap/type, launch apps, or perform semantic UI assertions. An empty element
+list means those capabilities are unavailable; it does not mean the screen is empty. Review
+the PNG visually before completing a phase. Unsupported commands return capability errors.
+
+Discovery accepts both current and older CoreDevice JSON layouts, excludes simulators and
+non-iOS devices, and probes dormant paired connections before declaring them available.
+Locked, disconnected, unsupported, missing-image and invalid-image failures never return an
+older screenshot or switch to another device. Temporary CoreDevice output files are removed
+on both success and failure; the requested screenshot/evidence file is retained.
 
 ## How it maps
 
