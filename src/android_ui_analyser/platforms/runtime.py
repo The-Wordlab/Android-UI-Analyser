@@ -62,6 +62,25 @@ class TargetRuntime(ABC):
 
     # -- capability-gated capture -----------------------------------------
 
+    def execute_development_tool(
+        self, operation: str, arguments: list[str], options: dict[str, Any],
+        project_dir: str | None, timeout_s: float,
+    ) -> dict[str, Any]:
+        """Execute a validated developer-tool operation on this exact target."""
+        raise DeviceError("target developer tools are unsupported", code="unsupported_capability")
+
+    def restore_development_tool(self, session_id: str) -> dict[str, Any]:
+        """Idempotently end an owned diagnostic session and restore its device state."""
+        raise DeviceError("target developer tools are unsupported", code="unsupported_capability")
+
+    def prepare_development_ui(self) -> dict[str, Any]:
+        """Read the baseline needed to undo a developer tool's temporary UI helper."""
+        raise DeviceError("target developer tools are unsupported", code="unsupported_capability")
+
+    def restore_development_ui(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Release its UI helper and remove only support software absent from the baseline."""
+        raise DeviceError("target developer tools are unsupported", code="unsupported_capability")
+
     def read_deadline(self, budget: ReadBudget) -> AbstractContextManager[None]:
         """Bound every synchronous UI read in this scope to one absolute deadline.
 

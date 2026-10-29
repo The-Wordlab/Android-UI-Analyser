@@ -26,12 +26,15 @@ from . import (
     engine_apps,
     engine_browser,
     engine_capture,
+    engine_development_tools,
     engine_environment,
     engine_flows,
+    engine_journeys,
     engine_memory,
     engine_navigation,
     engine_observation,
     engine_policy,
+    engine_previews,
     engine_sessions,
     engine_virtual_targets,
     engine_waits,
@@ -2670,6 +2673,23 @@ class Engine:
     session_candidate_flow = engine_sessions.session_candidate_flow
     _session_finish_summary = staticmethod(engine_sessions._session_finish_summary)
     session_finish = engine_sessions.session_finish
+
+    # Optional developer tools share one semantic path across CLI and MCP.
+    development_tools_status = engine_development_tools.development_tools_status
+    development_tools_setup = engine_development_tools.development_tools_setup
+    development_tools_catalogue = engine_development_tools.development_tools_catalogue
+    development_tool = engine_development_tools.development_tool
+    development_tool_spec = engine_development_tools.development_tool_spec
+    preview_list = engine_previews.preview_list
+    preview_render = engine_previews.preview_render
+    preview_inspect = engine_previews.preview_inspect
+    preview_check = engine_previews.preview_check
+    journey_validate = engine_journeys.journey_validate
+    journey_start = engine_journeys.journey_start
+    journey_status = engine_journeys.journey_status
+    journey_check = engine_journeys.journey_check
+    journey_record = engine_journeys.journey_record
+    journey_finish = engine_journeys.journey_finish
 
     # engine_virtual_targets: Platform-neutral virtual-target discovery, creation, provisioning,
     # exact-instance rollback, retirement/reclaim, and Android emulator compatibility aliases.

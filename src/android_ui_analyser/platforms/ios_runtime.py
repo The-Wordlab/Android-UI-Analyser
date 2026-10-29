@@ -219,7 +219,12 @@ class IOSSimulatorRuntime(TargetRuntime):
 
     def click(self, x: int, y: int) -> None:
         native_x, native_y = self._native(x, y)
-        self._tools.axe("tap", "-x", native_x, "-y", native_y, "--udid", self.target_id)
+        # Xcode 27 can acknowledge a simulator tap without delivering a touch. Use
+        # AXe's physical down/up path at the same resolved point for every control.
+        self._tools.axe(
+            "tap", "-x", native_x, "-y", native_y,
+            "--tap-style", "physical", "--udid", self.target_id,
+        )
 
     def click_once(self, x: int, y: int) -> None:
         native_x, native_y = self._native(x, y)

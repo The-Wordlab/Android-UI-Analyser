@@ -526,6 +526,9 @@ def _adopt_client_owner(
 
 _LEASE_FREE_COMMANDS = frozenset(
     {
+        "development_tools_status", "development_tools_setup", "development_tools_catalogue",
+        "development_tool", "preview_list", "preview_render", "preview_inspect", "preview_check",
+        "journey_validate", "journey_start", "journey_status", "journey_record",
         "app_log_prefs",
         "app_log_prefs_set",
         "capture_explain",
@@ -1093,6 +1096,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             return _result_ok(engine.capture_stop())
 
         elif cmd in (
+            "development_tool", "development_tools_status", "development_tools_setup",
+            "development_tools_catalogue", "preview_list", "preview_render",
+            "preview_inspect", "preview_check", "journey_validate", "journey_start",
+            "journey_status", "journey_check", "journey_record", "journey_finish",
             "browser_status", "browser_logs", "browser_logs_clear",
             "browser_storage", "browser_storage_export", "browser_storage_import",
             "browser_storage_clear", "browser_cache_clear", "browser_reset",
@@ -1593,6 +1600,10 @@ class DaemonClient:
         ms = args.get("timeout_ms")
         if isinstance(ms, (int, float)) and ms > 0:
             timeout = max(timeout, ms / 1000.0 + 5.0)
+        elif isinstance(args.get("timeout_s"), (int, float)) and args["timeout_s"] > 0:
+            # Optional development operations include builds, deploys and trace retrieval.
+            # The client must outlive their process budget plus post-action observation.
+            timeout = max(timeout, float(args["timeout_s"]) + 60.0)
         elif cmd in {"mic_inject", "mic_speak"}:
             # Never let the caller's socket expire while a hold/stream may still be active.
             # inject derives from the already caller-validated WAV; speak budgets the bounded

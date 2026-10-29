@@ -66,6 +66,18 @@ Four properties do the work:
 - **Keyed, so re-recording replaces.** `reverse_port:49097` keeps two different tunnels apart while
   making the same change recorded twice a single undo.
 
+Optional developer tools use the same ledger. Profiling records the caller's exact trace or heap
+session before starting; stopping or cancelling removes only that session's record. A failed
+command retains its undo until restoration succeeds. Trace and heap identities are separate.
+
+Native UI tooling also needs an undo: completing a layout or input command can leave its
+instrumentation service holding the UI automation connection. AUA records the helper's baseline
+and boot identity before invoking the tool, pauses background readers, and restores that baseline
+before resuming ordinary observations. An Android helper absent at the start is removed; a
+matching preexisting installation is preserved. Recovery checks the selected adapter options and
+target boot before touching the helper. A pending helper undo can therefore recover the UI
+connection even when the process that launched it disappeared.
+
 `instance_token` identifies the target boot. A changed or unreadable token does not prove that
 persisted settings, app permissions, or files disappeared. AUA retains their undos and reports
 that deliberate recovery is required, without replaying onto an unproven boot. This also applies

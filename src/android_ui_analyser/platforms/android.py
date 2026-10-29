@@ -13,13 +13,13 @@ import subprocess
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from .. import hierarchy
 from ..config import Config
-from ..errors import DeviceError, UsageError
+from ..errors import ConfigError, DeviceError, UsageError
 from ..memory import matches_any
 from ..providers.base import ScreenImage
 from ..schema import AppContext, Element
@@ -224,6 +224,8 @@ class AndroidPlatform(PlatformAdapter):
             "device.shell",
             "device.touch",
             "device.drag",
+            "device.development_tools",
+            "development_tools",
             "app_database",
             "app_datastore",
             "device_agent",
@@ -271,6 +273,15 @@ class AndroidPlatform(PlatformAdapter):
             )
         return candidate
 
+    def validate_options(self, options: Mapping[str, Any]) -> Mapping[str, Any]:
+        unknown = set(options) - {"cli_path", "cli_sdk"}
+        if unknown:
+            raise ConfigError(f"unknown Android platform options: {', '.join(sorted(unknown))}")
+        for key, value in options.items():
+            if not isinstance(value, str) or not value.strip() or "\x00" in value:
+                raise ConfigError(f"Android option {key} must be a non-empty path string")
+        return dict(options)
+
     def prepare_host(self) -> None:
         from ..emulator import ensure_adb_on_path
 
@@ -282,10 +293,14 @@ class AndroidPlatform(PlatformAdapter):
         from .android_runtime import AndroidDeviceRuntime
 
         self.prepare_host()
-        return android_transport.run_adb_server_operation(
+        runtime = android_transport.run_adb_server_operation(
             self.config.lease.registry_dir,
-            lambda: AndroidDeviceRuntime(device_mod.resolve_serial(target_id)),
+            lambda: AndroidDeviceRuntime(
+                device_mod.resolve_serial(target_id),
+                development_tools=self.capability("development_tools"),
+            ),
         )
+        return runtime
 
     def list_targets(self) -> list[DiscoveredTarget]:
         from .. import device as device_mod
@@ -400,6 +415,10 @@ class AndroidPlatform(PlatformAdapter):
     }
 
     def load_capability(self, capability: str) -> object | None:
+        if capability == "development_tools":
+            from .android_cli import AndroidCliTools
+
+            return AndroidCliTools(self.options)
         module = self._CAPABILITY_MODULES.get(capability)
         if module is None:
             return None

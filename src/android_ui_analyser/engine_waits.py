@@ -57,6 +57,14 @@ if TYPE_CHECKING:
     from .engine import Engine
 
 
+def _unconfirmed_await_term(term: _AwaitTerm, reason: str = "not_observed") -> dict[str, Any]:
+    """No completed read proves presence or absence, even when its budget expired."""
+    return {
+        "term": term.text, "present": None, "satisfied": False,
+        "evidence": "unconfirmed", "reason": reason,
+    }
+
+
 def _image_output(method: Callable[..., ActionResult]) -> Callable[..., ActionResult]:
     """Scope an explicit wait image option to this operation, including nested waits.
 
@@ -125,9 +133,7 @@ def _deadline_wait(method: Callable[..., ActionResult]) -> Callable[..., ActionR
             deadline, time.monotonic, cancel.is_set if cancel is not None else lambda: False
         )
         if parsed_terms is not None:
-            budget.terms = [
-                {"term": term.text, "present": False, "satisfied": False} for term in parsed_terms
-            ]
+            budget.terms = [_unconfirmed_await_term(term) for term in parsed_terms]
         reserve = (
             min(1.0, max(0, io_budget_ms) / 4000.0)
             if kwargs.get("observe") and not single_probe
@@ -1223,7 +1229,7 @@ def await_predicate(
     terms = _parse_await_terms(predicate, require_positive=adopt_action)
     budget = read_budget.current()
     if budget is not None:
-        budget.terms = [{"term": term.text, "present": False, "satisfied": False} for term in terms]
+        budget.terms = [_unconfirmed_await_term(term) for term in terms]
     device = self.device
     # Diagnostic/network-only waits do not need an accessibility hierarchy. A platform may
     # legitimately expose normalized logs for an attached target before it implements UI
@@ -1332,6 +1338,13 @@ def await_predicate(
                 # A failed shared read establishes neither presence nor absence. Use the
                 # ordinary error policy below for every affected term; never retry singly.
                 batch_error = exc
+                if budget is not None:
+                    # Publish every affected term before a checkpoint can exhaust the
+                    # deadline, including results left over from a preceding successful poll.
+                    for index in ui_indexes:
+                        budget.terms[index] = _unconfirmed_await_term(
+                            terms[index], "ui_read_failed"
+                        )
         for index, term in enumerate(terms):
             if term.by == "net":
                 present = _net_present(term.value)
@@ -1354,12 +1367,11 @@ def await_predicate(
                     # reconnect, restart, or extend the caller's absolute deadline. Unknown
                     # visibility never satisfies an absence predicate; a later fresh poll
                     # (or independent rich observation) must establish the actual state.
+                    unknown = _unconfirmed_await_term(term, "ui_read_failed")
+                    budget.terms[index] = unknown
+                    out.append(unknown)
                     self._job_checkpoint()
                     budget.check()
-                    out.append(
-                        {"term": term.text, "present": None, "satisfied": False,
-                         "evidence": "unconfirmed", "reason": "ui_read_failed"}
-                    )
                     continue
             out.append(
                 {

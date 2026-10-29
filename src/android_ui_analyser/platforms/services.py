@@ -46,6 +46,33 @@ TARGET_SUPERVISION: Final = "target_supervision"
 VIRTUAL_TARGETS: Final = "virtual_targets"
 VIRTUAL_DEVICES: Final = "virtual_devices"
 WEBVIEW: Final = "webview"
+DEVELOPMENT_TOOLS: Final = "development_tools"
+
+
+@runtime_checkable
+class DevelopmentToolsService(Protocol):
+    """Optional host developer tools, discovered through the selected adapter.
+
+    Operations are semantic catalogue entries, never caller-supplied native commands.
+    Validation is side-effect free. Target operations execute on the leased runtime instead
+    of this host service; native options and transport remain entirely adapter-owned.
+    """
+
+    def status(self) -> dict[str, Any]: ...
+
+    def setup(self) -> dict[str, Any]: ...
+
+    def catalogue(self) -> list[dict[str, Any]]: ...
+
+    def validate(
+        self, operation: str, arguments: list[str], options: dict[str, Any],
+        project_dir: str | None, timeout_s: float,
+    ) -> dict[str, Any]: ...
+
+    def execute(
+        self, operation: str, arguments: list[str], options: dict[str, Any],
+        project_dir: str | None, timeout_s: float, target_id: str | None = None,
+    ) -> dict[str, Any]: ...
 
 
 @runtime_checkable
@@ -112,11 +139,13 @@ class TargetSupervisionService(Protocol):
 
 
 CAPABILITY_PROTOCOLS: dict[str, type[Any]] = {
+    DEVELOPMENT_TOOLS: DevelopmentToolsService,
     VIRTUAL_TARGETS: VirtualTargetsService,
     TARGET_SUPERVISION: TargetSupervisionService,
 }
 
 CAPABILITY_METHODS: dict[str, frozenset[str]] = {
+    DEVELOPMENT_TOOLS: frozenset({"status", "setup", "catalogue", "validate", "execute"}),
     APP_DATABASE: frozenset(
         {
             "backup_database",

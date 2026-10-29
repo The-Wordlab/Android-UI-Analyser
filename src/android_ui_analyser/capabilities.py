@@ -28,6 +28,39 @@ class Capability:
 
 CAPABILITIES: tuple[Capability, ...] = (
     Capability(
+        "development_tools",
+        "Optional platform developer tools: project builds, artifact analysis, official docs, "
+        "SDK management, deployment, Studio and field diagnostics; discover exact supported options.",
+        ("android cli", "build", "sdk", "crashlytics", "r8", "artifact", "android studio"),
+        5, "aua devtools catalogue", "development_tools_catalogue",
+        risk="operation-specific; optional installation is explicit",
+    ),
+    Capability(
+        "compose_previews",
+        "Compile and render Compose previews without a device; inspect semantic component trees "
+        "and source locations, then check saved evidence without claiming runtime behavior.",
+        ("compose", "preview", "component", "layout", "design", "before install"),
+        4, "aua preview list --project <project>", "preview_list",
+        risk="builds local project code; requires optional Android CLI",
+    ),
+    Capability(
+        "profiling",
+        "Record system traces and capture JVM heaps on the leased target alongside ordinary AUA actions.",
+        ("profile", "profiling", "slow", "performance", "jank", "heap", "memory leak", "perfetto"),
+        5, "aua profile start --package <package> --output <trace>", "development_tool",
+        risk="temporary device/app profiling changes",
+        cleanup="profile stop/cancel or durable device-ledger cleanup ends the exact owned session",
+    ),
+    Capability(
+        "agent_journeys",
+        "Run authored natural-language journey steps with deterministic assertions and separately "
+        "labeled visual agent assessments, using normal goal-session evidence and cleanup.",
+        ("journey", "acceptance", "visual review", "test plan", "natural language test"),
+        4, "aua journey start <journey.yaml>", "journey_start",
+        risk="the calling agent performs authorized steps; a journey is not an autonomous executor",
+        cleanup="journey finish uses ordinary session cleanup",
+    ),
+    Capability(
         "credentials",
         "Ask the user privately for a missing API key and save it to a host .env file; status only.",
         ("api key", "apikey", "credential", "secret", "openrouter", ".env"),

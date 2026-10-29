@@ -2592,7 +2592,8 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
             }
         )
     high_level = sum(
-        counts.get(name, 0) for name in ("session_start", "reach", "goto", "flow_run", "back_until")
+        counts.get(name, 0)
+        for name in ("session_start", "journey_start", "reach", "goto", "flow_run", "back_until")
     )
     expected_probes = [
         event
@@ -2618,7 +2619,9 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         )
     )
     lifecycle_calls = sum(
-        1 for event in top_level if _base_command(event.get("cmd")).startswith("session_")
+        1 for event in top_level
+        if _base_command(event.get("cmd")).startswith("session_")
+        or _base_command(event.get("cmd")) in {"journey_start", "journey_status", "journey_finish"}
     )
     accounting = {
         "journal_events": len(scoped),
@@ -2626,7 +2629,7 @@ def review_session_events(state: SessionState, events: Sequence[dict[str, Any]])
         "folded_internal_events": max(0, len(scoped) - len(top_level)),
         "lifecycle_calls": lifecycle_calls,
         "task_calls": len(top_level) - lifecycle_calls,
-        # Reviews returned by ``session review`` and ``session finish`` are computed before
+        # Reviews returned by session review/finish and journey finish are computed before
         # the reporting invocation itself is appended to the journal. Make that boundary
         # explicit so evaluators do not mistake journal events for caller-visible calls or
         # silently under-count the call that carried this report.

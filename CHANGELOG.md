@@ -11,19 +11,37 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- Optional Google Android CLI integration through AUA's platform adapter, with explicit user-local
+  installation, operation discovery, structured results, shared CLI/MCP access, and leased device
+  operations. Adds project/SDK tools, artifact analysis, official documentation, Studio and field
+  diagnostics alongside existing AUA automation.
+- Compose preview discovery/rendering and component-tree inspection/checks without an emulator.
+  Previews compile the target and expose bounds, semantics and source locations as saved evidence.
+- System tracing and JVM heap capture with caller-owned profiling sessions and write-ahead device
+  cleanup; ordinary AUA interactions can run between trace start and stop.
+- Authored agent journeys with ordered instructions, deterministic assertions and explicitly
+  separate visual assessments, using existing goal-session evidence and cleanup.
+- `--platform ios-device` captures screenshots from connected physical iPhones and iPads
+  using Xcode's CoreDevice command, through the existing CLI/MCP screenshot and session
+  interfaces. Sessions return PNG evidence without claiming hierarchy or input support;
+  locked, disconnected and unsupported-device failures are explicit.
+
+### Fixed
+
+- Waits that expire before their first usable read report unknown visibility, never false
+  absence. Failed batched reads publish unknown terms before deadline handling, including
+  when an earlier poll had returned evidence.
+- iOS simulator taps use AXe's physical down/up style to avoid acknowledged-but-undelivered taps
+  on Xcode 27.
+
 ### Changed
 
 - Compound iOS simulator waits evaluate their accessibility conditions from one fresh
   AXe tree per poll, reducing native calls and avoiding mixed frames during transitions.
   The optional `ui.query_batch` runtime capability preserves the existing selector path
   on other adapters; failed reads never establish that an element is absent.
-
-### Added
-
-- `--platform ios-device` captures screenshots from connected physical iPhones and iPads
-  using Xcode's CoreDevice command, through the existing CLI/MCP screenshot and session
-  interfaces. Sessions return PNG evidence without claiming hierarchy or input support;
-  locked, disconnected and unsupported-device failures are explicit.
 
 ## [0.39.0] - 2026-10-15
 

@@ -490,7 +490,10 @@ def _tool_definitions() -> list[types.Tool]:
     """The MCP tool catalogue (input schemas only; output is JSON text content)."""
     match_enum = ["exact", "contains", "regex"]
     source_enum = ["auto", "hierarchy", "vision"]
+    from .mcp_development_tools import tool_definitions as development_tool_definitions
+
     tools = [
+        *development_tool_definitions(),
         types.Tool(
             name="credential_request",
             description=(
@@ -3592,6 +3595,8 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     """Call the engine method for ``name`` and return a JSON-serialisable payload."""
     if name == "credential_request":
         return _request_credential(args)
+    from .mcp_development_tools import TOOL_NAMES as development_tool_names
+
     args = dict(args)
     internal_name = _ANALYZED_TOOL_BASES.get(name)
     if internal_name is not None:
@@ -3647,6 +3652,14 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
         "configure",
     }:
         reject_if_active(engine, name)
+
+    if name in development_tool_names and name != "journey_finish":
+        result = _dump(getattr(engine, name)(**args))
+        if name == "journey_start" and isinstance(result, dict) and result.get("ok") is not False:
+            engine.capture_service_start(restart=True)
+            if result.get("virtual_target_started") or result.get("emulator_started"):
+                _track_mcp_target(engine, result)
+        return result
 
     img = _with_image(engine, args)
 
@@ -3704,16 +3717,17 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 max_duration_ms=int(args.get("max_duration_ms", 30_000)),
             )
         )
-    if name == "session_finish":
+    if name in {"session_finish", "journey_finish"}:
         finish_kwargs: dict[str, Any] = {
             "session_id": args.get("session_id"),
-            "summary": bool(args.get("summary", True)),
         }
+        if name == "session_finish":
+            finish_kwargs["summary"] = bool(args.get("summary", True))
         if "allow_incomplete" in args:
             finish_kwargs["allow_incomplete"] = bool(args["allow_incomplete"])
         if "retain_started_target" in args:
             finish_kwargs["retain_started_target"] = bool(args["retain_started_target"])
-        finished = _engine_method(engine, "session_finish")(**finish_kwargs)
+        finished = _engine_method(engine, name)(**finish_kwargs)
         if isinstance(finished, dict):
             stopped_ids = [
                 item.get("virtual_target", {}).get("target_id")
@@ -4915,6 +4929,12 @@ def _image_block(name: str, payload: Any) -> types.ImageContent | None:
     path: str | None = None
     if name == "screenshot" and payload.get("ok"):
         path = payload.get("detail")
+    elif name == "preview_render" and payload.get("ok"):
+        # The first rendered preview is visible to vision-capable clients immediately;
+        # every additional PNG/tree remains addressable in the artifact list.
+        previews = payload.get("previews") or []
+        if previews and isinstance(previews[0], dict):
+            path = previews[0].get("imagePath")
     else:
         meta = payload.get("meta") or (payload.get("observation") or {}).get("meta") or {}
         path = meta.get("raw_image") or meta.get("annotated_image")
@@ -4992,6 +5012,10 @@ class _McpStartedTarget:
 _MCP_STARTED_TARGETS: dict[tuple[int, str, str], _McpStartedTarget] = {}
 _LEASE_FREE_TOOLS = frozenset(
     {
+        "development_tool", "development_tools_status", "development_tools_setup",
+        "development_tools_catalogue", "preview_list", "preview_render",
+        "preview_inspect", "preview_check", "journey_validate", "journey_start",
+        "journey_status", "journey_record",
         "credential_request",
         "app_log_prefs_get",
         "app_log_prefs_set",

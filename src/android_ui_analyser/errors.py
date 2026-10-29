@@ -103,6 +103,33 @@ class DeviceError(AuaError):
     code = "device"
 
 
+class DevelopmentToolError(DeviceError):
+    """A platform development tool failed with bounded diagnostics for the caller."""
+
+    code = "development_tool_failed"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        result: dict[str, Any] | None = None,
+        code: str | None = None,
+        hint: str | None = None,
+    ) -> None:
+        super().__init__(message, code=code, hint=hint)
+        self.result = dict(result or {})
+
+    def to_dict(self) -> dict[str, object]:
+        error: dict[str, object] = {
+            "code": self.code,
+            "message": self.message,
+            "result": self.result,
+        }
+        if self.hint:
+            error["hint"] = self.hint
+        return {"error": error}
+
+
 class DaemonBusyError(AuaError):
     """A live daemon owns the device but cannot accept another call yet."""
 

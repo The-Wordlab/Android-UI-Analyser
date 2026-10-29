@@ -2709,7 +2709,7 @@ def start_virtual_target(request: VirtualTargetStartRequest) -> VirtualTargetIns
     """Start one Android definition and return its exact owned-instance token."""
 
     options = dict(request.options)
-    allowed = {"extra_args", "gpu", "idle_timeout_s", "port", "read_only"}
+    allowed = {"extra_args", "gpu", "idle_timeout_s", "port", "read_only", "cold"}
     unknown = sorted(set(options) - allowed)
     if unknown:
         raise UsageError(
@@ -2719,6 +2719,11 @@ def start_virtual_target(request: VirtualTargetStartRequest) -> VirtualTargetIns
     extra_args = options.get("extra_args")
     if extra_args is not None and not isinstance(extra_args, list):
         raise UsageError("virtual-target option extra_args must be a list of strings")
+    if "cold" in options and not isinstance(options["cold"], bool):
+        raise UsageError("virtual-target option cold must be boolean")
+    launch_args = [str(item) for item in (extra_args or [])]
+    if options.get("cold"):
+        launch_args.append("-no-snapshot-load")
     payload = start(
         request.definition_id,
         headless=request.headless,
@@ -2726,7 +2731,7 @@ def start_virtual_target(request: VirtualTargetStartRequest) -> VirtualTargetIns
         audio=request.audio,
         wait_s=request.wait_s,
         cache_dir=request.cache_dir,
-        extra_args=[str(item) for item in extra_args] if extra_args is not None else None,
+        extra_args=launch_args or None,
         gpu=str(options["gpu"]) if options.get("gpu") is not None else None,
         idle_timeout_s=(
             float(options["idle_timeout_s"])

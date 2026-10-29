@@ -280,6 +280,9 @@ history of a method continues in its new file.
 | `engine_flows.py` | saved flows: flow_run/save/list/delete, the step executor and its on-device offload, nested-flow preflight, demo recording, suite_run |
 | `engine_sessions.py` | session_start → session_finish: goal planning, phase progress, recommended-call ranking, candidate flows, session review |
 | `engine_virtual_targets.py` | platform-neutral virtual-target list/create/delete/start/provision/status/stop/reclaim orchestration and Android emulator compatibility aliases |
+| `engine_development_tools.py` | optional catalogued developer tools, host/target routing, confirmation, leased execution, profiling cleanup and post-action evidence |
+| `engine_previews.py` | host-rendered Compose preview artifacts, bounded component-tree inspection and deterministic static checks |
+| `engine_journeys.py` | authored agent instructions and assertion/assessment evidence on the existing goal-session lifecycle; `journeys.py` owns the document grammar |
 | `engine_policy.py` | the optional local policy: model_control, policy tap-candidate and selection helpers, the session policy side channel, session_autopilot |
 | `engine_memory.py` | learning into per-app memory and reading it back: recorded screens, actions and timings, the runtime flag context, learned control costs, `memory update`, orient, explore mine/plan |
 | `engine_apps.py` | the app under test: launch/stop/clear/install and the launch observation, feature flags, private databases, logcat and per-app log preferences, process bookkeeping |

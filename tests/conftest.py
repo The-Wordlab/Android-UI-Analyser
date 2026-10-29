@@ -91,6 +91,22 @@ def make_screen_image(width: int = 200, height: int = 400, **kw: Any) -> ScreenI
 class FakeDevice(Device):
     """In-memory device for tests; records actions, returns canned perception."""
 
+    def execute_development_tool(self, operation, arguments, options, project_dir, timeout_s):
+        self.calls.append(("development_tool", (operation, arguments, options, project_dir, timeout_s)))
+        return {"ok": True, "operation": operation, "target_id": self.serial}
+
+    def restore_development_tool(self, session_id):
+        self.calls.append(("restore_development_tool", (session_id,)))
+        return {"ok": True, "session_id": session_id}
+
+    def prepare_development_ui(self):
+        self.calls.append(("prepare_development_ui", ()))
+        return {"remove_installed_helper": True}
+
+    def restore_development_ui(self, state):
+        self.calls.append(("restore_development_ui", (state,)))
+        return {"ok": True}
+
     def read_deadline(self, budget):
         from android_ui_analyser.read_budget import activate
 

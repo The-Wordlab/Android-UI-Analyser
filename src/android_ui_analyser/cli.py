@@ -29,6 +29,7 @@ from typer.core import TyperCommand, TyperGroup
 
 from . import __version__
 from .assertions import parse_selector_expression
+from .cli_development_tools import register as _register_development_commands
 from .cli_invocations import CommandAccounting
 from .config import (
     Config,
@@ -1638,7 +1639,10 @@ _HOST_ONLY_ROUTE_METHODS = frozenset(
     # Nothing here touches a device. Routing them like device calls made a preference file
     # read demand a lease — and refuse with "no device found" — while the same call over MCP
     # needed nothing attached.
-    {"flow_delete", "app_log_prefs", "app_log_prefs_set"}
+    {"flow_delete", "app_log_prefs", "app_log_prefs_set",
+     "development_tools_status", "development_tools_setup", "development_tools_catalogue",
+     "preview_list", "preview_render", "preview_inspect", "preview_check", "journey_validate",
+     "journey_status", "journey_record"}
 )
 # These methods deliberately resolve only the leased serial before releasing Android's
 # UiAutomation slot. Warming a Device here attaches uiautomator2 immediately before the
@@ -1682,6 +1686,26 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
     code = err.get("code", "error")
     message = err.get("message", "daemon error")
     hint = err.get("hint")
+    if code in {"development_tool_failed", "android_cli_failed", "android_cli_timeout"}:
+        from .errors import DevelopmentToolError
+
+        result = err.get("result")
+        return DevelopmentToolError(
+            message,
+            code=code,
+            hint=hint,
+            result=result if isinstance(result, dict) else None,
+        )
+    if code in {
+        "android_cli_missing",
+        "android_cli_unavailable",
+        "android_cli_unsupported_version",
+        "android_cli_setup_failed",
+        "android_cli_host_unsupported",
+        "android_cli_helper_conflict",
+        "android_cli_helper_instance_changed",
+    }:
+        return ConfigError(message, code=code, hint=hint)
     mapping: dict[str, type[AuaError]] = {
         "usage": UsageError,
         "device": DeviceError,
@@ -1937,7 +1961,10 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     # Lease discovery does not connect to uiautomator2; it is the cheap ownership decision
     # every transport must share.
     host_only = method in _HOST_ONLY_ROUTE_METHODS
-    runtime_session = method in {"session_start", "session_finish"} and engine.platform.supports(
+    if method == "development_tool":
+        spec = engine.development_tool_spec(**kwargs)
+        host_only = spec["scope"] == "host"
+    runtime_session = method in {"session_start", "session_finish", "journey_start", "journey_finish"} and engine.platform.supports(
         "session.state"
     )
     persistent_context = method.startswith("browser_") or runtime_session
@@ -1946,7 +1973,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     # detached daemon. Adapters with session.state instead need start/finish in the same
     # process as UI actions, since that runtime owns the captured session baseline.
     # Resolve their caller lease below before selecting the persistent target daemon.
-    bootstrap_session = method == "session_start" and not runtime_session
+    bootstrap_session = method in {"session_start", "journey_start"} and not runtime_session
     if host_only:
         # Host-only flow metadata commands still belong to the calling agent's active goal
         # session. Resolve identity and the explicit serial without claiming/connecting to the
@@ -1961,7 +1988,7 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
         if lease_serial:
             cfg.device.serial = lease_serial
         if (
-            method == "session_start"
+            method in {"session_start", "journey_start"}
             and lease_serial
             and not getattr(engine, "_lease_was_preexisting", True)
         ):
@@ -12021,6 +12048,7 @@ def _install_command_accounting(target: typer.Typer) -> None:
             _install_command_accounting(child)
 
 
+_register_development_commands(app, _run, _route, _emit)
 _install_command_accounting(app)
 
 

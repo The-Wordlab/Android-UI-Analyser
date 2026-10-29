@@ -14,7 +14,7 @@ import pytest
 
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.platforms.android_bounded_reads import rpc
-from android_ui_analyser.platforms.android_device import Uiautomator2Device
+from android_ui_analyser.platforms.android_runtime import AndroidDeviceRuntime
 from android_ui_analyser.read_budget import ReadBudget, ReadDeadlineExceeded
 from conftest import make_config
 
@@ -106,7 +106,7 @@ def test_success_joins_timer_and_reads_the_existing_server_without_reconnect():
 
 
 def device():
-    runtime = Uiautomator2Device.__new__(Uiautomator2Device)
+    runtime = AndroidDeviceRuntime.__new__(AndroidDeviceRuntime)
     runtime.serial = "fictional-target"
     runtime._winsize = (320, 640)
     runtime._device_locale_read = True

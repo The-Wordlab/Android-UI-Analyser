@@ -179,6 +179,13 @@ stale sidecars before launch. `aua db backups|restore` provides rollback.
 The detail view in `aua dashboard` exposes the same database service for human inspection;
 browser execute/restore actions add server-verified typed confirmation phrases.
 
+Optional Android CLI tools are exposed by `aua devtools status|setup|catalogue|run`, with
+`aua preview`, `aua profile` and `aua journey` workflows on the same CLI/MCP engine paths.
+Android CLI is installed only by explicit setup. Host builds and Compose previews need no device
+session; live UI and profiling use the ordinary lease/evidence/cleanup protocol. Previews compile
+their target, and journeys are instructions for the calling agent, with assertion evidence kept
+separate from visual assessments. See `docs/android-cli.md` and `docs/android-cli-validation.md`.
+
 No separate `re-analyze` is required after every state-changing action. By default, each action
 returns the post-action screen in `observation`. Re-run `analyze` only when you
 need a different view (`--fields`/`--where-*`, `source vision`, etc.).

@@ -354,7 +354,10 @@ def test_the_attached_target_profile_passes_through_the_engine(
     assert report.tap_point == (60, 105)
     assert "engine-verified-swipe" in report.checks
     # Canonical pixels went out as logical points.
-    assert ("axe", "tap", "-x", "20", "-y", "35", "--udid", UDID) in host.argv_of("axe", "tap")
+    assert (
+        "axe", "tap", "-x", "20", "-y", "35",
+        "--tap-style", "physical", "--udid", UDID,
+    ) in host.argv_of("axe", "tap")
     assert host.input_for("axe", "type") == b"aua conformance"
     assert ("axe", "button", "home", "--udid", UDID) in host.argv_of("axe", "button")
     assert host.argv_of("axe", "swipe")

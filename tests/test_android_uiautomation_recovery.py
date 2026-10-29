@@ -88,7 +88,7 @@ def test_android_platform_constructs_the_android_owned_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     platform = AndroidPlatform(Config())
-    sentinel = object()
+    sentinel = SimpleNamespace()
     monkeypatch.setattr(platform, "prepare_host", lambda: None)
     monkeypatch.setattr(
         "android_ui_analyser.device.resolve_serial",
@@ -96,7 +96,124 @@ def test_android_platform_constructs_the_android_owned_runtime(
     )
     monkeypatch.setattr(
         "android_ui_analyser.platforms.android_runtime.AndroidDeviceRuntime",
-        lambda serial: sentinel if serial == "emulator-8888" else None,
+        lambda serial, **kwargs: (
+            (setattr(sentinel, "_development_tools", kwargs["development_tools"]) or sentinel)
+            if serial == "emulator-8888"
+            else None
+        ),
     )
 
     assert platform.connect() is sentinel
+    assert sentinel._development_tools is platform.capability("development_tools")
+
+
+def test_connection_releases_only_durably_owned_developer_helper_before_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser.device_ledger import Entry
+    from android_ui_analyser.platforms.android_device import Uiautomator2Device
+
+    runtime = AndroidDeviceRuntime.__new__(AndroidDeviceRuntime)
+    runtime.serial = "fixture-target"
+    events = []
+    state = {"remove_installed_helper": True}
+    from android_ui_analyser.device_ledger import ledger_dir
+    from android_ui_analyser.platforms.options_transport import platform_options_fingerprint
+
+    fingerprint = platform_options_fingerprint({}, key_dir=ledger_dir())
+    entries = [
+        Entry(key="unrelated", kind="other", op="restore_development_ui", args={"state": state}),
+        Entry(
+            key="development-tool-ui",
+            platform_options_fingerprint=fingerprint,
+            kind="development_tool_ui",
+            op="restore_development_ui",
+            args={"state": state},
+        ),
+    ]
+    monkeypatch.setattr(
+        "android_ui_analyser.device_ledger.read_ledger",
+        lambda serial: entries if serial == runtime.serial else [],
+    )
+    monkeypatch.setattr(
+        runtime,
+        "restore_development_ui",
+        lambda value: events.append(("restore", value)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        Uiautomator2Device, "_connect", lambda self: events.append(("connect", self.serial))
+    )
+    runtime._connect()
+    assert events == [("restore", state), ("connect", "fixture-target")]
+
+
+def test_connection_never_stops_developer_helper_without_its_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_ui_analyser.platforms.android_device import Uiautomator2Device
+
+    runtime = AndroidDeviceRuntime.__new__(AndroidDeviceRuntime)
+    runtime.serial = "fixture-target"
+    events = []
+    monkeypatch.setattr("android_ui_analyser.device_ledger.read_ledger", lambda _: [])
+    monkeypatch.setattr(
+        runtime, "restore_development_ui", lambda _: pytest.fail("unowned helper touched")
+    )
+    monkeypatch.setattr(Uiautomator2Device, "_connect", lambda self: events.append(self.serial))
+    runtime._connect()
+    assert events == ["fixture-target"]
+
+
+def test_connection_never_replays_helper_with_different_platform_options(monkeypatch):
+    from android_ui_analyser.device_ledger import Entry
+    from android_ui_analyser.errors import ConfigError
+
+    runtime = AndroidDeviceRuntime.__new__(AndroidDeviceRuntime)
+    runtime.serial = "fixture-target"
+    entry = Entry(
+        key="development-tool-ui",
+        kind="development_tool_ui",
+        op="restore_development_ui",
+        args={"state": {"remove_installed_helper": True, "instance_token": "fixture-boot"}},
+        platform_options_fingerprint="different-options",
+    )
+    monkeypatch.setattr("android_ui_analyser.device_ledger.read_ledger", lambda _: [entry])
+    monkeypatch.setattr(
+        runtime, "restore_development_ui", lambda _: pytest.fail("wrong options replayed")
+    )
+    with pytest.raises(ConfigError, match="different platform options"):
+        runtime._connect()
+
+
+def test_development_service_is_present_before_initial_connection(monkeypatch):
+    service = object()
+    seen = []
+    monkeypatch.setattr(
+        AndroidDeviceRuntime, "_connect", lambda self: seen.append(self._development_tools)
+    )
+    AndroidDeviceRuntime("fixture-target", development_tools=service)
+    assert seen == [service]
+
+
+def test_connection_does_not_proceed_after_unsuccessful_helper_restoration(monkeypatch):
+    from android_ui_analyser.device_ledger import Entry, ledger_dir
+    from android_ui_analyser.errors import ConfigError
+    from android_ui_analyser.platforms.android_device import Uiautomator2Device
+    from android_ui_analyser.platforms.options_transport import platform_options_fingerprint
+
+    runtime = AndroidDeviceRuntime.__new__(AndroidDeviceRuntime)
+    runtime.serial = "fixture-target"
+    entry = Entry(
+        key="development-tool-ui",
+        kind="development_tool_ui",
+        op="restore_development_ui",
+        args={"state": {}},
+        platform_options_fingerprint=platform_options_fingerprint({}, key_dir=ledger_dir()),
+    )
+    monkeypatch.setattr("android_ui_analyser.device_ledger.read_ledger", lambda _: [entry])
+    monkeypatch.setattr(runtime, "restore_development_ui", lambda _: {"ok": False})
+    monkeypatch.setattr(
+        Uiautomator2Device, "_connect", lambda _: pytest.fail("connected after failed cleanup")
+    )
+    with pytest.raises(ConfigError, match="unsuccessful"):
+        runtime._connect()

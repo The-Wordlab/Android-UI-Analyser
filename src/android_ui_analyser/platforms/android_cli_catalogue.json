@@ -1,0 +1,2505 @@
+{
+  "verified_version": "1.1.16717390",
+  "operations": [
+    {
+      "name": "analyze",
+      "summary": "Inspect package size, DEX content, and optimization results.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "analysis": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Artifact analyses to request."
+        },
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text",
+            "textproto"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 128,
+        "labels": [
+          "<path>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/analyze",
+      "action_kind": null
+    },
+    {
+      "name": "auth.login",
+      "summary": "Sign in to Google services in a browser.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "no-use-keyring": {
+          "type": "boolean"
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/auth_login",
+      "action_kind": null
+    },
+    {
+      "name": "auth.logout",
+      "summary": "Remove the current Google sign-in.",
+      "scope": "host",
+      "effect": "write",
+      "options": {},
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/auth_logout",
+      "action_kind": null
+    },
+    {
+      "name": "auth.status",
+      "summary": "Inspect the current Google sign-in.",
+      "scope": "host",
+      "effect": "read",
+      "options": {},
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/auth_status",
+      "action_kind": null
+    },
+    {
+      "name": "build",
+      "summary": "Build a project target.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "build-args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments to the project build system after its separator."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<reference>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/build",
+      "action_kind": null
+    },
+    {
+      "name": "completion",
+      "summary": "Install shell completion.",
+      "scope": "host",
+      "effect": "write",
+      "options": {},
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<shell>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/completion",
+      "action_kind": null
+    },
+    {
+      "name": "create",
+      "summary": "Create an Android project from a template.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "application-id": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Android package identity for a new project."
+        },
+        "force": {
+          "type": "boolean",
+          "description": "Allow the native overwrite or downgrade behavior."
+        },
+        "list": {
+          "type": "boolean",
+          "description": "List templates without creating a project."
+        },
+        "min-sdk": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Minimum Android SDK level for a new project."
+        },
+        "name": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Project display name."
+        },
+        "namespace": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Generated Kotlin/resource namespace."
+        },
+        "output": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Destination file or directory."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<template-name>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/create",
+      "action_kind": null
+    },
+    {
+      "name": "describe",
+      "summary": "Discover project targets and build artifact locations.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "project_dir": {
+          "type": "string",
+          "accepts_number": true
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/describe",
+      "action_kind": null
+    },
+    {
+      "name": "device.hub",
+      "summary": "Open a device mirroring and control window.",
+      "scope": "target",
+      "effect": "action",
+      "options": {
+        "codec": {
+          "type": "string",
+          "accepts_number": true
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/device_hub",
+      "retained_resources": "A desktop mirroring window may remain open after this command returns.",
+      "action_kind": null
+    },
+    {
+      "name": "device.remote.connect",
+      "summary": "Connect a reserved remote device.",
+      "scope": "host",
+      "effect": "provision",
+      "options": {
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<reservation-id>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/device_remote_connect",
+      "action_kind": null
+    },
+    {
+      "name": "device.remote.create",
+      "summary": "Reserve a remote device.",
+      "scope": "host",
+      "effect": "provision",
+      "options": {
+        "connect": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<codename>/<api>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/device_remote_create",
+      "retained_resources": "The reservation remains until explicitly removed or expired; provider charges may apply.",
+      "action_kind": null
+    },
+    {
+      "name": "device.remote.disconnect",
+      "summary": "Disconnect a remote device reservation.",
+      "scope": "host",
+      "effect": "provision",
+      "options": {
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<reservation-id>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/device_remote_disconnect",
+      "action_kind": null
+    },
+    {
+      "name": "device.remote.extend",
+      "summary": "Extend a remote device reservation.",
+      "scope": "host",
+      "effect": "provision",
+      "options": {
+        "duration": {
+          "type": "string",
+          "accepts_number": true,
+          "required": true,
+          "description": "Duration; seconds for traces, minutes for remote reservations."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<reservation-id>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/device_remote_extend",
+      "action_kind": null
+    },
+    {
+      "name": "device.remote.list",
+      "summary": "List remote device reservations.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "all": {
+          "type": "boolean",
+          "description": "Include all entries supported by the operation."
+        },
+        "short": {
+          "type": "boolean",
+          "description": "Use the provider compact view."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<reservation-id>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/device_remote_list",
+      "action_kind": null
+    },
+    {
+      "name": "device.remote.models",
+      "summary": "List remote device models.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/device_remote_models",
+      "action_kind": null
+    },
+    {
+      "name": "device.remote.projects",
+      "summary": "List projects available for remote devices.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "all": {
+          "type": "boolean",
+          "description": "Include all entries supported by the operation."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/device_remote_projects",
+      "action_kind": null
+    },
+    {
+      "name": "device.remote.remove",
+      "summary": "Remove a remote device reservation.",
+      "scope": "host",
+      "effect": "provision",
+      "options": {
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<reservation-id>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/device_remote_remove",
+      "action_kind": null
+    },
+    {
+      "name": "docs.fetch",
+      "summary": "Fetch an official knowledge-base article.",
+      "scope": "host",
+      "effect": "read",
+      "options": {},
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<url>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/docs_fetch",
+      "action_kind": null
+    },
+    {
+      "name": "docs.search",
+      "summary": "Search the official Android knowledge base.",
+      "scope": "host",
+      "effect": "read",
+      "options": {},
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<query>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/docs_search",
+      "action_kind": null
+    },
+    {
+      "name": "emulator.create",
+      "summary": "Create a virtual device definition.",
+      "scope": "host",
+      "effect": "provision",
+      "options": {
+        "list-profiles": {
+          "type": "boolean",
+          "description": "List virtual-device profiles without creating a device."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<profile>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/emulator_create",
+      "action_kind": null
+    },
+    {
+      "name": "emulator.list",
+      "summary": "List virtual device definitions.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "long": {
+          "type": "boolean",
+          "description": "Include detailed metadata."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/emulator_list",
+      "action_kind": null
+    },
+    {
+      "name": "emulator.remove",
+      "summary": "Delete a virtual device definition.",
+      "scope": "host",
+      "effect": "provision",
+      "options": {},
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<definition-id>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": "virtual.delete",
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/emulator_remove",
+      "action_kind": null,
+      "unsupported_options": [
+        "force"
+      ]
+    },
+    {
+      "name": "emulator.start",
+      "summary": "Boot an owned virtual target through AUA.",
+      "scope": "host",
+      "effect": "provision",
+      "options": {
+        "cold": {
+          "type": "boolean",
+          "description": "Boot without loading a saved snapshot."
+        },
+        "headless": {
+          "type": "boolean",
+          "description": "Launch the virtual target without a window."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<device>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": "virtual.start",
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/emulator_start",
+      "action_kind": null
+    },
+    {
+      "name": "emulator.stop",
+      "summary": "Stop an AUA-owned target ID, such as emulator-5554.",
+      "scope": "host",
+      "effect": "provision",
+      "options": {},
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<owned-target-id>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": "virtual.stop",
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/emulator_stop",
+      "action_kind": null
+    },
+    {
+      "name": "info",
+      "summary": "Inspect the Android development environment.",
+      "scope": "host",
+      "effect": "read",
+      "options": {},
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<field>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/info",
+      "action_kind": null
+    },
+    {
+      "name": "init",
+      "summary": "Install Android CLI configuration and agent resources.",
+      "scope": "host",
+      "effect": "write",
+      "options": {},
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/init",
+      "action_kind": null
+    },
+    {
+      "name": "input.key",
+      "summary": "Send a navigation or hardware key.",
+      "scope": "target",
+      "effect": "action",
+      "options": {
+        "alt": {
+          "type": "boolean"
+        },
+        "ctrl": {
+          "type": "boolean"
+        },
+        "shift": {
+          "type": "boolean"
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<key>"
+        ]
+      },
+      "ui_automation": true,
+      "observe": true,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/input_key",
+      "action_kind": "key"
+    },
+    {
+      "name": "input.scroll",
+      "summary": "Scroll a container toward an optional selector.",
+      "scope": "target",
+      "effect": "action",
+      "options": {
+        "amount": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "dir": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Gesture direction: up, down, left, or right."
+        },
+        "match": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Selector ambiguity policy: single or first."
+        },
+        "speed": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "until": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Stop scrolling when this selector matches."
+        },
+        "wait": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Native wait budget or blocking mode, depending on this operation."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<target>"
+        ]
+      },
+      "ui_automation": true,
+      "observe": true,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/input_scroll",
+      "action_kind": "scroll"
+    },
+    {
+      "name": "input.swipe",
+      "summary": "Swipe from a matching element.",
+      "scope": "target",
+      "effect": "action",
+      "options": {
+        "dir": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Gesture direction: up, down, left, or right."
+        },
+        "distance": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "match": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Selector ambiguity policy: single or first."
+        },
+        "speed": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "wait": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Native wait budget or blocking mode, depending on this operation."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<target>"
+        ]
+      },
+      "ui_automation": true,
+      "observe": true,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/input_swipe",
+      "action_kind": "swipe"
+    },
+    {
+      "name": "input.tap",
+      "summary": "Tap a matching element.",
+      "scope": "target",
+      "effect": "action",
+      "options": {
+        "match": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Selector ambiguity policy: single or first."
+        },
+        "wait": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Native wait budget or blocking mode, depending on this operation."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<target>"
+        ]
+      },
+      "ui_automation": true,
+      "observe": true,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/input_tap",
+      "action_kind": "tap"
+    },
+    {
+      "name": "input.text",
+      "summary": "Replace text in a matching input.",
+      "scope": "target",
+      "effect": "action",
+      "options": {
+        "match": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Selector ambiguity policy: single or first."
+        },
+        "submit": {
+          "type": "boolean",
+          "description": "Submit the input using an Enter/OK event."
+        },
+        "wait": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Native wait budget or blocking mode, depending on this operation."
+        }
+      },
+      "arguments": {
+        "minimum": 2,
+        "maximum": 2,
+        "labels": [
+          "<string>",
+          "<selector>"
+        ]
+      },
+      "ui_automation": true,
+      "observe": true,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/input_text",
+      "action_kind": "input"
+    },
+    {
+      "name": "install",
+      "summary": "Deploy APKs or a build target.",
+      "scope": "target",
+      "effect": "install",
+      "options": {
+        "apks": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Comma-separated APK paths."
+        },
+        "use-delta-install": {
+          "type": "boolean",
+          "description": "Use native incremental deployment; defaults to enabled upstream."
+        },
+        "build-args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments to the project build system after its separator."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<apks_or_reference>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/install",
+      "unsupported_options": [
+        "install-options"
+      ],
+      "action_kind": null
+    },
+    {
+      "name": "layout",
+      "summary": "Read the live accessibility hierarchy.",
+      "scope": "target",
+      "effect": "read",
+      "options": {
+        "diff": {
+          "type": "boolean"
+        },
+        "flat": {
+          "type": "boolean",
+          "description": "Return a flat accessibility node list."
+        },
+        "full": {
+          "type": "boolean",
+          "description": "Include hidden and noninteractive hierarchy nodes."
+        },
+        "no-idle": {
+          "type": "boolean",
+          "description": "Do not wait for layout idle before capture."
+        },
+        "output": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Destination file or directory."
+        },
+        "pretty": {
+          "type": "boolean"
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": true,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/layout",
+      "action_kind": null
+    },
+    {
+      "name": "preview.list",
+      "summary": "Discover Compose preview functions in a target.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "all": {
+          "type": "boolean",
+          "description": "Include all entries supported by the operation."
+        },
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        },
+        "build-args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments to the project build system after its separator."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<reference>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/preview_list",
+      "action_kind": null
+    },
+    {
+      "name": "preview.render",
+      "summary": "Compile and render Compose previews and component trees.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "component-tree": {
+          "type": "boolean",
+          "description": "Export component metadata alongside the preview."
+        },
+        "daemon": {
+          "type": "boolean",
+          "description": "Reuse the native preview renderer between commands."
+        },
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        },
+        "fqn": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "required": true,
+          "description": "Fully qualified preview function name; repeat to render several."
+        },
+        "no-image": {
+          "type": "boolean",
+          "description": "Export only component metadata; requires component-tree."
+        },
+        "output": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Destination file or directory."
+        },
+        "build-args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments to the project build system after its separator."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<reference>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/preview_render",
+      "action_kind": null
+    },
+    {
+      "name": "profiler.heapdump.capture",
+      "summary": "Capture a JVM heap snapshot.",
+      "scope": "target",
+      "effect": "profile",
+      "options": {
+        "gc": {
+          "type": "boolean",
+          "description": "Request garbage collection before heap capture."
+        },
+        "output": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Destination file or directory."
+        },
+        "pid": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Process identifier."
+        },
+        "process": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Application process name for heap capture."
+        },
+        "timeout": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Heap-capture deadline in seconds."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": "capture",
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/profiler_heapdump_capture",
+      "action_kind": null
+    },
+    {
+      "name": "profiler.session.list",
+      "summary": "List profiling sessions.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "all": {
+          "type": "boolean",
+          "description": "Include all entries supported by the operation."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/profiler_session_list",
+      "action_kind": null
+    },
+    {
+      "name": "profiler.session.status",
+      "summary": "Inspect the owned profiling session.",
+      "scope": "target",
+      "effect": "read",
+      "options": {},
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": "read",
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/profiler_session_status",
+      "action_kind": null,
+      "profile_kinds": [
+        "trace",
+        "heap"
+      ]
+    },
+    {
+      "name": "profiler.session.terminate",
+      "summary": "Terminate the owned profiling session and restore its target.",
+      "scope": "target",
+      "effect": "profile",
+      "options": {},
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": "end",
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/profiler_session_terminate",
+      "action_kind": null,
+      "profile_kinds": [
+        "trace",
+        "heap"
+      ]
+    },
+    {
+      "name": "profiler.systemtrace.prepare",
+      "summary": "Prepare an owned system-trace session.",
+      "scope": "target",
+      "effect": "profile",
+      "options": {
+        "activity": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Activity to launch."
+        },
+        "disable": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Trace groups or fields to omit."
+        },
+        "enable": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Trace groups or fields to include."
+        },
+        "launch": {
+          "type": "boolean",
+          "description": "Launch the profiled application."
+        },
+        "package": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Android application package identifier."
+        },
+        "preset": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Trace configuration preset: default or graphics."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": "begin",
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/profiler_systemtrace_prepare",
+      "action_kind": null,
+      "next_operation": "profiler.systemtrace.start"
+    },
+    {
+      "name": "profiler.systemtrace.start",
+      "summary": "Start an owned system-trace recording.",
+      "scope": "target",
+      "effect": "profile",
+      "options": {
+        "activity": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Activity to launch."
+        },
+        "disable": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Trace groups or fields to omit."
+        },
+        "duration": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Duration; seconds for traces, minutes for remote reservations."
+        },
+        "enable": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Trace groups or fields to include."
+        },
+        "keep-session": {
+          "type": "boolean",
+          "description": "Keep profiling preparation active after this recording ends."
+        },
+        "launch": {
+          "type": "boolean",
+          "description": "Launch the profiled application."
+        },
+        "output": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Destination file or directory."
+        },
+        "package": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Android application package identifier."
+        },
+        "preset": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Trace configuration preset: default or graphics."
+        },
+        "wait": {
+          "type": "boolean",
+          "description": "Native wait budget or blocking mode, depending on this operation."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": "begin",
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/profiler_systemtrace_start",
+      "action_kind": null,
+      "next_operation": "profiler.systemtrace.stop"
+    },
+    {
+      "name": "profiler.systemtrace.stop",
+      "summary": "Stop recording and collect the trace.",
+      "scope": "target",
+      "effect": "profile",
+      "options": {
+        "keep-session": {
+          "type": "boolean",
+          "description": "Keep profiling preparation active after this recording ends."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": "end",
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/profiler_systemtrace_stop",
+      "action_kind": null
+    },
+    {
+      "name": "run",
+      "summary": "Deploy and launch APKs or a build target.",
+      "scope": "target",
+      "effect": "install",
+      "options": {
+        "activity": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Activity to launch."
+        },
+        "apks": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Comma-separated APK paths."
+        },
+        "type": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "use-delta-install": {
+          "type": "boolean",
+          "description": "Use native incremental deployment; defaults to enabled upstream."
+        },
+        "build-args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments to the project build system after its separator."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<apks_or_reference>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": true,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/run",
+      "unsupported_options": [
+        "install-options",
+        "debug"
+      ],
+      "action_kind": "app-launch"
+    },
+    {
+      "name": "screen.capture",
+      "summary": "Capture and optionally annotate a device screenshot.",
+      "scope": "target",
+      "effect": "read",
+      "options": {
+        "annotate": {
+          "type": "boolean",
+          "description": "Draw numbered target boxes on the captured image."
+        },
+        "debug": {
+          "type": "boolean"
+        },
+        "distance": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "edge-thresh-strong": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "edge-thresh-weak": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "features": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "min-area": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "min-nested-area": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "min-rect": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "min-round": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "output": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Destination file or directory."
+        },
+        "threshold": {
+          "type": "string",
+          "accepts_number": true
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/screen_capture",
+      "action_kind": null
+    },
+    {
+      "name": "screen.resolve",
+      "summary": "Resolve annotated screenshot labels into coordinates.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "screenshot": {
+          "type": "string",
+          "accepts_number": true,
+          "required": true
+        },
+        "string": {
+          "type": "string",
+          "accepts_number": true,
+          "required": true
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/screen_resolve",
+      "action_kind": null
+    },
+    {
+      "name": "sdk.install",
+      "summary": "Install Android SDK packages.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "beta": {
+          "type": "boolean"
+        },
+        "canary": {
+          "type": "boolean"
+        },
+        "force": {
+          "type": "boolean",
+          "description": "Allow the native overwrite or downgrade behavior."
+        },
+        "no-downgrade": {
+          "type": "boolean"
+        },
+        "ignore-outdated-xmls": {
+          "type": "boolean"
+        },
+        "platform": {
+          "type": "string",
+          "accepts_number": true
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 128,
+        "labels": [
+          "<package>[@<version>]"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/sdk_install",
+      "action_kind": null
+    },
+    {
+      "name": "sdk.list",
+      "summary": "List installed or available SDK packages.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "all": {
+          "type": "boolean",
+          "description": "Include all entries supported by the operation."
+        },
+        "all-versions": {
+          "type": "boolean"
+        },
+        "beta": {
+          "type": "boolean"
+        },
+        "canary": {
+          "type": "boolean"
+        },
+        "ignore-outdated-xmls": {
+          "type": "boolean"
+        },
+        "platform": {
+          "type": "string",
+          "accepts_number": true
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<pattern>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/sdk_list",
+      "action_kind": null
+    },
+    {
+      "name": "sdk.remove",
+      "summary": "Remove Android SDK packages.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "ignore-outdated-xmls": {
+          "type": "boolean"
+        },
+        "platform": {
+          "type": "string",
+          "accepts_number": true
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 128,
+        "labels": [
+          "<package>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/sdk_remove",
+      "action_kind": null
+    },
+    {
+      "name": "sdk.update",
+      "summary": "Update Android SDK packages.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "beta": {
+          "type": "boolean"
+        },
+        "canary": {
+          "type": "boolean"
+        },
+        "force": {
+          "type": "boolean",
+          "description": "Allow the native overwrite or downgrade behavior."
+        },
+        "no-downgrade": {
+          "type": "boolean"
+        },
+        "ignore-outdated-xmls": {
+          "type": "boolean"
+        },
+        "platform": {
+          "type": "string",
+          "accepts_number": true
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 128,
+        "labels": [
+          "<package>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/sdk_update",
+      "action_kind": null
+    },
+    {
+      "name": "signals.context",
+      "summary": "Discover accessible Crashlytics projects and applications.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "firebase-project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Firebase project identifier."
+        },
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/signals_context",
+      "action_kind": null
+    },
+    {
+      "name": "signals.crashes.describe",
+      "summary": "Inspect a production crash issue.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        },
+        "include": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true
+        },
+        "sample-id": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "timeframe": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Production signal time window."
+        },
+        "firebase-app": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Firebase application identifier for the selected data."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<issue-id>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/signals_crashes_describe",
+      "action_kind": null
+    },
+    {
+      "name": "signals.crashes.facets",
+      "summary": "Group production crash issues by dimension.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "api-level": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "app-version": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "device-filter": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Production device-model filter; does not select a local target."
+        },
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        },
+        "limit": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Maximum number of records."
+        },
+        "timeframe": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Production signal time window."
+        },
+        "type": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "firebase-app": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Firebase application identifier for the selected data."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": [
+          "<dimension...>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/signals_crashes_facets",
+      "action_kind": null
+    },
+    {
+      "name": "signals.crashes.list",
+      "summary": "List production crash, ANR, and nonfatal issues.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "api-level": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "app-version": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "device-filter": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Production device-model filter; does not select a local target."
+        },
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        },
+        "limit": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Maximum number of records."
+        },
+        "min-event-count": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "min-user-count": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "sort-by": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Metric used to order results."
+        },
+        "timeframe": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Production signal time window."
+        },
+        "type": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "firebase-app": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Firebase application identifier for the selected data."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/signals_crashes_list",
+      "action_kind": null
+    },
+    {
+      "name": "signals.crashes.samples",
+      "summary": "Inspect event samples for a production issue.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "api-level": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "app-version": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "device-filter": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Production device-model filter; does not select a local target."
+        },
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        },
+        "limit": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Maximum number of records."
+        },
+        "timeframe": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Production signal time window."
+        },
+        "firebase-app": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Firebase application identifier for the selected data."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<issue-id>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/signals_crashes_samples",
+      "action_kind": null
+    },
+    {
+      "name": "signals.heaps.describe",
+      "summary": "Inspect a production heap-dump event.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        },
+        "include": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true
+        },
+        "firebase-app": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Firebase application identifier for the selected data."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<heap-id>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/signals_heaps_describe",
+      "action_kind": null
+    },
+    {
+      "name": "signals.heaps.download",
+      "summary": "Download production heap traces.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "force": {
+          "type": "boolean",
+          "description": "Allow the native overwrite or downgrade behavior."
+        },
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        },
+        "output": {
+          "type": "string",
+          "accepts_number": true,
+          "required": true,
+          "description": "Destination file or directory."
+        },
+        "firebase-app": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Firebase application identifier for the selected data."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 128,
+        "labels": [
+          "<heap-id...>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/signals_heaps_download",
+      "action_kind": null
+    },
+    {
+      "name": "signals.heaps.list",
+      "summary": "List production heap-dump events.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "api-level": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "app-version": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "device-filter": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Production device-model filter; does not select a local target."
+        },
+        "format": {
+          "type": "string",
+          "accepts_number": true,
+          "enum": [
+            "json",
+            "text"
+          ],
+          "description": "Native output encoding; AUA defaults to JSON when available."
+        },
+        "kind": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "limit": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Maximum number of records."
+        },
+        "sort-by": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Metric used to order results."
+        },
+        "timeframe": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Production signal time window."
+        },
+        "firebase-app": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Firebase application identifier for the selected data."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/signals_heaps_list",
+      "action_kind": null
+    },
+    {
+      "name": "skills.add",
+      "summary": "Install an official Android skill.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "agent": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Agent skill installation target."
+        },
+        "all": {
+          "type": "boolean",
+          "description": "Include all entries supported by the operation."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<skill>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/skills_add",
+      "action_kind": null
+    },
+    {
+      "name": "skills.find",
+      "summary": "Search official Android skills.",
+      "scope": "host",
+      "effect": "read",
+      "options": {},
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "keyword"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/skills_find",
+      "action_kind": null
+    },
+    {
+      "name": "skills.list",
+      "summary": "List official Android skills.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "agent": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Agent skill installation target."
+        },
+        "long": {
+          "type": "boolean",
+          "description": "Include detailed metadata."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/skills_list",
+      "action_kind": null
+    },
+    {
+      "name": "skills.remove",
+      "summary": "Remove an installed Android skill.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "agent": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Agent skill installation target."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<skill>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/skills_remove",
+      "action_kind": null
+    },
+    {
+      "name": "skills.update",
+      "summary": "Update installed Android skills.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "agent": {
+          "type": "string",
+          "accepts_number": true,
+          "repeatable": true,
+          "description": "Agent skill installation target."
+        },
+        "all": {
+          "type": "boolean",
+          "description": "Include all entries supported by the operation."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 1,
+        "labels": [
+          "<skill>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/skills_update",
+      "action_kind": null
+    },
+    {
+      "name": "studio.analyze-file",
+      "summary": "Analyze source using a running Android Studio instance.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "pid": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Process identifier."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<path>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/studio_analyze-file",
+      "action_kind": null
+    },
+    {
+      "name": "studio.check",
+      "summary": "Discover running Android Studio instances.",
+      "scope": "host",
+      "effect": "read",
+      "options": {},
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/studio_check",
+      "action_kind": null
+    },
+    {
+      "name": "studio.find-declaration",
+      "summary": "Locate symbol declarations using Android Studio.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "context-file": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "pid": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Process identifier."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        },
+        "short": {
+          "type": "boolean",
+          "description": "Use the provider compact view."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<symbol>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/studio_find-declaration",
+      "action_kind": null
+    },
+    {
+      "name": "studio.find-usages",
+      "summary": "Locate symbol usages using Android Studio.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "context-file": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "pid": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Process identifier."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        },
+        "short": {
+          "type": "boolean",
+          "description": "Use the provider compact view."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<symbol>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/studio_find-usages",
+      "action_kind": null
+    },
+    {
+      "name": "studio.open-file",
+      "summary": "Open source in Android Studio.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "pid": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Process identifier."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 1,
+        "labels": [
+          "<path>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/studio_open-file",
+      "action_kind": null
+    },
+    {
+      "name": "studio.render-compose-preview",
+      "summary": "Render a Compose preview using Android Studio.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "output-image-file": {
+          "type": "string",
+          "accepts_number": true
+        },
+        "pid": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Process identifier."
+        },
+        "print-semantics": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 2,
+        "maximum": 2,
+        "labels": [
+          "<path>",
+          "<composable>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/studio_render-compose-preview",
+      "action_kind": null
+    },
+    {
+      "name": "studio.version-lookup",
+      "summary": "Look up artifact versions using Android Studio.",
+      "scope": "host",
+      "effect": "read",
+      "options": {
+        "pid": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Process identifier."
+        },
+        "project": {
+          "type": "string",
+          "accepts_number": true,
+          "description": "Provider project or IDE project selector."
+        }
+      },
+      "arguments": {
+        "minimum": 1,
+        "maximum": 128,
+        "labels": [
+          "<artifacts...>"
+        ]
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": false,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/studio_version-lookup",
+      "action_kind": null
+    },
+    {
+      "name": "update",
+      "summary": "Update the optional Android CLI installation.",
+      "scope": "host",
+      "effect": "write",
+      "options": {
+        "url": {
+          "type": "string",
+          "accepts_number": true
+        }
+      },
+      "arguments": {
+        "minimum": 0,
+        "maximum": 0,
+        "labels": []
+      },
+      "ui_automation": false,
+      "observe": false,
+      "needs_confirmation": true,
+      "profile_action": null,
+      "route": null,
+      "source": "https://developer.android.com/tools/agents/android-cli/commands/update",
+      "action_kind": null
+    }
+  ]
+}

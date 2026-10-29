@@ -97,6 +97,11 @@ on both success and failure; the requested screenshot/evidence file is retained.
   key on iOS: `aua key-and-analyze back` performs the system back gesture (a swipe in from the left edge).
 - **Typing.** ASCII goes through the HID keyboard. Anything else (accents, emoji, other scripts)
   is placed on the simulator pasteboard and pasted, so `input-and-analyze` accepts any text.
+- **Tapping.** AUA selects AXe's physical touch-down/up tap style. This avoids the simulator
+  tap path that can acknowledge a tap without delivering it on Xcode 27. AXe must support
+  `tap --tap-style physical` (verified with AXe 1.8.0); use `brew upgrade axe` if an older
+  installation rejects the option. A successful tool exit still needs a fresh observation
+  or an arrival assertion to prove that the intended control responded.
 - **Connecting.** `session start` chooses a free booted simulator and retains its lease for
   later calls; omit `--serial`. An explicit UDID/unique name can select an existing simulator;
   naming a shut-down simulator boots it first (`boot_timeout_s`).

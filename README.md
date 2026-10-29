@@ -1216,6 +1216,45 @@ so later agents and contributors can reproduce or improve the adapter without de
 
 ---
 
+## Optional Android development tools
+
+Install Google's Android CLI only when you want its additional tools:
+
+```bash
+aua devtools status                         # no device needed
+aua devtools setup                          # explicit, user-local installation
+aua devtools catalogue                      # discover operations and accepted options
+aua devtools run build :app:assembleDebug --project /path/to/project --timeout 600
+aua devtools run analyze /path/to/app.apk
+```
+
+The optional integration covers project builds, SDKs, artifact analysis, documentation, Studio,
+deployment, UI inspection, profiling and authorized cloud diagnostics. Device operations use AUA's
+leased target. The existing automation backend remains the default.
+
+Compose previews give an agent images **and component trees** before deployment:
+
+```bash
+aua preview list :app --project /path/to/project
+aua preview render :app --project /path/to/project \
+  --fqn com.example.demo.HomeScreenKt.HomePreview --output /path/to/evidence
+aua preview inspect /path/to/evidence/HomePreview_0.json
+```
+
+This compiles the preview target but needs no emulator or IDE. The component tree contains bounds,
+semantics, modifiers and source locations. During a normal device session, `aua profile start`
+and `profile stop` collect a trace around AUA actions; `profile heap` captures JVM memory.
+Profiling state has durable, caller-scoped cleanup.
+
+Authored agent tests use `aua journey validate|start|status|check|record|finish`. The calling agent
+performs each instruction, deterministic assertions evaluate fresh evidence, and visual reviews
+remain explicitly agent-assessed. Journeys reuse AUA's ordinary session and cleanup workflow.
+
+CLI and MCP share these implementations. See [optional Android CLI integration](docs/android-cli.md),
+[the complete operation catalogue](docs/android-cli-reference.md),
+[Compose previews](docs/compose-previews.md), [agent journeys](docs/journeys.md), and
+[executed validation evidence](docs/android-cli-validation.md).
+
 ## iOS simulators
 
 The same commands drive an iOS simulator when you select the built-in `ios` platform:
@@ -1805,6 +1844,13 @@ map/`reconcile_*`/`knowledge_*`,
 `proxy_start` / `proxy_stop` / `mock_replay`, `configure`,
 `app_log_prefs_get` / `app_log_prefs_set`.
 
+The full MCP profile also exposes `development_tools_status`, `development_tools_setup`,
+`development_tools_catalogue`, and `development_tool`, plus `preview_list`, `preview_render`,
+`preview_inspect`, `preview_check`, `journey_validate`, `journey_start`, `journey_status`,
+`journey_check`, `journey_record`, and `journey_finish`. Profiling uses `development_tool` with
+the catalogue's profiler operations; `profile_kind: "heap"` selects heap session status or
+cancellation without affecting an owned trace.
+
 Example MCP client config (Claude Desktop / `claude_desktop_config.json`):
 
 ```json
@@ -2096,6 +2142,10 @@ Run `aua --help`, or `aua <command> --help` for any command. Global flags (`--fo
 |---|---|
 | `aua doctor` | Check environment plus separate Claude/Codex installed-skill freshness |
 | `aua capabilities [--goal "…"]` | Discover the canonical CLI/MCP capability catalogue |
+| `aua devtools status\|setup\|catalogue\|run` | Discover, explicitly install, and use optional Android CLI tools; inspect each operation's scope and accepted options |
+| `aua preview list\|render\|inspect\|check` | Compile Compose previews without a device, inspect images/component trees, and check saved evidence |
+| `aua profile start\|status\|stop\|cancel\|heap` | Profile the leased target with durable cleanup; requires optional Android CLI |
+| `aua journey validate\|start\|status\|check\|record\|finish` | Execute authored agent tests with separate assertion and visual-review evidence |
 | `aua session start --goal "…"` | Observe once and return one exact next call; optionally add `--contract`, `--artifacts-dir`, `--wait-for-lease`, `--animations` |
 | `aua session review\|finish` | Quantify calls; strict contracts keep finish active until proven (`--allow-incomplete` is explicit) |
 | `aua session candidate-flow NAME` | Preview a proven action window; reset + replay before `--save` |

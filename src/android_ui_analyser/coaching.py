@@ -25,7 +25,8 @@ _MANUAL_ACTIONS = frozenset(
     }
 )
 _ENGINE_PROGRESS_COMMANDS = frozenset(
-    {"session_start", "session_progress", "session_autopilot", "session_finish"}
+    {"session_start", "session_progress", "session_autopilot", "session_finish",
+     "journey_start", "journey_status", "journey_check", "journey_record", "journey_finish"}
 )
 
 
@@ -296,7 +297,7 @@ def _record_session_artifact(
     if stored is not None:
         _attach_observation_contract(result, stored)
 
-    if cmd == "session_finish" and data.get("terminated") is True:
+    if cmd in {"session_finish", "journey_finish"} and data.get("terminated") is True:
         raw_progress = data.get("goal_progress")
         progress: dict[str, Any] = raw_progress if isinstance(raw_progress, dict) else {}
         raw_checkpoints = progress.get("phases")
@@ -309,7 +310,10 @@ def _record_session_artifact(
         candidate_yaml = candidate.get("yaml") if isinstance(candidate, dict) else None
         finalized = store.finalize(
             data,
-            verdict="passed" if data.get("ok") and data.get("finished") else "failed",
+            verdict=(
+                str(data.get("verdict") or "incomplete") if cmd == "journey_finish" else
+                "passed" if data.get("ok") and data.get("finished") else "failed"
+            ),
             checkpoints=checkpoints,
             candidate_yaml=candidate_yaml if isinstance(candidate_yaml, str) else None,
         )
@@ -431,7 +435,15 @@ def decorate_result(
     try:
         data = _payload(result) or {}
         existing_progress = data.get("goal_progress")
-        if normalized in _ENGINE_PROGRESS_COMMANDS and isinstance(existing_progress, dict):
+        authored_journey = False
+        if normalized not in _ENGINE_PROGRESS_COMMANDS:
+            from .journeys import companion_path
+
+            state = engine._session_state()  # noqa: SLF001 - host-only persisted state
+            if companion_path(engine.config.cache.dir, state).is_file():
+                existing_progress = engine.journey_status(state.session_id)["goal_progress"]
+                authored_journey = True
+        if (normalized in _ENGINE_PROGRESS_COMMANDS or authored_journey) and isinstance(existing_progress, dict):
             # These Engine methods already performed the complete session/policy refresh. Reusing
             # their answer avoids a second local-model generation in MCP, in-process CLI, and the
             # warm daemon response decorator while preserving the established nested envelope.

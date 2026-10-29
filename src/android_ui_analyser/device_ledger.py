@@ -734,6 +734,26 @@ class UndoContext:
         return self.capability(name)
 
 
+def _undo_development_tool(ctx: UndoContext, args: dict[str, Any]) -> str:
+    session_id = str(args.get("session_id") or "")
+    if not session_id:
+        raise ValueError("developer-tool cleanup requires an owned session id")
+    result = ctx.require_device("device.development_tools").restore_development_tool(session_id)
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise RuntimeError("developer-tool session restoration failed")
+    return f"developer-tool session {session_id} ended and device restored"
+
+
+def _undo_development_ui(ctx: UndoContext, args: dict[str, Any]) -> str:
+    state = args.get("state")
+    if not isinstance(state, dict):
+        raise ValueError("developer-tool UI cleanup requires its recorded baseline")
+    result = ctx.require_device("device.development_tools").restore_development_ui(state)
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise RuntimeError("developer-tool UI helper restoration failed")
+    return "developer-tool UI helper released and installation baseline restored"
+
+
 def _undo_set_http_proxy(ctx: UndoContext, args: dict[str, Any]) -> str:
     host_port = args.get("host_port")
     ctx.require_device("device.proxy").set_http_proxy(host_port or None)
@@ -1005,6 +1025,12 @@ class UndoOp:
 
 
 UNDO_OPS: dict[str, UndoOp] = {
+    "restore_development_ui": UndoOp(
+        _undo_development_ui, True, 5, "release the owned tool UI helper and restore its installation baseline"
+    ),
+    "restore_development_tool": UndoOp(
+        _undo_development_tool, True, 35, "end the owned profiling session and restore device state"
+    ),
     "set_http_proxy": UndoOp(_undo_set_http_proxy, True, 10, "un-point the device's HTTP proxy"),
     "remove_reverse_port": UndoOp(
         _undo_remove_reverse_port, True, 20, "drop the host port tunnel"
@@ -1087,6 +1113,25 @@ class Mutation:
 
 
 MUTATION_CATALOGUE: dict[str, Mutation] = {
+    "development_tool_ui": Mutation(
+        "development_tool_ui", "platforms/android_runtime.py:execute_development_tool",
+        "restore_development_ui",
+        "Native UI tooling installs and retains an instrumentation helper. Record its baseline "
+        "before execution; release its exclusive UI service and remove only a newly installed helper.",
+    ),
+    "development_tool_profile": Mutation(
+        "development_tool_profile", "platforms/android_runtime.py:execute_development_tool",
+        "restore_development_tool",
+        "Profiling changes device/app settings and keeps a daemon alive. The engine records "
+        "the exact caller-owned session id before prepare/start/capture; stop/terminate retires it.",
+    ),
+    "development_tool_interaction": Mutation(
+        "development_tool_interaction", "platforms/android_runtime.py:execute_development_tool",
+        None,
+        "Explicit app installs, launches and UI interactions are the requested test actions; "
+        "automatically uninstalling a build or replaying inverse UI gestures would destroy "
+        "user data or repeat a transaction. Temporary profiling state is recorded separately.",
+    ),
     "web_unpacked_extensions": Mutation(
         "web_unpacked_extensions",
         "platforms/web_tools.py:_replace_context",

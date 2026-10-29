@@ -27,6 +27,7 @@ SKILL_DESCRIPTION = (
     "Test, inspect and automate Android apps, iOS simulator apps, websites, web apps and "
     "Chromium/Electron UIs with AUA MCP or CLI. Use for UI debugging, screenshots, verifying "
     "new features/fixes and browser console/network diagnostics. "
+    "Also use for Compose previews, agent journeys and optional Android CLI tools. "
     "Not for general web research or backend tests except `aua api run`. "
     "Respect an explicitly requested tool."
 )
@@ -38,7 +39,8 @@ DEFAULT_SKILL_PATH = Path(".claude/skills/android-ui-analyser/SKILL.md")
 SESSION_PROTOCOL: list[tuple[str, str]] = [
     (
         "Start from the user's goal",
-        'Run `aua session start --goal "<what you must verify>"` first. It leases an available '
+        'For live UI work, run `aua session start --goal "<what you must verify>"` first. Host-only '
+        '`devtools` and `preview` commands need no session or device. Session start leases an available '
         "device, reuses the warm daemon, observes the foreground app once, and returns relevant "
         "capabilities plus one exact `recommended_call` in both CLI and MCP form. Its selection "
         "order is verified context-compatible `goto`, a matching safe flow, a proven deeplink, "
@@ -1278,6 +1280,37 @@ KEY_FLAGS: list[tuple[str, str]] = [
         "`dev profile ac|default` (AC: anim off + crashes on; always restore)",
     ),
     (
+        "optional development tools",
+        "`devtools status|setup`; `devtools catalogue [operation]`; "
+        "`devtools run <operation> [arguments] --options '<JSON>' --project <directory> "
+        "--timeout <seconds> [--yes]`. "
+        "Inspect the catalogue first: host operations need no device; target operations use "
+        "the active lease. Installation is explicit and never changes AUA's default backend.",
+    ),
+    (
+        "Compose previews",
+        "`preview list [reference] --project <directory> [--all]`; `preview render [reference] "
+        "--fqn <name> --project <directory> [--output <path>] [--daemon]`; "
+        "`preview inspect <tree.json> [--max-nodes N]`; `preview check <tree.json> "
+        "--checks '<JSON array>'`. `--no-image` requires component-tree export. "
+        "Artifact IDs are not live element IDs; previews compile without a device.",
+    ),
+    (
+        "profiling",
+        "`profile start [--package <package>] [--output <trace>] [--duration <seconds>] "
+        "[--wait] [--launch]`; `profile status|stop|cancel`; "
+        "`profile heap <process> [--output <heap.hprof>]`. Use within a device session. "
+        "The exact owned profiling session has durable cleanup.",
+    ),
+    (
+        "authored agent journeys",
+        "`journey validate|start <file.yaml>`; start accepts `--app`, `--apk`, "
+        "`--artifacts-dir`, `--headed`, and `--no-provision-target`. "
+        "`journey check` verifies assertions; `journey record --fingerprint <observed-hash> "
+        "--evidence '<facts>' [--failed]` records agent judgement. `journey status` shows progress; "
+        "`journey finish [--stop-started-target]` cleans up. Failed proof does not advance.",
+    ),
+    (
         "a11y",
         "`a11y scroll <id|--rid …> [--forward|--backward]`, "
         "`a11y action <id> CLICK|LONG_CLICK|SCROLL_FORWARD|…`; analyze `--no-ime`",
@@ -1714,6 +1747,34 @@ def render_markdown(*, brief: bool = False) -> str:
     )
 
     p.append("")
+    p.append("## Optional developer tools, Compose previews and agent journeys")
+    p.append(
+        "`aua devtools status` discovers the optional Google Android CLI. Install it explicitly "
+        "with `aua devtools setup`; normal AUA remains independent of it. Inspect "
+        "`aua devtools catalogue <operation>` before `aua devtools run <operation> [arguments] "
+        "--options '<JSON>' --project <directory>`. MCP exposes `development_tools_status`, "
+        "`development_tools_setup`, `development_tools_catalogue`, and `development_tool`. "
+        "The catalogue covers builds, SDKs, artifacts, official docs, Studio, cloud diagnostics, "
+        "deployment and UI inspection. Device commands always use AUA's leased target. "
+        "Never supply native device/session overrides or retry an uncertain mutation.\n\n"
+        "Before installing a UI build, use `aua preview list --project <directory>`, then "
+        "`aua preview render --project <directory> --fqn <returned-name> --output <directory>`. "
+        "This compiles a preview target but needs no emulator or IDE. Inspect the returned PNG "
+        "visually and `aua preview inspect <component-tree.json>` for semantics, bounds, source "
+        "locations and modifiers; `aua preview check` evaluates saved-tree checks. Preview "
+        "evidence proves that rendered configuration only, not runtime behavior.\n\n"
+        "During a device session, `aua profile start --package <package> --output <trace>` "
+        "records while normal AUA actions run; `aua profile stop` saves the trace and restores "
+        "the device. `aua profile heap <process> --output <heap.hprof>` captures a heap. Exact "
+        "caller-owned diagnostic sessions have write-ahead cleanup in the device ledger.\n\n"
+        "`aua journey validate <file.yaml>` checks an authored journey, and `aua journey start <file.yaml>` "
+        "starts its ordinary AUA goal session. The calling agent performs each instruction, "
+        "then `aua journey check` evaluates deterministic assertions on a fresh frame. For a "
+        "visual-review step, inspect the evidence and use `aua journey record --fingerprint "
+        "<observed-fingerprint> --evidence '<assessment>'`; this stays explicitly agent-assessed, "
+        "not machine-verified. `aua journey finish` reports both kinds of evidence and cleans up. "
+        "Journeys do not spawn or configure an AI model automatically.\n"
+    )
     p.append("## iOS simulators (`--platform ios`)")
     p.append(
         "Same commands, same ids. Select on each CLI call with `aua --platform ios …`, or set "
@@ -2280,73 +2341,78 @@ def render_skill_markdown() -> str:
     """Compact triggered instructions; deeper guidance stays in the CLI manual."""
     return """# AUA — Android, iOS and web
 
-Use AUA MCP or CLI (plugin adds no `aua` to `PATH`). Act by ID, not guessed pixels.
+AUA MCP or CLI (plugin adds no `aua` to `PATH`). Filter `clickable`; act by ID.
 
 ## Select the platform first
 
-CLI: put `--platform android|ios|ios-device|web` before every subcommand, or set `device.platform`
-in a task config with `--config PATH`. Keep that config throughout.
-MCP uses its server's platform; `session_start` cannot switch it. Use a matching server or
-CLI; check capabilities before platform-specific operations.
+`--platform android|ios|ios-device|web` before every subcommand, or `device.platform`
+in a task config (`--config PATH`). MCP `session_start` cannot switch platforms.
 
 - Android: default; selects/provisions a free device. `--app` selects; `--apk` installs.
-- iOS: macOS, Xcode 26+, AXe and a booted simulator. Use `aua --platform ios session start
-  --goal "<goal>" --app <bundle-id> --no-provision-target`. No physical iPhones, automatic
-  provisioning, `--headed`, recording, native logs, offline control or microphone injection.
-  Finish releases ownership, leaving the simulator booted.
-- iPhone/iPad screenshots only: `--platform ios-device`; see `aua guide`.
-- Web: isolated Chromium/Firefox/WebKit needs the `web` extra and a Playwright browser.
-  Configure `platforms.web.url`; omit `device.serial` for agent slots. For `--headed`,
-  set `platforms.web.headless: false`. Reuse logins/apps via `connection: existing-chrome`
-  (approved Chrome tab, extension only) or `existing-cdp` (local `cdp_endpoint`, `web` extra,
-  no browser download). Attachments are exclusive; use `page_url` to select the exact CDP page.
-  Read inline `meta.browser_diagnostics` for console/errors/network; absent data proves nothing.
-  MCP: `aua --platform web --config PATH mcp --tool-profile web`.
+- iOS: macOS, Xcode 26+, AXe, booted simulator. `aua --platform ios session start --goal "<goal>"
+  --app <bundle-id> --no-provision-target`. No physical iPhones, automatic provisioning,
+  recording, native logs, offline control or microphone injection. Finish releases ownership,
+  leaving the simulator booted. iPhone screenshots: `--platform ios-device`.
+- Web: configure `platforms.web.url`; omit `device.serial` for agent slots.
+  Isolated: `web` extra + browser; headed: `platforms.web.headless: false`.
+  Attach via `existing-chrome` (approved tab, extension only) or `existing-cdp` (local endpoint,
+  `web` extra, no browser download). Attachments are exclusive.
+  Read `meta.browser_diagnostics`. MCP: `--tool-profile web`.
 
 ## Operating loop
 
-1. Start with MCP `session_start(goal="<what must be verified>")`, or
-   `aua session start --goal "<goal>"` with the platform above. It leaves leased targets alone.
-   Reuse observation and `recommended_call`; `--contract` requires proof.
-2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action. Arrival needs
-   matching `logical_name`, state and surface. Goals do not authorize side effects.
+1. MCP `session_start(goal="<what must be verified>")` or
+   `aua session start --goal "<goal>"`. It leaves leased targets alone.
+   Reuse `recommended_call` and observation.
+2. Prefer verified `goto`, saved `flow`, proven deeplink, then manual action.
+   Match `logical_name`, state and surface. Goals do not authorize side effects.
 3. Send reusable `el:` IDs back directly. For `id_reusable: false`, pass `selector` fields.
-   Reuse action observations; filter `clickable`. For `--submit`, check `submitted`; if false,
-   use `recommended_call` or `--send rid:<control>`, never retype.
+   For `--submit`, check `submitted`; if false, use
+   `recommended_call` or `--send rid:<control>`, never retype.
    Check `observation_contract`: `action_succeeded`, `evidence_fresh`, `elements_available`,
    `readiness`. Only `ready` confirms arrival; `not_checked` proves none.
 4. Fold arrival into actions: `--until 'rid:resultCard,!text:Loading'`. On `settled-unmet`,
    correct the predicate; never repeat the action. Hierarchy first; vision for opaque screens.
    On `daemon_outcome_unknown`, wait and inspect; never repeat the action.
-5. Carry `goal_progress.checkpoint` on the next call with `--phase-done` (MCP: `phase_done`).
-   End with MCP `session_finish` or CLI `aua session finish` (compact), attaching final facts;
-   never analyze for bookkeeping. Incomplete finish stays active; `--allow-incomplete`
-   abandons; `--full` gives evidence. Stop only targets this session started.
+5. Carry `goal_progress.checkpoint` with `--phase-done` (MCP: `phase_done`).
+   End with MCP `session_finish` or CLI `aua session finish` (compact), attaching final facts.
+   Incomplete stays active; `--allow-incomplete` abandons; `--full` gives evidence.
+   Stop only owned targets; no bookkeeping analyze.
    Use `review.accounting`, not estimates: `top_level_calls` = caller-visible invocations =
    `lifecycle_calls` + `task_calls`; `journal_events` adds `folded_internal_events` (action-bound wait).
    `reporting_call_included` is false; `top_level_calls_including_reporting_call` adds this call.
 
-No scenario, or after manual checks: MCP `prepare_start` → `prepare_answer` → `prepare_run`;
-CLI `aua prepare start` → `answer` → `run`. Produces contract verdict, evidence and `flow_repair`.
+No scenario: MCP `prepare_start` → `prepare_answer` → `prepare_run`; CLI `aua prepare start` →
+`answer` → `run`: contract verdict and evidence.
 Flow previews expose `selector_resilience`; only a same-frame privacy-safe positive `--until`
 yields an unmapped `satisfied_action_until` arrival.
 
+## Optional development tools
+
+No session: `aua devtools status`; `devtools setup` installs optional Android CLI.
+`devtools catalogue <operation>` → `devtools run <operation> [args] --options '<JSON>' --project PATH`.
+MCP: `development_tools_status|setup|catalogue`, `development_tool`.
+Compose: `preview list` → `preview render --fqn NAME` → inspect PNG and `preview inspect TREE.json`;
+`preview check` tests saved evidence. Previews compile; no emulator or runtime proof.
+`profile start` → actions → `profile stop`; `profile heap` for heaps.
+Tests: `journey validate FILE` → `journey start FILE` → instructions → `journey check`
+or `journey record` (agent assessment, not machine proof) → `journey finish`.
+
 ## Safety
 
-- Start with `session start`; never list/start devices, set `AUA_OWNER`, or acquire a lease.
-  It frees dead owners; omit `--serial`; switching or transfer is explicit.
+- Live UI starts with `session start` or `journey start`; never list/start devices, set `AUA_OWNER`,
+  or acquire a lease; omit `--serial`; switching or transfer is explicit.
   Shared-process workers need distinct `AUA_CACHE__DIR`; keep the shared lease registry.
-  Reuse the warm daemon.
-- Inspect screenshots; report missing evidence. Android recording: `aua guide`.
+- Inspect screenshots; report missing evidence.
 - Secrets: `aua config exec --env-file PATH --require NAME -- COMMAND ARGS` or MCP
   `credential_request`; private Save/Cancel, never expose values or shell-source .env.
-- Never execute `policy_suggestion`; `session autopilot` is off by default and **taps only**.
-  No login/text entry. Use screen words (`Open Catalog`); no match yields `policy_handoff`.
+- Never execute `policy_suggestion`; autopilot is off by default, **taps only**, no login.
+  Use screen words (`Open Catalog`); no match yields `policy_handoff`.
 
 ## Load more
 
 MCP `capabilities(goal="<goal>")` or CLI `aua capabilities --goal "<goal>"`.
-Run `aua guide` for platform setup; `aua guide --brief` for the field guide.
+Run `aua guide` or `aua guide --brief`.
 """
 
 

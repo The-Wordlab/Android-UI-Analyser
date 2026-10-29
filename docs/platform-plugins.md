@@ -71,6 +71,26 @@ Back up the ledger and its key together. Losing or corrupting that key cannot be
 re-entering the same options: restore the original key as well. AUA retains the pending undo and
 names the missing identity proof; `--force` does not authorize a different endpoint or boot.
 
+## Optional development tools
+
+`development_tools` is an optional host-service capability. Its structural contract in
+`platforms/services.py` includes installation status, explicit setup, an operation catalogue,
+side-effect-free validation and host execution. Catalogue entries describe scope, effects,
+accepted values, confirmation, UI handover and semantic action kind. The adapter owns native
+command syntax; the core accepts semantic operation names and JSON values.
+
+Target operations additionally require `device.development_tools` on the connected
+`TargetRuntime`. The core acquires the ordinary target lease, registers diagnostic cleanup before
+mutation, and supplies the exact target through that runtime. Native target/session overrides are
+rejected. UI operations use background-work quiescence and the same post-action observation
+pipeline as ordinary AUA actions. Missing capability or installation is an explicit error;
+neither case falls back to another platform or installs software implicitly.
+
+Android implements this optional service in `platforms/android_cli.py`. Its command catalogue is
+versioned with AUA; Google Android CLI is installed separately. See [integration and operation
+reference](android-cli.md). Preview artifact inspection and authored journeys reuse neutral
+engine contracts; an agent's visual assessment never becomes machine-verified evidence.
+
 ## Optional batched selector queries
 
 An adapter may declare `ui.query_batch` and implement

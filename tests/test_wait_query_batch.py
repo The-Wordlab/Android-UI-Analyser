@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import closing
+import time
+from contextlib import closing, contextmanager
+from types import SimpleNamespace
 
 import pytest
 
-from android_ui_analyser import read_budget
+from android_ui_analyser import engine_waits, read_budget
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import DeviceError
 from android_ui_analyser.platforms.android import AndroidPlatform
@@ -58,6 +60,78 @@ def test_failed_batch_cannot_satisfy_an_absence_predicate_or_retry_singly():
         result = engine.await_predicate("!rid:spinner,!rid:dialog", timeout_ms=30, observe=False)
     assert result.await_outcome == "timeout"
     assert all(term["present"] is None and not term["satisfied"] for term in result.await_terms)
+
+
+@pytest.fixture
+def wait_clock(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(
+        engine_waits, "time",
+        SimpleNamespace(monotonic=lambda: now[0], time=time.time),
+    )
+    return now
+
+
+@pytest.mark.parametrize("expiry_boundary", ["scope_entry", "foreground_read"])
+def test_deadline_before_first_query_reports_unknown_terms(
+    monkeypatch, wait_clock, expiry_boundary,
+):
+    runtime = BatchRuntime()
+
+    @contextmanager
+    def deadline_scope(budget):
+        with read_budget.activate(budget):
+            if expiry_boundary == "scope_entry":
+                wait_clock[0] += 0.031
+            yield
+
+    def current_app():
+        wait_clock[0] += 0.031
+        return {"package": "com.example.fixture", "activity": "Fixture"}
+
+    def bounded_query(*args, **kwargs):
+        read_budget.current().check()
+        pytest.fail("the expired read budget must prevent the first query")
+
+    monkeypatch.setattr(runtime, "read_deadline", deadline_scope)
+    monkeypatch.setattr(runtime, "current_app", current_app)
+    monkeypatch.setattr(runtime, "find_texts", bounded_query)
+    with closing(make_batch_engine(runtime)) as engine:
+        result = engine.await_predicate("text:Ready,!rid:spinner", timeout_ms=30, observe=False)
+
+    assert result.await_outcome == "timeout"
+    assert len(result.await_terms) == 2
+    assert all(row["present"] is None and not row["satisfied"] for row in result.await_terms)
+    assert all(row["evidence"] == "unconfirmed" for row in result.await_terms)
+    assert not runtime.batches
+
+
+@pytest.mark.parametrize("prior_poll", [False, True])
+def test_failed_batch_publishes_unknowns_before_its_deadline_check(
+    monkeypatch, wait_clock, prior_poll,
+):
+    runtime = BatchRuntime()
+
+    def query(queries, **kwargs):
+        runtime.batches.append((list(queries), kwargs))
+        if prior_poll and len(runtime.batches) == 1:
+            return [None, (1, 2, 3, 4)]
+        wait_clock[0] += 0.031
+        raise DeviceError("read failed after consuming the remaining deadline")
+
+    def next_poll(*args):
+        wait_clock[0] += 0.005
+
+    monkeypatch.setattr(runtime, "find_texts", query)
+    with closing(make_batch_engine(runtime)) as engine:
+        monkeypatch.setattr(engine, "_sleep_between_polls", next_poll)
+        result = engine.await_predicate("!rid:spinner,!rid:dialog", timeout_ms=30, observe=False)
+
+    assert result.await_outcome == "timeout"
+    assert len(result.await_terms) == 2
+    assert all(row["present"] is None and not row["satisfied"] for row in result.await_terms)
+    assert all(row["reason"] == "ui_read_failed" for row in result.await_terms)
+    assert len(runtime.batches) == (2 if prior_poll else 1)
 
 
 def test_permanent_batch_error_is_preserved_without_individual_retry():

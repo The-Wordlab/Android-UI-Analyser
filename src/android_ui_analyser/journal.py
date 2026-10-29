@@ -230,12 +230,16 @@ def _detail_sensitive_literals(
         "text",
         "value",
     }
+    developer_parameters = depth == 1 and cmd == "development_tool" and lowered in {
+        "arguments", "options",
+    }
     if (
         _redacted_key(lowered)
         or lowered in {"params", "parameters", "sql"}
         or mic_speech
         or mic_path
         or typed_input
+        or developer_parameters
     ):
         found.update(string_literals(value))
         return found
@@ -275,6 +279,8 @@ def _detail_value(
     if lowered in {"params", "parameters"} or _redacted_key(lowered):
         return "<redacted>"
     if request:
+        if depth == 1 and cmd == "development_tool" and lowered in {"arguments", "options"}:
+            return "<redacted developer-tool parameters>"
         if depth == 1 and cmd in _INPUT_COMMANDS and lowered in {"text", "value"}:
             return f"<redacted input: {len(str(value))} chars>"
         if (
