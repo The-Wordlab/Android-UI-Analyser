@@ -29,7 +29,8 @@ def _config(tmp_path: Path, **options) -> Config:
             "platforms": {"web": options},
             "cache": {"dir": str(tmp_path / "cache")},
             "memory": {"enabled": False},
-            "lease": {"enabled": False},
+            # Element handles persist here even when lease enforcement is disabled.
+            "lease": {"enabled": False, "registry_dir": str(tmp_path / "lease-registry")},
             "teardown": {"enabled": False},
             "capture": {"enabled": False},
             "ocr": {"enabled": False},
