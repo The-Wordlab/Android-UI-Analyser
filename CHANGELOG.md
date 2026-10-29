@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-29
+
 ### Added
 
 - Optional Google Android CLI integration through AUA's platform adapter, with explicit user-local
@@ -1898,5 +1900,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.38.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.38.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.39.0...HEAD
 [0.39.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.39.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.40.0
