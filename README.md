@@ -1246,6 +1246,12 @@ semantics, modifiers and source locations. During a normal device session, `aua 
 and `profile stop` collect a trace around AUA actions; `profile heap` captures JVM memory.
 Profiling state has durable, caller-scoped cleanup.
 
+With Android CLI 1.1.16919734+, `profile start --enable compose.recomposition` records Compose
+state changes (app `runtime-tracing` 1.13+), and `profile heap <process> --type perfetto` captures
+a reference graph on API 31+. HPROF remains the default. `devtools status` reports supported
+features; `devtools run update --yes` explicitly upgrades the optional CLI. Input JSON failures
+are checked even when the native command exits zero. See the integration guide for prerequisites.
+
 Authored agent tests use `aua journey validate|start|status|check|record|finish`. The calling agent
 performs each instruction, deterministic assertions evaluate fresh evidence, and visual reviews
 remain explicitly agent-assessed. Journeys reuse AUA's ordinary session and cleanup workflow.

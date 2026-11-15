@@ -19,6 +19,7 @@ from android_ui_analyser.cli import GlobalOpts, app
 from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
 from android_ui_analyser.errors import (
+    DevelopmentToolError,
     DeviceError,
     UnsupportedPlatformCapabilityError,
     UsageError,
@@ -659,6 +660,60 @@ def test_cli_and_mcp_dispatch_confirmed_calls_to_the_same_target(rig, monkeypatc
     assert cli_call[1] == "owned-target"
     assert cli_payload == mcp_payload
     assert not [call for call in platform.calls if call[0] == "host-execute"]
+
+
+@pytest.mark.parametrize("cli_args,operation,options,timeout", [
+    (["profile", "start", "--package", "com.example.fixture", "--enable", "compose.recomposition",
+      "--enable", "cpu", "--disable", "cpu.syscalls"], "profiler.systemtrace.start",
+     {"package": "com.example.fixture", "enable": ["compose.recomposition", "cpu"],
+      "disable": ["cpu.syscalls"], "launch": False, "wait": False}, 120),
+    (["profile", "heap", "com.example.fixture", "--type", "perfetto"], "profiler.heapdump.capture",
+     {"process": "com.example.fixture", "type": "perfetto", "gc": False, "timeout": 120}, 150),
+])
+def test_new_profile_options_share_cli_mcp_adapter_and_durable_undo(
+    rig, monkeypatch, cli_args, operation, options, timeout,
+):
+    engine, platform = rig
+    platform.tools.specs[operation] = {"scope": "target", "profile_action":
+                                      "capture" if "heapdump" in operation else "begin"}
+    monkeypatch.setattr(GlobalOpts, "engine", lambda self: engine)
+    platform.runtime.before_execute = lambda: _assert_profile_recorded(platform)
+    cli = CliRunner().invoke(app, ["--format", "json", *cli_args])
+    assert cli.exit_code == 0, cli.output
+    cli_call = [c for c in platform.calls if c[0] == "target-execute"][-1]
+    platform.calls.clear()
+    _dispatch_tool(engine, "development_tool", {
+        "operation": operation, "options": options, "timeout_s": timeout,
+    })
+    mcp_call = [c for c in platform.calls if c[0] == "target-execute"][-1]
+    assert cli_call == mcp_call
+    assert cli_call[1] == "owned-target"
+    for key, value in options.items():
+        assert cli_call[4][key] == value
+
+
+def _assert_profile_recorded(platform):
+    assert any(entry.op == "restore_development_tool" for entry in _entries(platform))
+
+
+def test_input_result_failure_reaches_cli_mcp_and_restores_helper_once_per_call(rig, monkeypatch):
+    engine, platform = rig
+    platform.tools.specs["target.inspect"]["ui_automation"] = True
+    platform.runtime.error = DevelopmentToolError("Input found no matches", code="android_cli_failed", result={
+        "ok": False, "exit_code": 0, "action_succeeded": False, "outcome_unknown": False,
+        "data": {"results": [{"action": "tap", "status": "no_matches"}]},
+    })
+    monkeypatch.setattr(GlobalOpts, "engine", lambda self: engine)
+    cli = CliRunner().invoke(app, ["--format", "json", "devtools", "run", "target.inspect"])
+    assert cli.exit_code == DevelopmentToolError.exit_code
+    assert json.loads(cli.stderr)["error"]["result"]["action_succeeded"] is False
+    assert not _entries(platform)
+    with pytest.raises(DevelopmentToolError) as caught:
+        _dispatch_tool(engine, "development_tool", {"operation": "target.inspect"})
+    assert caught.value.result["outcome_unknown"] is False
+    assert len([c for c in platform.calls if c[0] == "target-execute"]) == 2
+    assert len([c for c in platform.calls if c[0] == "ui-restore"]) == 2
+    assert not _entries(platform)
 
 
 def test_cli_and_mcp_reject_target_overrides_before_leasing(rig, monkeypatch) -> None:

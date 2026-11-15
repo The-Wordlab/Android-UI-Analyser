@@ -46,6 +46,12 @@ def tools(binary):
     return AndroidCliTools({"cli_path": str(binary)})
 
 
+@pytest.fixture
+def november_tools(binary):
+    binary.write_text(binary.read_text().replace("1.1.16717390", "1.1.16919734"))
+    return AndroidCliTools({"cli_path": str(binary)})
+
+
 def test_missing_optional_cli_does_not_install_or_load_android_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(android_cli, "_managed_binary", lambda: tmp_path / "missing")
     monkeypatch.setattr(android_cli.shutil, "which", lambda _: None)
@@ -353,7 +359,7 @@ def test_actual_cli_missing_exact_session_message_is_idempotent(tools, monkeypat
 
 
 @pytest.mark.parametrize(
-    "code", ["android_cli_failed", "android_cli_timeout", "development_tool_failed"]
+    "code", ["android_cli_failed", "android_cli_timeout", "development_tool_failed", "android_cli_invalid_output"]
 )
 def test_daemon_error_roundtrip_retains_native_diagnostics_and_device_exit(code):
     from android_ui_analyser.cli import _daemon_error
@@ -437,7 +443,7 @@ def test_helper_preparation_preserves_matching_preexisting_apk(tools, monkeypatc
         [
             f"package:{package}\n",
             "package:/data/app/fixture/base.apk\n",
-            android_cli._UI_HELPER_HASHES[android_cli.VERIFIED_VERSION]
+            android_cli._UI_HELPER_HASHES[tools.status()["version"]]
             + "  /data/app/fixture/base.apk\n",
         ]
     )
@@ -718,3 +724,197 @@ def test_failed_native_target_mutation_does_not_claim_no_delivery(tools, monkeyp
     with pytest.raises(AndroidCliError) as read_failure:
         tools.execute("layout", [], {}, None, 5, "fixture-target")
     assert read_failure.value.result["outcome_unknown"] is False
+
+
+def test_status_distinguishes_available_features_from_verified_ui_lifecycle(november_tools):
+    status = november_tools.status()
+    assert status["features"]["compose_tracing"] is True
+    assert status["features"]["perfetto_heapdump"] is True
+    assert status["ui_helper_verified"] is True
+    assert status["upgrade_recommended"] is False
+
+
+def test_october_remains_compatible_and_explains_the_explicit_upgrade(tools):
+    status = tools.status()
+    assert status["compatible"] is True
+    assert status["ui_helper_verified"] is True
+    assert not any(status["features"].values())
+    assert status["upgrade_recommended"] is True
+    assert status["upgrade_hint"] == "aua devtools run update --yes"
+
+
+@pytest.mark.parametrize("operation,options", [
+    ("profiler.heapdump.capture", {"process": "com.example.fixture", "type": "perfetto"}),
+    ("profiler.systemtrace.start", {"enable": ["cpu.sched", "compose.recomposition"]}),
+    ("profiler.systemtrace.prepare", {"enable": "cpu, compose.composition"}),
+    ("profiler.systemtrace.start", {"disable": "compose"}),
+    ("install", {"use-delta-install-instructions": "COPY,DATA"}),
+    ("run", {"use-delta-install-instructions": "COPY,DATA"}),
+])
+def test_november_options_are_version_checked_during_preflight(tools, operation, options):
+    with pytest.raises(ConfigError, match="1.1.16919734") as caught:
+        tools.validate(operation, [], options, None, 30)
+    assert caught.value.code == "android_cli_unsupported_version"
+
+
+@pytest.mark.parametrize("heap_type", ["perfetto", "hprof"])
+def test_heap_format_reaches_native_command_and_reports_selected_type(november_tools, heap_type):
+    result = november_tools.execute(
+        "profiler.heapdump.capture", [],
+        {"process": "com.example.fixture", "session": "aua-owned-heap", "type": heap_type},
+        None, 30, "owned-target",
+    )
+    assert f"--type={heap_type}" in result["data"]["argv"]
+    assert result["heap_type"] == heap_type
+
+
+def test_new_cli_heap_default_is_pinned_to_hprof(november_tools):
+    result = november_tools.execute(
+        "profiler.heapdump.capture", [],
+        {"process": "com.example.fixture", "session": "aua-owned-heap"},
+        None, 30, "owned-target",
+    )
+    assert "--type=hprof" in result["data"]["argv"]
+
+
+@pytest.mark.parametrize("options", [
+    {"type": "perfetto", "gc": True}, {"type": "typo"},
+])
+def test_invalid_heap_modes_fail_without_native_probe(tools, monkeypatch, options):
+    monkeypatch.setattr(tools, "status", lambda: pytest.fail("invalid request probed native tool"))
+    with pytest.raises(UsageError):
+        tools.validate("profiler.heapdump.capture", [], {"process": "fixture", **options}, None, 30)
+
+
+def test_compose_flags_and_delta_override_are_forwarded(november_tools):
+    result = november_tools.execute(
+        "profiler.systemtrace.start", [],
+        {"enable": ["cpu", "compose.recomposition"], "disable": "cpu.syscalls",
+         "session": "aua-owned-trace"}, None, 30, "owned-target",
+    )
+    assert "--enable=compose.recomposition" in result["data"]["argv"]
+    assert "--disable=cpu.syscalls" in result["data"]["argv"]
+    for operation in ("install", "run"):
+        result = november_tools.execute(operation, ["fixture.apk"], {
+            "use-delta-install-instructions": "COPY,DATA",
+        }, None, 30, "owned-target")
+        assert "--use-delta-install-instructions=COPY,DATA" in result["data"]["argv"]
+
+
+def _native_json(monkeypatch, tool, data, *, truncated=False, exit_code=0):
+    tool.require_available()
+    calls = []
+
+    def execute(argv, **kwargs):
+        calls.append(argv)
+        return {"exit_code": exit_code, "stdout": json.dumps(data), "stderr": "",
+                "stdout_truncated": truncated, "stderr_truncated": False,
+                "timed_out": False, "duration_ms": 1}
+
+    monkeypatch.setattr(android_cli, "_run", execute)
+    return calls
+
+
+@pytest.mark.parametrize("action,args", [
+    ("tap", ["text=Example"]), ("text", ["value", "text=Field"]),
+        ("swipe", ["text=Example"]), ("scroll", ["text=Example"]),
+    ("key", ["back"]),
+])
+def test_input_requires_verified_success_for_each_action(november_tools, monkeypatch, action, args):
+    data = {"results": [{"action": action, "status": "success"}]}
+    calls = _native_json(monkeypatch, november_tools, data)
+    opts = {"dir": "down"} if action in {"swipe", "scroll"} else {}
+    result = november_tools.execute(f"input.{action}", args, opts, None, 30, "owned-target")
+    assert result["ok"] and result["operation_succeeded"]
+    assert result["data"] == data
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("action,status,unknown", [
+    ("tap", "no_matches", False), ("tap", "multiple_matches", False),
+    ("tap", "node_removed", True), ("tap", "target_not_idle", True),
+    ("text", "not_editable", True), ("key", "invalid_key", False),
+    ("key", "execution_failed", True), ("scroll", "scrolled_to_end", True),
+    ("scroll", "no_matches", True), ("tap", "future_status", True),
+])
+def test_exit_status_cannot_hide_per_action_failures(november_tools, monkeypatch, action, status, unknown, exit_code):
+    data = {"results": [{"action": action, "status": status, "error": "fixture failure"}]}
+    calls = _native_json(monkeypatch, november_tools, data, exit_code=exit_code)
+    args = {"text": ["value", "text=Field"]}.get(action, ["fixture"])
+    opts = {"dir": "down"} if action == "scroll" else {}
+    with pytest.raises(AndroidCliError) as caught:
+        november_tools.execute(f"input.{action}", args, opts, None, 30, "owned-target")
+    result = caught.value.result
+    assert not result["ok"] and result["exit_code"] == exit_code
+    assert result["data"] == data
+    assert result["outcome_unknown"] is unknown
+    assert result["action_succeeded"] is (None if unknown else False)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("data,truncated", [
+    ({}, False), ({"results": []}, False), ({"results": "success"}, False),
+    ({"results": [None]}, False), ({"results": [{"action": "tap"}]}, False),
+    ({"results": [{"action": "key", "status": "success"}]}, False),
+    ({"results": [{"action": "tap", "status": "success"}]}, True),
+])
+def test_missing_or_truncated_input_evidence_never_claims_delivery(november_tools, monkeypatch, data, truncated):
+    calls = _native_json(monkeypatch, november_tools, data, truncated=truncated)
+    with pytest.raises(AndroidCliError) as caught:
+        november_tools.execute("input.tap", ["text=Fixture"], {}, None, 30, "owned-target")
+    assert caught.value.code == "android_cli_invalid_output"
+    assert caught.value.result["outcome_unknown"] is True
+    assert caught.value.result["operation_succeeded"] is None
+    assert len(calls) == 1
+
+
+def test_mixed_input_results_fail_without_claiming_no_delivery(november_tools, monkeypatch):
+    _native_json(monkeypatch, november_tools, {"results": [
+        {"action": "tap", "status": "success"}, {"action": "tap", "status": "no_matches"},
+    ]})
+    with pytest.raises(AndroidCliError) as caught:
+        november_tools.execute("input.tap", ["text=Fixture"], {}, None, 30, "owned-target")
+    assert caught.value.result["outcome_unknown"] is True
+
+
+def test_success_json_with_failing_exit_is_contradictory(november_tools, monkeypatch):
+    _native_json(monkeypatch, november_tools,
+                 {"results": [{"action": "tap", "status": "success"}]}, exit_code=1)
+    with pytest.raises(AndroidCliError) as caught:
+        november_tools.execute("input.tap", ["text=Fixture"], {}, None, 30, "owned-target")
+    assert caught.value.code == "android_cli_invalid_output"
+    assert caught.value.result["outcome_unknown"] is True
+    assert caught.value.result["operation_succeeded"] is None
+
+
+@pytest.mark.parametrize("suffix", [".zip", ".perfetto", ".perfetto-trace"])
+def test_trace_artifact_is_returned_when_output_is_a_directory(november_tools, monkeypatch, tmp_path, suffix):
+    archive = tmp_path / f"fixture{suffix}"
+    archive.write_bytes(b"fixture archive")
+    _native_json(monkeypatch, november_tools, {"path": str(archive)})
+    result = november_tools.execute("profiler.systemtrace.stop", [],
+        {"session": "aua-owned-trace"}, None, 30, "owned-target")
+    assert result["artifacts"] == [{"path": str(archive), "size_bytes": 15, "kind": suffix.lstrip(".")}]
+
+
+def test_library_analysis_preserves_64_bit_dex_size_strings(november_tools, monkeypatch):
+    data = {"d8CompileResult": {"dexSizeBytes": "9223372036854775807"}}
+    _native_json(monkeypatch, november_tools, data)
+    result = november_tools.execute("analyze", ["fixture.jar"], {}, None, 30)
+    assert result["data"] == data
+
+
+def test_native_perfetto_heap_filename_is_discovered_in_stdout(november_tools, monkeypatch, tmp_path):
+    heap = tmp_path / "fixture.perfetto-java-heap-dump"
+    heap.write_bytes(b"heap fixture")
+    november_tools.require_available()
+    monkeypatch.setattr(android_cli, "_run", lambda *_, **__: {
+        "exit_code": 0, "stdout": f"Heap dump saved at: {heap}\n", "stderr": "",
+        "stdout_truncated": False, "stderr_truncated": False,
+        "timed_out": False, "duration_ms": 1,
+    })
+    result = november_tools.execute("profiler.heapdump.capture", [], {
+        "session": "aua-owned-heap", "process": "fixture", "type": "perfetto", "output": str(tmp_path),
+    }, None, 30, "owned-target")
+    assert result["artifacts"] == [{"path": str(heap), "size_bytes": 12, "kind": "perfetto-java-heap-dump"}]

@@ -27,8 +27,9 @@ from urllib.parse import urlparse
 
 from ..errors import ConfigError, DevelopmentToolError, UsageError
 
-VERIFIED_VERSION = "1.1.16717390"
+VERIFIED_VERSION = "1.1.16919734"
 MINIMUM_VERSION = (1, 1, 16717390)
+NOVEMBER_VERSION = (1, 1, 16919734)
 OUTPUT_LIMIT = 256 * 1024
 _DOWNLOAD_LIMIT = 64 * 1024 * 1024
 _CATALOGUE = json.loads(Path(__file__).with_name("android_cli_catalogue.json").read_text())
@@ -36,7 +37,8 @@ _OPERATIONS = {item["name"]: item for item in _CATALOGUE["operations"]}
 _VERSION = re.compile(r"(?m)^\s*(\d+)\.(\d+)\.(\d+)\s*$")
 _RESERVED_OPTIONS = frozenset({"device", "session", "sdk"})
 _ARTIFACT_SUFFIXES = frozenset(
-    {".png", ".json", ".hprof", ".perfetto-trace", ".apk", ".aab", ".log"}
+    {".png", ".json", ".hprof", ".perfetto", ".perfetto-trace",
+     ".perfetto-java-heap-dump", ".zip", ".apk", ".aab", ".log"}
 )
 # Verified from the official bundle's InstrumentationServerConnector and APK manifest.
 # Layout/input start this persistent instrumentation, which keeps Android's UiAutomation
@@ -45,6 +47,7 @@ _UI_HELPER_PACKAGE = "com.android.cli.interact.instrumentation"
 _UI_HELPER_SOCKET = "localabstract:com.android.cli.interact.server"
 _UI_HELPER_HASHES = {
     "1.1.16717390": "3949be71bfa29a7f11d6bea8b09b68fa40c2f356d8a6306f0f0988bbc8bb533a",
+    "1.1.16919734": "c32b853bcd107447c8e4e2f799327353b91f96e78cd7472606a1e66af82bb089",
 }
 
 
@@ -56,7 +59,7 @@ class AndroidCliError(DevelopmentToolError):
             message,
             code=code,
             result=result,
-            hint="Inspect result.stderr and result.exit_code for the native failure.",
+            hint="Inspect result.data, result.stderr and result.exit_code for the native failure; exit zero alone does not establish input success.",
         )
 
 
@@ -220,6 +223,9 @@ class AndroidCliTools:
             "optional": True,
             "install_hint": "aua devtools setup",
             "download_url": "https://developer.android.com/tools/agents/android-cli/download",
+            "features": {},
+            "ui_helper_verified": False,
+            "upgrade_recommended": False,
         }
         if binary is None:
             return result
@@ -235,6 +241,14 @@ class AndroidCliTools:
                 result.update(
                     version=".".join(match.groups()), compatible=version >= MINIMUM_VERSION
                 )
+                result["features"] = dict.fromkeys(
+                    ("compose_tracing", "perfetto_heapdump", "delta_install_reuse", "input_results_json"),
+                    version >= NOVEMBER_VERSION,
+                )
+                result["ui_helper_verified"] = result["version"] in _UI_HELPER_HASHES
+                result["upgrade_recommended"] = version < NOVEMBER_VERSION
+                if result["upgrade_recommended"]:
+                    result["upgrade_hint"] = "aua devtools run update --yes"
             if not result["compatible"]:
                 result["reason"] = (
                     "AUA requires Google Android CLI 1.1.16717390 or later; the legacy SDK android command is not supported."
@@ -410,6 +424,26 @@ class AndroidCliTools:
             or not (options.get("pid") or options.get("process"))
         ):
             raise UsageError("heap capture requires exactly one of process or pid")
+        if operation == "profiler.heapdump.capture" and options.get("type") == "perfetto" and options.get("gc"):
+            raise UsageError("garbage collection (--gc) is supported only for hprof heap captures")
+        # Check new option/value requirements before the core acquires a target or
+        # records a mutation. Catalogue discovery itself never invokes a native tool.
+        for key, value in options.items():
+            schema = spec["options"][key]
+            required_version = schema.get("minimum_version")
+            value_versions = schema.get("value_minimum_versions", {})
+            for item in value if isinstance(value, list) else [value]:
+                for token in str(item).split(","):
+                    required_version = value_versions.get(token.strip(), required_version)
+            if required_version:
+                self._require_binary()
+                installed = str(self.status()["version"])
+                if tuple(map(int, installed.split("."))) < tuple(map(int, required_version.split("."))):
+                    raise ConfigError(
+                        f"{operation} option {key}={value!r} requires Android CLI {required_version} or later (installed: {installed})",
+                        code="android_cli_unsupported_version",
+                        hint="Run `aua devtools run update --yes`, then retry this request.",
+                    )
         result = copy.deepcopy(spec)
         if (
             operation == "create"
@@ -454,6 +488,11 @@ class AndroidCliTools:
         elif session is not None:
             raise UsageError("This operation does not accept a managed profiling session")
         binary = self._require_binary()
+        modern = tuple(map(int, str(self.status()["version"]).split("."))) >= NOVEMBER_VERSION
+        if operation == "profiler.heapdump.capture" and modern:
+            # Upstream explicitly reserves the right to change its default. Keep
+            # AUA's existing HPROF contract unless the caller selects Perfetto.
+            options.setdefault("type", "hprof")
         command = operation.split(".")
         argv = [binary, "--no-metrics"]
         if self.options.get("cli_sdk"):
@@ -524,6 +563,8 @@ class AndroidCliTools:
                 )
             )
         result["artifacts"] = self._artifacts(artifact_data, options, cwd)
+        if operation == "profiler.heapdump.capture":
+            result["heap_type"] = options.get("type", "hprof")
         if spec.get("retained_resources"):
             result["retained_resources"] = spec["retained_resources"]
         if result["timed_out"]:
@@ -537,6 +578,10 @@ class AndroidCliTools:
                 code="android_cli_timeout",
                 result=result,
             )
+        if operation.startswith("input.") and (
+            result["ok"] or isinstance(result["data"], dict) and "results" in result["data"]
+        ):
+            self._check_input_result(result, operation, required=modern)
         if not result["ok"]:
             # Native failure may occur after installation, input delivery or profiler
             # setup. An exit status alone is not proof the leased target was untouched.
@@ -553,6 +598,45 @@ class AndroidCliTools:
         if operation == "update":
             self._version_cache = None
         return result
+
+    @staticmethod
+    def _check_input_result(result: dict[str, Any], operation: str, *, required: bool) -> None:
+        """Exit zero acknowledges the RPC, not the individual input action.
+
+        Only complete success evidence establishes delivery. Scroll failures can
+        follow movement, and malformed output can follow any action: never retry.
+        """
+        data = result["data"]
+        if not required and not (isinstance(data, dict) and "results" in data):
+            return  # October CLI reports input errors through its exit status.
+        raw_rows = data.get("results") if isinstance(data, dict) else None
+        rows = raw_rows if isinstance(raw_rows, list) else []
+        action = operation.removeprefix("input.")
+        valid = (
+            not result["stdout_truncated"] and bool(rows)
+            and all(isinstance(row, dict) and row.get("action") == action
+                    and isinstance(row.get("status"), str) for row in rows)
+        )
+        if valid and all(row["status"] == "success" for row in rows):
+            if result["exit_code"] == 0:
+                result["operation_succeeded"] = True
+                return
+            valid = False  # Contradictory exit/output cannot establish delivery.
+        before_delivery = {"invalid_key"} if action == "key" else (
+            {"no_matches", "multiple_matches"} if action in {"tap", "text", "swipe"} else set()
+        )
+        no_delivery = bool(valid) and all(row["status"] in before_delivery for row in rows)
+        result.update(
+            ok=False, operation_succeeded=False if valid else None,
+            action_succeeded=False if no_delivery else None,
+            outcome_unknown=not no_delivery,
+            next_action="Inspect the current screen and native results before continuing; do not repeat an uncertain action.",
+        )
+        statuses = ", ".join(dict.fromkeys(row["status"] for row in rows)) if valid else "missing or malformed results"
+        raise AndroidCliError(
+            f"Android CLI {operation}: {statuses}",
+            code="android_cli_failed" if valid else "android_cli_invalid_output", result=result,
+        )
 
     @staticmethod
     def _artifacts(data: Any, options: dict[str, Any], cwd: str | None) -> list[dict[str, Any]]:

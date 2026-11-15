@@ -1,5 +1,5 @@
 {
-  "verified_version": "1.1.16717390",
+  "verified_version": "1.1.16919734",
   "operations": [
     {
       "name": "analyze",
@@ -724,7 +724,8 @@
       "profile_action": null,
       "route": null,
       "source": "https://developer.android.com/tools/agents/android-cli/commands/input_key",
-      "action_kind": "key"
+      "action_kind": "key",
+      "result_contract": "CLI 1.1.16919734+: every result must report status=success; per-action failures fail AUA even when the native process exits zero. Missing/truncated results leave delivery unknown."
     },
     {
       "name": "input.scroll",
@@ -774,7 +775,8 @@
       "profile_action": null,
       "route": null,
       "source": "https://developer.android.com/tools/agents/android-cli/commands/input_scroll",
-      "action_kind": "scroll"
+      "action_kind": "scroll",
+      "result_contract": "CLI 1.1.16919734+: every result must report status=success; per-action failures fail AUA even when the native process exits zero. Missing/truncated results leave delivery unknown."
     },
     {
       "name": "input.swipe",
@@ -819,7 +821,8 @@
       "profile_action": null,
       "route": null,
       "source": "https://developer.android.com/tools/agents/android-cli/commands/input_swipe",
-      "action_kind": "swipe"
+      "action_kind": "swipe",
+      "result_contract": "CLI 1.1.16919734+: every result must report status=success; per-action failures fail AUA even when the native process exits zero. Missing/truncated results leave delivery unknown."
     },
     {
       "name": "input.tap",
@@ -851,7 +854,8 @@
       "profile_action": null,
       "route": null,
       "source": "https://developer.android.com/tools/agents/android-cli/commands/input_tap",
-      "action_kind": "tap"
+      "action_kind": "tap",
+      "result_contract": "CLI 1.1.16919734+: every result must report status=success; per-action failures fail AUA even when the native process exits zero. Missing/truncated results leave delivery unknown."
     },
     {
       "name": "input.text",
@@ -888,7 +892,8 @@
       "profile_action": null,
       "route": null,
       "source": "https://developer.android.com/tools/agents/android-cli/commands/input_text",
-      "action_kind": "input"
+      "action_kind": "input",
+      "result_contract": "CLI 1.1.16919734+: every result must report status=success; per-action failures fail AUA even when the native process exits zero. Missing/truncated results leave delivery unknown."
     },
     {
       "name": "install",
@@ -903,7 +908,7 @@
         },
         "use-delta-install": {
           "type": "boolean",
-          "description": "Use native incremental deployment; defaults to enabled upstream."
+          "description": "Use native delta deployment (default enabled). CLI 1.1.16919734+ also reuses unchanged files relocated within the APK; the CLI may choose standard installation."
         },
         "build-args": {
           "type": "array",
@@ -911,6 +916,14 @@
             "type": "string"
           },
           "description": "Arguments to the project build system after its separator."
+        },
+        "use-delta-install-instructions": {
+          "type": "string",
+          "enum": [
+            "COPY,DATA"
+          ],
+          "minimum_version": "1.1.16919734",
+          "description": "Optional upstream troubleshooting override: COPY,DATA disables reuse of relocated files. Omit to allow native file reuse."
         }
       },
       "arguments": {
@@ -1080,13 +1093,13 @@
     },
     {
       "name": "profiler.heapdump.capture",
-      "summary": "Capture a JVM heap snapshot.",
+      "summary": "Capture a JVM heap as HPROF (API 29+) or Perfetto (API 31+; CLI 1.1.16919734+).",
       "scope": "target",
       "effect": "profile",
       "options": {
         "gc": {
           "type": "boolean",
-          "description": "Request garbage collection before heap capture."
+          "description": "Request garbage collection before capture; supported only for hprof."
         },
         "output": {
           "type": "string",
@@ -1107,6 +1120,15 @@
           "type": "string",
           "accepts_number": true,
           "description": "Heap-capture deadline in seconds."
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "hprof",
+            "perfetto"
+          ],
+          "minimum_version": "1.1.16919734",
+          "description": "hprof preserves object values (AUA default); perfetto is smaller and retains references without values, for a profileable/debuggable app on API 31+."
         }
       },
       "arguments": {
@@ -1207,13 +1229,23 @@
           "type": "string",
           "accepts_number": true,
           "repeatable": true,
-          "description": "Trace groups or fields to omit."
+          "description": "Repeatable or comma-separated trace groups/fields. compose, compose.composition and compose.recomposition need CLI 1.1.16919734+ and app runtime-tracing 1.13+; Compose traces are ZIP archives.",
+          "value_minimum_versions": {
+            "compose": "1.1.16919734",
+            "compose.composition": "1.1.16919734",
+            "compose.recomposition": "1.1.16919734"
+          }
         },
         "enable": {
           "type": "string",
           "accepts_number": true,
           "repeatable": true,
-          "description": "Trace groups or fields to include."
+          "description": "Repeatable or comma-separated trace groups/fields. compose, compose.composition and compose.recomposition need CLI 1.1.16919734+ and app runtime-tracing 1.13+; Compose traces are ZIP archives.",
+          "value_minimum_versions": {
+            "compose": "1.1.16919734",
+            "compose.composition": "1.1.16919734",
+            "compose.recomposition": "1.1.16919734"
+          }
         },
         "launch": {
           "type": "boolean",
@@ -1259,7 +1291,12 @@
           "type": "string",
           "accepts_number": true,
           "repeatable": true,
-          "description": "Trace groups or fields to omit."
+          "description": "Repeatable or comma-separated trace groups/fields. compose, compose.composition and compose.recomposition need CLI 1.1.16919734+ and app runtime-tracing 1.13+; Compose traces are ZIP archives.",
+          "value_minimum_versions": {
+            "compose": "1.1.16919734",
+            "compose.composition": "1.1.16919734",
+            "compose.recomposition": "1.1.16919734"
+          }
         },
         "duration": {
           "type": "string",
@@ -1270,7 +1307,12 @@
           "type": "string",
           "accepts_number": true,
           "repeatable": true,
-          "description": "Trace groups or fields to include."
+          "description": "Repeatable or comma-separated trace groups/fields. compose, compose.composition and compose.recomposition need CLI 1.1.16919734+ and app runtime-tracing 1.13+; Compose traces are ZIP archives.",
+          "value_minimum_versions": {
+            "compose": "1.1.16919734",
+            "compose.composition": "1.1.16919734",
+            "compose.recomposition": "1.1.16919734"
+          }
         },
         "keep-session": {
           "type": "boolean",
@@ -1360,7 +1402,7 @@
         },
         "use-delta-install": {
           "type": "boolean",
-          "description": "Use native incremental deployment; defaults to enabled upstream."
+          "description": "Use native delta deployment (default enabled). CLI 1.1.16919734+ also reuses unchanged files relocated within the APK; the CLI may choose standard installation."
         },
         "build-args": {
           "type": "array",
@@ -1368,6 +1410,14 @@
             "type": "string"
           },
           "description": "Arguments to the project build system after its separator."
+        },
+        "use-delta-install-instructions": {
+          "type": "string",
+          "enum": [
+            "COPY,DATA"
+          ],
+          "minimum_version": "1.1.16919734",
+          "description": "Optional upstream troubleshooting override: COPY,DATA disables reuse of relocated files. Omit to allow native file reuse."
         }
       },
       "arguments": {

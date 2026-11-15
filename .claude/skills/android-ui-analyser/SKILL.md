@@ -59,14 +59,15 @@ yields an unmapped `satisfied_action_until` arrival.
 
 ## Optional development tools
 
-No session: `aua devtools status`; `devtools setup` installs optional Android CLI.
+No session: `devtools status|setup`; update: `devtools run update --yes`.
 `devtools catalogue <operation>` → `devtools run <operation> [args] --options '<JSON>' --project PATH`.
 MCP: `development_tools_status|setup|catalogue`, `development_tool`.
-Compose: `preview list` → `preview render --fqn NAME` → inspect PNG and `preview inspect TREE.json`;
-`preview check` tests saved evidence. Previews compile; no emulator or runtime proof.
-`profile start` → actions → `profile stop`; `profile heap` for heaps.
-Tests: `journey validate FILE` → `journey start FILE` → instructions → `journey check`
-or `journey record` (agent assessment, not machine proof) → `journey finish`.
+Compose: `preview list` → `preview render --fqn NAME`; inspect PNG and `preview inspect TREE.json`.
+`preview check` asserts evidence. Previews compile; no runtime proof.
+`profile start [--enable compose.recomposition]` → actions → `profile stop`;
+`profile heap <process> [--type perfetto]`.
+`journey validate FILE` → `journey start FILE` → instructions → `journey check`
+or `journey record` (agent assessment) → `journey finish`.
 
 ## Safety
 

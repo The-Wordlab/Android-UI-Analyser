@@ -22,8 +22,12 @@ platforms:
     cli_sdk: /absolute/path/to/Android/sdk
 ```
 
-The integration was developed against Android CLI **1.1.16717390**. `status` reports the installed
-version and compatibility independently of whether an Android device is available. An absent or
+The integration is verified against Android CLI **1.1.16919734**; the earlier **1.1.16717390**
+remains supported for its original operations. `status` reports installed/verified versions,
+feature availability and whether its UI helper is verified, without connecting to a device.
+New option requirements appear in the catalogue and fail before acquiring a target on older CLIs.
+Upgrade explicitly with `aua devtools run update --yes` (MCP: `development_tool`, operation
+`update`, `confirmed: true`); `setup` preserves an already compatible installation. An absent or
 incompatible binary produces an explicit error for optional operations; it does not disable AUA.
 
 ## Discover and run
@@ -93,6 +97,35 @@ aua profile heap com.example.demo --output /path/to/memory.hprof
 aua session finish
 ```
 
+With CLI **1.1.16919734+**, record Compose work and the state changes causing recompositions:
+
+```bash
+aua profile start --package com.example.demo --enable compose.recomposition \
+  --output /path/to/evidence
+# Exercise the app through AUA, then:
+aua profile stop
+aua profile heap com.example.demo --type perfetto --output /path/to/evidence
+```
+
+Compose tracing requires `androidx.compose.runtime:runtime-tracing` **1.13+** in the app.
+Use `compose.composition` when function slices are sufficient; `compose.recomposition` also
+records state reads/writes. `--enable` and `--disable` accept repeated or comma-separated fields.
+The CLI packages Compose traces as ZIP files for Android Studio; AUA returns those paths in
+`artifacts`, including when the destination was a directory. The native ZIP may retain a
+`.perfetto` extension. A trace file alone does not prove
+that an app emitted Compose events; inspect it before drawing performance conclusions.
+
+Perfetto heap capture requires **Android 12/API 31+** and a profileable or debuggable app. It
+captures objects and their references without field values, reducing output size. **HPROF stays
+the AUA default** (API 29+); use it when values or existing HPROF analysis tools are needed.
+`--gc` is supported only with HPROF; AUA rejects it with Perfetto before touching a device.
+Heap results identify `heap_type` and include native `.perfetto-java-heap-dump` artifacts.
+Neither format automatically detects memory leaks.
+
+MCP uses the same `development_tool` operations: `profiler.systemtrace.start` with
+`options: {"package":"com.example.demo","enable":["compose.recomposition"]}`, and
+`profiler.heapdump.capture` with `options: {"process":"com.example.demo","type":"perfetto"}`.
+
 AUA assigns a session ID from the lease owner, platform, target and profiling family. It records
 the exact cleanup action **before** prepare/start/capture. Explicit stop/cancel removes the undo
 only after success; interruption or failure retains it for normal device teardown. Heap captures
@@ -136,6 +169,21 @@ IDs. See the [native selector syntax](https://developer.android.com/tools/agents
 Neither an upstream speed claim nor fewer command names establishes a performance improvement:
 compare cold/warm execution, changed/unchanged APKs, input handoff overhead and correctness on the
 same fixture before changing defaults.
+
+The November CLI enables reuse of unchanged files that moved within an APK during delta
+installation. AUA's optional `install`/`run` operations inherit that optimization by default;
+the CLI may still select standard installation. For upstream troubleshooting, pass
+`--options '{"use-delta-install-instructions":"COPY,DATA"}'` to disable relocated-file reuse,
+or `{"use-delta-install":false}` to disable delta installation altogether. Ordinary `aua install`
+continues using AUA's existing backend; no speed claim is inferred from an enabled option.
+
+November `input.*` results contain a JSON `results` array. AUA requires every result to report
+success; `no_matches`, `multiple_matches`, `scrolled_to_end` and other failures produce an error
+even if the native exit code is zero. Original status and error data remain available. Missing,
+truncated or unexpected output leaves action delivery unknown. A scroll can move the UI before
+failing to find its destination, so a failure must not trigger automatic repetition.
+Library artifact analysis preserves the native `dexSizeBytes` strings without losing 64-bit
+precision. Emulator start/stop/removal continue through AUA's owned lifecycle routes.
 
 ## Agent-executed journeys
 

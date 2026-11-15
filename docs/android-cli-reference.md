@@ -2,7 +2,10 @@
 
 AUA can use Google's Android CLI through the `development_tools` platform service.
 Android CLI is optional. The ordinary Android, iOS, and web backends keep working
-without it. The integration's command grammar was checked against **1.1.16717390**.
+without it. The integration's command grammar was checked against **1.1.16919734**.
+AUA also supports the original **1.1.16717390** commands, with explicit version checks for
+November options. `devtools status` reports available features and an upgrade hint;
+`aua devtools run update --yes` explicitly upgrades the optional CLI.
 AUA rejects the unrelated legacy SDK command also named `android`.
 
 ## Install and discover
@@ -108,7 +111,7 @@ aua devtools run build :app:assembleDebug --project /path/to/project \
   exact socket, preserving preexisting mappings. Cleanup checks the recorded device boot and adapter
   configuration. A surviving record is replayed before reconnecting after a crash.
   A different preexisting helper APK is refused rather than overwritten. These UI
-  helper lifecycle guarantees are verified for Android CLI `1.1.16717390`; a newer
+  helper lifecycle guarantees are verified for Android CLI `1.1.16717390` and `1.1.16919734`; a newer
   CLI needs a verified helper mapping before its `layout`/`input` commands run.
   The verified helper requests only normal permissions (`INTERNET`,
   `ACCESS_NETWORK_STATE`, and `QUERY_ALL_PACKAGES`), so installing it does not
@@ -135,6 +138,15 @@ aua devtools run build :app:assembleDebug --project /path/to/project \
   a successful empty result.
 
 ## Operation catalogue
+
+November additions use the same operations: `profiler.heapdump.capture` accepts `type` (`hprof`
+or `perfetto`), `profiler.systemtrace.prepare|start` accept Compose fields in `enable`/`disable`,
+and `install|run` accept the documented `use-delta-install-instructions: "COPY,DATA"` override.
+The CLI shortcuts are `profile heap --type perfetto` and `profile start --enable
+compose.recomposition`. See [requirements and examples](android-cli.md#profiling-an-ordinary-aua-session).
+For November `input.*`, AUA checks each JSON result's status rather than trusting process exit
+zero; invalid evidence remains an uncertain delivery. ZIP profiling artifacts and native 64-bit
+DEX-size strings are preserved in the result.
 
 The 70 operations below are exposed by the adapter. `target` means a selected AUA
 lease is required; `host` means the command does not select a local device.

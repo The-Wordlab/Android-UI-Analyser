@@ -4,6 +4,44 @@ This page records executed checks for the optional developer tools and the surro
 workflows. A passing test establishes the behavior described here; it is not a general
 performance claim or proof that every application behaves the same way.
 
+## November CLI compatibility checks
+
+Android CLI **1.1.16919734** was exercised on 2026-11-15 through AUA's optional adapter.
+The fictional Compose fixture used a debuggable build with `runtime-tracing:1.13.0-rc01`,
+on an AUA-owned API 34 emulator. Host preview checks needed no emulator.
+
+| Executed check | Observed result |
+|---|---|
+| Official project creation and debug build | Generated and built the fixture through `devtools run` |
+| Preview discovery, render, inspection and assertion | Returned a PNG and component tree; the counter assertion passed and the PNG was visually inspected |
+| November native layout, tap and text entry | Counter advanced from zero to one; the entered text appeared in the field and echo, with fresh AUA observations |
+| Missing and ambiguous native tap targets | Returned `no_matches` / `multiple_matches`, AUA exit 3, and `action_succeeded: false`; JSON was interpreted even with native exit 1 |
+| Scroll toward a deliberately absent target | Returned `scrolled_to_end`; AUA kept delivery uncertain, and a fresh screenshot confirmed the list had moved to its last row |
+| Native UI helper restoration | Package presence check confirmed the temporary helper absent after input success and failures |
+| Compose recomposition trace | Returned a 3,722,224-byte ZIP with a `.perfetto` filename, containing system and AndroidX traces; trace-processor analysis found 45 recomposition groups, 265 state reads, 28 state writes and three fixture slices |
+| Perfetto heap | Returned a 26,585,351-byte `.perfetto-java-heap-dump` artifact; trace-processor read 724,638 heap objects, with `heap_type: perfetto` and no pending profile cleanup |
+| Default HPROF heap | Returned a 62,576,455-byte artifact with a valid `JAVA PROFILE 1.0.3` header, `heap_type: hprof` and no pending profile cleanup |
+| Changed APK deployment and `COPY,DATA` fallback | Native run/install succeeded; all three calls reported Standard Install, so no delta-transfer or speed improvement was demonstrated |
+| Session finish | Stopped the exact AUA-owned emulator, released its lease and reported no cleanup errors |
+
+Two attempts to start a pre-existing emulator definition failed because its debugging connection
+was unauthorized, including a cold boot. AUA stopped each failed instance. The API 34 target then
+booted and ran the checks above. The negative input probes are deliberately induced failures;
+they remain failures in the session journal rather than being relabelled successful actions.
+The final goal verdict was passed; the six recorded negative probes keep `review.run_ok` false.
+
+Regression tests additionally cover native exit-zero failures, malformed/truncated/contradictory
+JSON, mixed input results, older-CLI version gates, incompatible heap options, artifact suffixes,
+64-bit DEX size strings, and CLI/MCP parity through a fake adapter with durable cleanup.
+The new helper APK's package, permissions, connector lifecycle and SHA-256 were inspected before
+adding its version to the verified lifecycle table. No cloud/account operations were exercised.
+The final local suite reported **7,379 passed, 19 skipped and five expected failures**; ruff and
+mypy also passed.
+
+Trace, heap, screenshot, JSON and build evidence remain in the machine-local QA bundle outside
+the repository. These captures establish the tested behavior, not automatic leak detection or
+performance improvements for other apps.
+
 ## Native CLI and Compose checks
 
 The optional Google Android CLI 1.1.16717390 was installed through `aua devtools setup`.

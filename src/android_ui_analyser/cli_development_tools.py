@@ -125,6 +125,8 @@ def register(app: typer.Typer, run: Any, route: Any, emit: Any) -> None:
         ctx: typer.Context, package: str | None = typer.Option(None, "--package"),
         output: str | None = typer.Option(None, "--output", "-o"),
         preset: str | None = typer.Option(None, "--preset"),
+        enable: list[str] | None = typer.Option(None, "--enable", help="Trace group/field; repeatable. Compose: compose.composition or compose.recomposition (runtime-tracing 1.13+)."),
+        disable: list[str] | None = typer.Option(None, "--disable", help="Trace groups/fields to omit; repeatable."),
         duration: float | None = typer.Option(None, "--duration", min=0.1),
         launch: bool = typer.Option(False, "--launch"),
         wait: bool = typer.Option(False, "--wait"),
@@ -134,6 +136,7 @@ def register(app: typer.Typer, run: Any, route: Any, emit: Any) -> None:
         opts: dict[str, Any] = {"launch": launch, "wait": wait}
         opts.update({k: v for k, v in {
             "package": package, "output": output, "preset": preset, "duration": duration,
+            "enable": enable or None, "disable": disable or None,
         }.items() if v is not None})
         call(ctx, "development_tool", operation="profiler.systemtrace.start", options=opts,
              timeout_s=timeout)
@@ -163,12 +166,15 @@ def register(app: typer.Typer, run: Any, route: Any, emit: Any) -> None:
         ctx: typer.Context, process: str = typer.Argument(...),
         output: str | None = typer.Option(None, "--output", "-o"),
         gc: bool = typer.Option(False, "--gc"),
+        heap_type: str | None = typer.Option(None, "--type", help="hprof (default, API 29+) or perfetto (smaller, no object values, API 31+)."),
         timeout: int = typer.Option(120, "--timeout", min=1, max=3570),
     ) -> None:
         """Capture a JVM heap snapshot from the leased target (API 29+)."""
         opts: dict[str, Any] = {"process": process, "gc": gc, "timeout": timeout}
         if output:
             opts["output"] = output
+        if heap_type is not None:
+            opts["type"] = heap_type
         call(ctx, "development_tool", operation="profiler.heapdump.capture", options=opts,
              timeout_s=timeout + 30)
 

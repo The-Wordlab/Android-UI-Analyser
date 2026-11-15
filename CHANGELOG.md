@@ -13,6 +13,15 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- Android CLI **1.1.16919734** support: Compose composition/recomposition tracing through
+  `profile start --enable`, smaller Perfetto heap captures through `profile heap --type perfetto`,
+  ZIP trace artifacts, native delta-install improvements and their troubleshooting override.
+  Status reports feature availability; new options check the installed version before claiming
+  a target. HPROF remains the default and existing October CLI workflows remain supported.
+- November input JSON is checked per action: missing, ambiguous, unsuccessful or malformed
+  results cannot become false success when the native process exits zero. Original diagnostics
+  and uncertain-delivery information survive CLI/MCP/daemon transport and helper cleanup.
+
 - `select-option` / MCP `select_option` chooses a native single-select option by exact value or
   label through the optional `ui.select` runtime capability. Isolated web and CDP dispatch normal
   frontend input/change events on the observed control; missing/ambiguous/disabled choices,

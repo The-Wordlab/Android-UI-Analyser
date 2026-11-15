@@ -1686,7 +1686,7 @@ def _daemon_error(err: dict[str, Any]) -> AuaError:
     code = err.get("code", "error")
     message = err.get("message", "daemon error")
     hint = err.get("hint")
-    if code in {"development_tool_failed", "android_cli_failed", "android_cli_timeout"}:
+    if code in {"development_tool_failed", "android_cli_failed", "android_cli_timeout", "android_cli_invalid_output"}:
         from .errors import DevelopmentToolError
 
         result = err.get("result")

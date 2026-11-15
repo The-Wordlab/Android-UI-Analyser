@@ -45,8 +45,9 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "profiling",
-        "Record system traces and capture JVM heaps on the leased target alongside ordinary AUA actions.",
-        ("profile", "profiling", "slow", "performance", "jank", "heap", "memory leak", "perfetto"),
+        "Record system/Compose traces and capture HPROF or Perfetto JVM heaps on the leased "
+        "target alongside AUA actions; check devtools status/catalogue for prerequisites.",
+        ("profile", "profiling", "slow", "performance", "jank", "heap", "memory leak", "perfetto", "recomposition"),
         5, "aua profile start --package <package> --output <trace>", "development_tool",
         risk="temporary device/app profiling changes",
         cleanup="profile stop/cancel or durable device-ledger cleanup ends the exact owned session",

@@ -1310,8 +1310,8 @@ KEY_FLAGS: list[tuple[str, str]] = [
     (
         "profiling",
         "`profile start [--package <package>] [--output <trace>] [--duration <seconds>] "
-        "[--wait] [--launch]`; `profile status|stop|cancel`; "
-        "`profile heap <process> [--output <heap.hprof>]`. Use within a device session. "
+        "[--wait] [--launch] [--enable compose.recomposition] [--disable <field>]`; `profile status|stop|cancel`; "
+        "`profile heap <process> [--type hprof|perfetto] [--output <heap>]`. Use within a device session. "
         "The exact owned profiling session has durable cleanup.",
     ),
     (
@@ -1768,7 +1768,8 @@ def render_markdown(*, brief: bool = False) -> str:
         "`development_tools_setup`, `development_tools_catalogue`, and `development_tool`. "
         "The catalogue covers builds, SDKs, artifacts, official docs, Studio, cloud diagnostics, "
         "deployment and UI inspection. Device commands always use AUA's leased target. "
-        "Never supply native device/session overrides or retry an uncertain mutation.\n\n"
+        "Never supply native device/session overrides or retry an uncertain mutation. "
+        "Status reports feature availability; explicitly upgrade with `aua devtools run update --yes`.\n\n"
         "Before installing a UI build, use `aua preview list --project <directory>`, then "
         "`aua preview render --project <directory> --fqn <returned-name> --output <directory>`. "
         "This compiles a preview target but needs no emulator or IDE. Inspect the returned PNG "
@@ -1778,7 +1779,11 @@ def render_markdown(*, brief: bool = False) -> str:
         "During a device session, `aua profile start --package <package> --output <trace>` "
         "records while normal AUA actions run; `aua profile stop` saves the trace and restores "
         "the device. `aua profile heap <process> --output <heap.hprof>` captures a heap. Exact "
-        "caller-owned diagnostic sessions have write-ahead cleanup in the device ledger.\n\n"
+        "caller-owned diagnostic sessions have write-ahead cleanup in the device ledger. "
+        "With Android CLI 1.1.16919734+, add `--enable compose.composition` or "
+        "`--enable compose.recomposition` (app runtime-tracing 1.13+) for a ZIP trace. "
+        "`profile heap <process> --type perfetto` records a smaller reference graph without "
+        "object values on API 31+; HPROF remains the default, and `--gc` is HPROF-only.\n\n"
         "`aua journey validate <file.yaml>` checks an authored journey, and `aua journey start <file.yaml>` "
         "starts its ordinary AUA goal session. The calling agent performs each instruction, "
         "then `aua journey check` evaluates deterministic assertions on a fresh frame. For a "
@@ -2401,14 +2406,15 @@ yields an unmapped `satisfied_action_until` arrival.
 
 ## Optional development tools
 
-No session: `aua devtools status`; `devtools setup` installs optional Android CLI.
+No session: `devtools status|setup`; update: `devtools run update --yes`.
 `devtools catalogue <operation>` → `devtools run <operation> [args] --options '<JSON>' --project PATH`.
 MCP: `development_tools_status|setup|catalogue`, `development_tool`.
-Compose: `preview list` → `preview render --fqn NAME` → inspect PNG and `preview inspect TREE.json`;
-`preview check` tests saved evidence. Previews compile; no emulator or runtime proof.
-`profile start` → actions → `profile stop`; `profile heap` for heaps.
-Tests: `journey validate FILE` → `journey start FILE` → instructions → `journey check`
-or `journey record` (agent assessment, not machine proof) → `journey finish`.
+Compose: `preview list` → `preview render --fqn NAME`; inspect PNG and `preview inspect TREE.json`.
+`preview check` asserts evidence. Previews compile; no runtime proof.
+`profile start [--enable compose.recomposition]` → actions → `profile stop`;
+`profile heap <process> [--type perfetto]`.
+`journey validate FILE` → `journey start FILE` → instructions → `journey check`
+or `journey record` (agent assessment) → `journey finish`.
 
 ## Safety
 
