@@ -172,7 +172,7 @@ def driver(monkeypatch):
         launch_persistent_context=persistent,
     )
     runtime = SimpleNamespace(
-        _impl_obj=SimpleNamespace(_connection=SimpleNamespace(_abort=lambda: None)),
+        _impl_obj=SimpleNamespace(_connection=object()),  # Modern drivers have no _abort.
         chromium=browser_type,
         stop=lambda: stopped.append(True),
     )

@@ -11,6 +11,7 @@ import pytest
 
 from android_ui_analyser import read_budget
 from android_ui_analyser.errors import DeviceError, JobCancelledError
+from android_ui_analyser.platforms import web_bounded_reads
 from android_ui_analyser.platforms.web_bounded_reads import read
 from android_ui_analyser.platforms.web_runtime import WebRuntime
 from android_ui_analyser.platforms.web_tools import (
@@ -45,6 +46,7 @@ def test_slow_read_cancels_before_returning_and_restores_context(connection, met
             drained.append(True)
 
     page = SimpleNamespace(_impl_obj=SimpleNamespace(**{method: slow}), _sync=asyncio.run)
+    setattr(page, method, lambda: page._sync(slow()))
     runtime = WebRuntime(connection, "https://fixture.test")
     budget = read_budget.ReadBudget(time.monotonic() + 0.08, time.monotonic)
     started = time.monotonic()
@@ -70,6 +72,7 @@ def test_job_cancellation_is_not_wrapped_as_a_browser_error(connection):
             drained.append(True)
 
     page = SimpleNamespace(_impl_obj=SimpleNamespace(evaluate=slow), _sync=asyncio.run)
+    page.evaluate = lambda: page._sync(slow())
     budget = read_budget.ReadBudget(time.monotonic() + 2, time.monotonic, cancelled.is_set)
     with pytest.raises(JobCancelledError), read_budget.activate(budget):
         connection._call(lambda: read(page, "evaluate"))
@@ -106,7 +109,8 @@ def test_passive_read_never_reopens_a_closed_page(connection):
     assert error.value.code == "web_page_closed"
 
 
-def test_driver_without_protocol_cancellation_fails_before_launch(monkeypatch):
+def test_driver_predating_protocol_cancellation_fails_before_launch(monkeypatch):
+    monkeypatch.setattr(web_bounded_reads, "version", lambda _: "1.62.0")
     stopped = []
     driver = SimpleNamespace(
         _impl_obj=SimpleNamespace(_connection=object()),
@@ -123,3 +127,61 @@ def test_driver_without_protocol_cancellation_fails_before_launch(monkeypatch):
         PlaywrightLauncher().launch("https://fixture.test", WebLaunchOptions())
     assert error.value.code == "web_driver_outdated"
     assert stopped == [True]
+
+
+@pytest.mark.parametrize("installed", ["1.63.0", "1.65.2"])
+def test_cancellation_support_does_not_depend_on_private_abort(monkeypatch, installed):
+    monkeypatch.setattr(web_bounded_reads, "version", lambda _: installed)
+    web_bounded_reads.require_cancellable_driver()
+
+
+def test_public_wrapper_retains_defaults_handle_mapping_and_restores_bridge():
+    handle = object()
+
+    class Page:
+        _sync = staticmethod(asyncio.run)
+        _impl_obj = object()
+
+        def evaluate(self, expression, arg=None):
+            async def implementation(expression, arg):
+                assert expression == "fixture" and arg is None
+                return "implementation handle"
+
+            assert self._sync(implementation(expression, arg)) == "implementation handle"
+            return handle  # Generated public mapping, not an AUA private import.
+
+    page = Page()
+    budget = read_budget.ReadBudget(time.monotonic() + 1, time.monotonic)
+    with read_budget.activate(budget):
+        assert read(page, "evaluate", "fixture") is handle
+    assert "_sync" not in vars(page)
+
+
+def test_modern_protocol_abort_reply_is_drained_without_waiting_for_unrelated_calls():
+    callbacks = {"unrelated": SimpleNamespace(future=None)}
+    acknowledged = []
+    page = SimpleNamespace(
+        _impl_obj=SimpleNamespace(_connection=SimpleNamespace(_callbacks=callbacks)),
+        _sync=asyncio.run,
+    )
+
+    async def implementation():
+        future = asyncio.get_running_loop().create_future()
+        callbacks["read"] = SimpleNamespace(future=future)
+
+        async def reply():
+            await asyncio.sleep(0.02)
+            callbacks.pop("read")
+            acknowledged.append(True)
+
+        future.add_done_callback(lambda _: asyncio.create_task(reply()))
+        return await future
+
+    page.title = lambda: page._sync(implementation())
+    original = page._sync
+    budget = read_budget.ReadBudget(time.monotonic() + 0.02, time.monotonic)
+    with pytest.raises(read_budget.ReadDeadlineExceeded), read_budget.activate(budget):
+        read(page, "title")
+    assert acknowledged == [True]
+    assert set(callbacks) == {"unrelated"}
+    assert page._sync is original

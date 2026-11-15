@@ -23,6 +23,7 @@ from ..errors import AuaError, ConfigError, DeviceError, JobCancelledError, Usag
 from ..schema import Element
 from .drag_path import drag_path
 from .web_bounded_reads import read as _read
+from .web_bounded_reads import require_cancellable_driver
 
 
 @dataclass(frozen=True)
@@ -1703,12 +1704,7 @@ class PlaywrightLauncher:
             playwright = sync_playwright().start()
             browser = None
             try:
-                if not callable(getattr(playwright._impl_obj._connection, "_abort", None)):
-                    raise DeviceError(
-                        "web UI deadlines require Playwright >=1.63 with protocol cancellation",
-                        code="web_driver_outdated",
-                        hint="Upgrade android-ui-analyser[web], then install its browser binaries.",
-                    )
+                require_cancellable_driver()
                 browser_type = getattr(playwright, options.browser, None)
                 if browser_type is None:
                     raise ConfigError(

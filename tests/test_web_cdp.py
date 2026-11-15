@@ -353,7 +353,7 @@ def test_launcher_disconnects_on_finish_and_failed_selection(monkeypatch, fail):
         return browser
 
     playwright = SimpleNamespace(
-        _impl_obj=SimpleNamespace(_connection=SimpleNamespace(_abort=lambda: None)),
+        _impl_obj=SimpleNamespace(_connection=object()),  # Modern drivers have no _abort.
         chromium=SimpleNamespace(connect_over_cdp=attach),
         stop=lambda: stopped.append(True),
     )

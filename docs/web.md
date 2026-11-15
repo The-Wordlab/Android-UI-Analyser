@@ -28,6 +28,17 @@ uv pip install -e '.[web]'
 playwright install chromium
 ```
 
+Playwright 1.63+ is required for cancellable reads. AUA supports the reorganized 1.65.2
+transport without requiring the older private `Connection._abort` method. The public sync
+wrappers retain version-specific defaults and handle conversion; deadline cancellation drains
+the corresponding protocol replies before returning.
+
+The 1.65.2 compatibility repair was checked with an isolated local fixture through AUA:
+session start, stable-ID increment with confirmed arrival, iframe discovery and bounded wait,
+an absent-predicate timeout, subsequent uncached read, and session cleanup. Screenshots were
+inspected. Regression coverage includes older-version rejection and cancelled reply draining;
+the local full suite passed 7,383 tests (19 skipped, five expected failures).
+
 If Google Chrome is already installed, `channel: chrome` uses it and the separate browser
 download is unnecessary. Select a URL as the target:
 

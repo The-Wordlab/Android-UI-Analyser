@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- Playwright 1.65.2 no longer fails web or CDP startup with `web_driver_outdated` merely
+  because its internal `_abort` method moved. Deadline reads use the generated public
+  wrappers, retaining current argument defaults and iframe handle conversion. Cancellation
+  drains outstanding abort replies on both the 1.63 and 1.65 transports.
+
 ## [0.41.0] - 2026-11-15
 
 ### Added

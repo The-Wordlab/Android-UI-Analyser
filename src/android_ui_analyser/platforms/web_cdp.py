@@ -14,6 +14,7 @@ from PIL import Image
 
 from ..errors import ConfigError, DeviceError, UnsupportedPlatformCapabilityError
 from .web_bounded_reads import read as _read
+from .web_bounded_reads import require_cancellable_driver
 from .web_tools import PlaywrightConnection, WebLaunchOptions
 
 
@@ -257,10 +258,7 @@ class CdpLauncher:
         def start() -> tuple[Any, Any]:
             playwright = sync_playwright().start()
             try:
-                if not callable(getattr(playwright._impl_obj._connection, "_abort", None)):
-                    raise DeviceError(
-                        "CDP attachment requires Playwright >=1.63", code="web_driver_outdated"
-                    )
+                require_cancellable_driver()
                 browser = playwright.chromium.connect_over_cdp(
                     options.endpoint,
                     timeout=options.attach_timeout_ms,
