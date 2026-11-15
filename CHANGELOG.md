@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-11-15
+
 ### Added
 
 - Android CLI **1.1.16919734** support: Compose composition/recomposition tracing through
@@ -1919,5 +1921,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.39.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.39.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.40.0...HEAD
 [0.40.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.40.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.41.0...HEAD
+[0.41.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.41.0
