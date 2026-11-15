@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-11-15
+
 ### Fixed
 
 - Playwright 1.65.2 no longer fails web or CDP startup with `web_driver_outdated` merely
@@ -1930,5 +1932,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.40.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.40.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.41.0...HEAD
 [0.41.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.41.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.41.1...HEAD
+[0.41.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.41.1
