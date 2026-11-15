@@ -15,13 +15,13 @@ import pytest
 
 from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.errors import DeviceError
+from android_ui_analyser.errors import AuaError, DeviceError
 
 pytest.importorskip("playwright.sync_api")
 
 
-@pytest.mark.parametrize("choice", [{"value": "two"}, {"label": "Second"}])
-def test_native_select_by_stable_id_updates_choice_and_frontend_state(tmp_path: Path, choice):
+@pytest.fixture
+def browser_engine(tmp_path: Path):
     (tmp_path / "index.html").write_text('''<!doctype html>
 <label for="choice">Choice</label>
 <select id="choice"><option value="">Choose</option>
@@ -29,6 +29,11 @@ def test_native_select_by_stable_id_updates_choice_and_frontend_state(tmp_path: 
 <label for="other">Other choice</label>
 <select id="other"><option>Untouched</option><option>Second</option></select>
 <p id="result">No change</p>
+<select id="invalid"><option value="">Choose</option>
+<option value="duplicate">Duplicate</option><option value="duplicate">Duplicate</option>
+<option value="disabled" disabled>Disabled</option></select>
+<select id="multiple" multiple><option value="two">Second</option></select>
+<input id="editable" value="Original">
 <script>
 let inputCount = 0;
 choice.addEventListener('input', () => inputCount++);
@@ -65,18 +70,7 @@ choice.addEventListener('change', () => {
             if "Executable doesn't exist" in str(exc) or exc.code == "web_driver_missing":
                 pytest.skip(f"Playwright Chromium unavailable: {exc}")
             raise
-        before = engine.analyze(source="hierarchy", with_ocr=False)
-        target = next(el for el in before.elements if el.resource_id == "choice")
-        assert target.handle is not None
-        assert target.handle.startswith("el:")
-        action = engine.select_option(target.handle, **choice)
-        assert action.ok is True
-        assert action.observation is not None
-        observed = {el.resource_id: el for el in action.observation.elements if el.resource_id}
-        assert observed["choice"].text == "Second"
-        assert observed["choice"].handle == target.handle
-        assert observed["other"].text == "Untouched"
-        assert observed["result"].text == "Selected two; input events 1"
+        yield engine
     finally:
         if started:
             engine.session_finish(allow_incomplete=True)
@@ -84,3 +78,41 @@ choice.addEventListener('change', () => {
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("choice", [{"value": "two"}, {"label": "Second"}])
+def test_native_select_by_stable_id_updates_choice_and_frontend_state(browser_engine, choice):
+    engine = browser_engine
+    before = engine.analyze(source="hierarchy", with_ocr=False)
+    target = next(el for el in before.elements if el.resource_id == "choice")
+    assert target.handle is not None
+    assert target.handle.startswith("el:")
+    action = engine.select_option(target.handle, **choice)
+    assert action.ok is True
+    assert action.observation is not None
+    observed = {el.resource_id: el for el in action.observation.elements if el.resource_id}
+    assert observed["choice"].text == "Second"
+    assert observed["choice"].handle == target.handle
+    assert observed["other"].text == "Untouched"
+    assert observed["result"].text == "Selected two; input events 1"
+
+
+@pytest.mark.parametrize("rid,choice", [
+    ("invalid", {"value": "missing"}),
+    ("invalid", {"value": "duplicate"}),
+    ("invalid", {"label": "Duplicate"}),
+    ("invalid", {"value": "disabled"}),
+    ("multiple", {"value": "two"}),
+    ("editable", {"value": "two"}),
+])
+def test_invalid_native_choices_are_rejected_without_changing_controls(browser_engine, rid, choice):
+    engine = browser_engine
+    with pytest.raises(AuaError):
+        engine.select_option(selector={"rid": rid}, **choice)
+    observed = engine.analyze(source="hierarchy", with_ocr=False)
+    controls = {el.resource_id: el.text for el in observed.elements if el.resource_id}
+    assert controls["invalid"] == "Choose"
+    assert controls["editable"] == "Original"
+    assert controls["choice"] == "Choose"
+    assert controls["other"] == "Untouched"
+    assert controls["result"] == "No change"
