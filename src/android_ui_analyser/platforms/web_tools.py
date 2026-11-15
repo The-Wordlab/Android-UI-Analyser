@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import suppress
 from contextvars import copy_context
 from dataclasses import dataclass
 from fnmatch import fnmatch
@@ -18,7 +19,8 @@ from typing import Any, Protocol, TypeVar
 from urllib.parse import urlsplit, urlunsplit
 
 from .. import read_budget
-from ..errors import AuaError, ConfigError, DeviceError, JobCancelledError
+from ..errors import AuaError, ConfigError, DeviceError, JobCancelledError, UsageError
+from ..schema import Element
 from .drag_path import drag_path
 from .web_bounded_reads import read as _read
 
@@ -842,6 +844,71 @@ class PlaywrightConnection:
             return data
 
         return self._call(capture)
+
+    def select_option(
+        self, element: Element, *, value: str | None = None, label: str | None = None
+    ) -> str:
+        """Bind the observed control, validate one option, then use native selection events."""
+        if (value is None) == (label is None):
+            raise UsageError("select-option requires exactly one value or label")
+
+        def select() -> str:
+            handles: list[Any] = []
+            try:
+                targets = []
+                viewport = self._snapshot_viewport()
+                width, height = viewport["width"], viewport["height"]
+                for frame in list(self._page.frames):
+                    for control in frame.query_selector_all("select"):
+                        handles.append(control)
+                        facts = control.evaluate(r"""element => ({
+                            rid: String(element.getAttribute('data-testid') || element.getAttribute('data-test-id') ||
+                              element.getAttribute('data-test') || element.id || '').replace(/\s+/g, ' ').trim().slice(0, 500),
+                            text: String(element.selectedOptions[0]?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 500),
+                            disabled: element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true',
+                            multiple: element.multiple
+                        })""")
+                        box = control.bounding_box()
+                        if not box or not control.is_visible():
+                            continue
+                        bounds = (max(0, round(box["x"])), max(0, round(box["y"])),
+                                  min(width, round(box["x"] + box["width"])),
+                                  min(height, round(box["y"] + box["height"])))
+                        if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+                            continue
+                        if element.resource_id:
+                            matches = facts["rid"] == element.resource_id
+                        else:
+                            matches = bounds == element.bounds and facts["text"] == (element.text or "")
+                        if matches and element.type == "ComboBox":
+                            targets.append((control, facts))
+                if len(targets) != 1:
+                    raise UsageError("native select target is missing, ambiguous, or not a select")
+                control, facts = targets[0]
+                if facts["disabled"] or facts["multiple"]:
+                    raise UsageError("native select must be enabled and single-choice")
+                options = control.query_selector_all("option")
+                handles.extend(options)
+                matches = []
+                for option in options:
+                    choice = option.evaluate("""element => ({value: element.value, label: element.label,
+                        disabled: element.disabled || Boolean(element.closest('optgroup')?.disabled)})""")
+                    if choice["value" if value is not None else "label"] == (value if value is not None else label):
+                        matches.append((option, choice))
+                if len(matches) != 1 or matches[0][1]["disabled"]:
+                    raise UsageError("native select option is missing, ambiguous, or disabled")
+                option, choice = matches[0]
+                # Pin this option handle: do not re-resolve an index after checking its identity.
+                selected = control.select_option(element=option, timeout=self._options.action_timeout_ms)
+                if selected != [choice["value"]]:
+                    raise DeviceError("native select did not confirm the requested choice")
+                return str(selected[0])
+            finally:
+                for handle in handles:
+                    with suppress(Exception):
+                        handle.dispose()
+
+        return self._call(select)
 
     def click(self, x: int, y: int) -> None:
         self._call(lambda: self._page.mouse.click(x, y))

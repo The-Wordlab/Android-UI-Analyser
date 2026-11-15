@@ -44,6 +44,7 @@ def test_web_profile_is_exact_and_preserves_schemas():
         "has",
         "tap_and_analyze",
         "input_and_analyze",
+        "select_option",
         "clear_and_analyze",
         "swipe_and_analyze",
         "drag_and_analyze",

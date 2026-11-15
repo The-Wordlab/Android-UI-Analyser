@@ -19,7 +19,7 @@ from typing import Any
 from ..errors import DeviceError
 from ..providers.base import Bounds, ScreenImage
 from ..read_budget import ReadBudget
-from ..schema import AppContext, MatchMode, ShellResult
+from ..schema import AppContext, Element, MatchMode, ShellResult
 from .geometry import DisplayGeometry
 
 
@@ -118,6 +118,12 @@ class TargetRuntime(ABC):
         raise DeviceError("foreground app context is unsupported by this target runtime")
 
     # -- capability-gated input ------------------------------------------
+
+    def select_option(
+        self, element: Element, *, value: str | None = None, label: str | None = None
+    ) -> str:
+        """Select exactly one native choice on the resolved control; never type or tap globally."""
+        raise DeviceError("native selection is unsupported by this target", code="unsupported_capability")
 
     def click(self, x: int, y: int) -> None:
         """Tap canonical screenshot-pixel coordinates."""

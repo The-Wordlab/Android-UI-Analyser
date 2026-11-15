@@ -444,6 +444,18 @@ SESSION_PROTOCOL: list[tuple[str, str]] = [
         'Use `aua has "<text>"` (exit 0/1) to branch cheaply without parsing JSON.',
     ),
     (
+        "Select a native choice without typing",
+        "`aua select-option <id> --value blue` (MCP `select_option`) chooses one native "
+        "single-select control and returns its resulting screen. Supply exactly one `--value` "
+        "or `--label`; `--value ''` is a real empty choice. Stable handles and ordinary "
+        "rid/text/desc targeting use the same observed-target checks as taps. Selection fires "
+        "normal input/change events; it never types into global focus or replays arrow keys. "
+        "Missing, ambiguous, disabled, multiple-select and non-select targets/options fail "
+        "before changing the choice. Isolated web and CDP support `ui.select`; the Chrome "
+        "extension bridge and adapters not declaring it refuse explicitly. Option contents "
+        "are not auto-recorded into flows and are redacted as input in journals.",
+    ),
+    (
         "Ask for the columns you want — never post-process JSON",
         "**`aua --format tsv analyze` is the default way to look at a screen**: one element "
         "per line, tab-separated, `#`-commented summary on top, and status-bar/unlabelled "

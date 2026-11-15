@@ -1113,6 +1113,11 @@ class Mutation:
 
 
 MUTATION_CATALOGUE: dict[str, Mutation] = {
+    "native_choice": Mutation(
+        "native_choice", "engine_actions.py:select_option", None,
+        "Native selection is an explicit application interaction, like a tap. Reversing it "
+        "could resubmit an app transaction; it does not configure persistent device settings.",
+    ),
     "development_tool_ui": Mutation(
         "development_tool_ui", "platforms/android_runtime.py:execute_development_tool",
         "restore_development_ui",
