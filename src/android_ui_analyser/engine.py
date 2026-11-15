@@ -2479,6 +2479,7 @@ class Engine:
     target_report = engine_actions.target_report
     _acting_target = engine_actions._acting_target
     _tap_point = engine_actions._tap_point
+    select_option = engine_actions.select_option
     tap = engine_actions.tap
     tap_point = engine_actions.tap_point
     long_press = engine_actions.long_press

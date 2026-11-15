@@ -52,6 +52,7 @@ def _spec(
 # Per-target operations. The runtime is deliberately split into focused surfaces so a platform
 # can ship hierarchy/input first and explicitly refuse features it cannot support.
 RUNTIME_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "ui.select": _spec("ui.select", CapabilityScope.RUNTIME, "select_option"),
     "device.development_tools": _spec(
         "device.development_tools", CapabilityScope.RUNTIME,
         "execute_development_tool", "restore_development_tool",

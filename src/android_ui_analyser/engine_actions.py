@@ -30,6 +30,7 @@ from .errors import (
     SelectorAmbiguousError,
     SelectorNotFoundError,
     StaleElementIdError,
+    UnsupportedPlatformCapabilityError,
     UsageError,
 )
 from .memory import RouteStep, _id_tail, recorded_selector
@@ -836,6 +837,38 @@ def _tap_point(self: Engine, el: Element, needle: str | None) -> tuple[int, int]
         "aiming at %r inside %r: x=%d instead of the line centre %d", want, text[:40], x, cx
     )
     return x, cy
+
+
+def select_option(
+    self: Engine,
+    element_id: ElementId | None = None,
+    *,
+    selector: dict[str, Any] | None = None,
+    value: str | None = None,
+    label: str | None = None,
+    observe: bool = True,
+    with_image: bool | str | None = None,
+) -> ActionResult:
+    """Choose one native option through the selected adapter, with normal app events."""
+    if (value is None) == (label is None) or any(
+        choice is not None and not isinstance(choice, str) for choice in (value, label)
+    ):
+        raise UsageError("select-option requires exactly one string --value or --label")
+    if not self.platform.supports("ui.select"):
+        raise UnsupportedPlatformCapabilityError(self.platform.name, "ui.select")
+    runtime = self.platform.runtime_capability("ui.select", self.device)
+    named = self._target(element_id, selector, verb="select-option")
+    element, acting = self._acting_target(named)
+    step = self._step("select-option", element)
+    with self._acting(_action_mark("select-option", element)):
+        runtime.select_option(element, value=value, label=label)
+    # Choice contents are not auto-recorded: they can contain private application values.
+    self._record_action_safe(step)
+    return self._observe(
+        ActionResult(ok=True, action="select-option", id=_published_id(element),
+                     detail="native option selected", acting=acting),
+        observe, with_image,
+    )
 
 
 def tap(

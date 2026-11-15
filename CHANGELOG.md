@@ -11,6 +11,14 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `select-option` / MCP `select_option` chooses a native single-select option by exact value or
+  label through the optional `ui.select` runtime capability. Isolated web and CDP dispatch normal
+  frontend input/change events on the observed control; missing/ambiguous/disabled choices,
+  multiple-select controls and unsupported adapters fail explicitly without typing or keyboard
+  fallback. Submitted choice values/labels are redacted in journals.
+
 ## [0.40.0] - 2026-10-29
 
 ### Added

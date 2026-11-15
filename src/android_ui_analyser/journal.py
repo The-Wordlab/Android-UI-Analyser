@@ -42,7 +42,7 @@ _MAX_STR = 400
 _MAX_RESULT = 1200
 _MAX_FILE_BYTES = 8 * 1024 * 1024  # rotate soft-cap per serial file
 _MAX_DETAIL_FILE_BYTES = 32 * 1024 * 1024
-_INPUT_COMMANDS = frozenset({"input", "input_text", "input_and_analyze"})
+_INPUT_COMMANDS = frozenset({"input", "input_text", "input_and_analyze", "select_option"})
 _PRIVATE_RESPONSE_COMMANDS = _INPUT_COMMANDS | frozenset(
     {
         "mic_speak",
@@ -229,6 +229,7 @@ def _detail_sensitive_literals(
     typed_input = depth == 1 and cmd in _INPUT_COMMANDS and lowered in {
         "text",
         "value",
+        "label",
     }
     developer_parameters = depth == 1 and cmd == "development_tool" and lowered in {
         "arguments", "options",
@@ -281,7 +282,7 @@ def _detail_value(
     if request:
         if depth == 1 and cmd == "development_tool" and lowered in {"arguments", "options"}:
             return "<redacted developer-tool parameters>"
-        if depth == 1 and cmd in _INPUT_COMMANDS and lowered in {"text", "value"}:
+        if depth == 1 and cmd in _INPUT_COMMANDS and lowered in {"text", "value", "label"}:
             return f"<redacted input: {len(str(value))} chars>"
         if (
             depth == 1

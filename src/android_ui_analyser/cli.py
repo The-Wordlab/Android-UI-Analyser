@@ -3164,6 +3164,31 @@ def tap(
     _run(ctx, go)
 
 
+@app.command(name="select-option")
+def select_option_cmd(
+    ctx: typer.Context,
+    ident: str | None = typer.Argument(None, metavar="[ID]", help="Observed native choice control."),
+    by: str | None = _SEL_BY,
+    rid: str | None = _SEL_RID,
+    text: str | None = _SEL_TEXT,
+    desc: str | None = _SEL_DESC,
+    key: str | None = _SEL_KEY,
+    index: int | None = _SEL_INDEX,
+    first: bool = _SEL_FIRST,
+    value: str | None = typer.Option(None, "--value", help="Exact option value; empty is valid."),
+    label: str | None = typer.Option(None, "--label", help="Exact option label instead of value."),
+    observe: bool = typer.Option(True, "--observe/--no-observe", help="Return the post-selection screen."),
+    with_image: str | None = typer.Option(None, "--with-image", metavar="[PATH]", show_default=False),
+) -> None:
+    """Select a native single-choice control by stable id or selector, with frontend events."""
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        selector = _selector(ident=ident, by=by, rid=rid, text=text, desc=desc, key=key, index=index, first=first)
+        _emit(_route(engine, "select_option", element_id=_require_target("select-option", ident, selector),
+                     selector=selector, value=value, label=label, observe=observe,
+                     with_image=_annotate_arg(with_image)), fmt)
+    _run(ctx, go)
+
+
 @app.command(name="await-and-analyze", cls=AnalyzeCommand)
 def await_cmd(
     ctx: typer.Context,

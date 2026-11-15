@@ -8,9 +8,9 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from .. import read_budget
-from ..errors import UsageError
+from ..errors import UnsupportedPlatformCapabilityError, UsageError
 from ..providers.base import Bounds, ScreenImage
-from ..schema import AppContext, MatchMode
+from ..schema import AppContext, Element, MatchMode
 from . import web_tree
 from .runtime import TargetRuntime
 from .web_tools import WebConnection
@@ -92,6 +92,14 @@ class WebRuntime(TargetRuntime):
             ignore_case=ignore_case,
             by=by,
         )
+
+    def select_option(
+        self, element: Element, *, value: str | None = None, label: str | None = None
+    ) -> str:
+        select = getattr(self._connection, "select_option", None)
+        if not callable(select):
+            raise UnsupportedPlatformCapabilityError("web", "ui.select")
+        return select(element, value=value, label=label)
 
     def click(self, x: int, y: int) -> None:
         self._connection.click(x, y)

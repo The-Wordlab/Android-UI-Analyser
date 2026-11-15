@@ -704,6 +704,10 @@ def dispatch(engine: Engine, request: dict[str, Any]) -> dict[str, Any]:
             result = engine.screenshot(**args)
             return _result_ok(result.model_dump(mode="json"))
 
+        elif cmd == "select_option":
+            result = engine.select_option(**args)
+            return _result_ok(result.model_dump(mode="json"))
+
         elif cmd == "tap":
             result = engine.tap(**args)
             return _result_ok(result.model_dump(mode="json"))

@@ -345,6 +345,7 @@ _POST_ACTION_WAIT_TOOLS = frozenset({*_ANALYZED_TOOL_BASES, "app_launch_and_anal
 _OBSERVATION_TOOL_NAMES = frozenset(
     {
         *_POST_ACTION_WAIT_TOOLS,
+        "select_option",
         "await_and_analyze",
         "back_until_and_analyze",
         "session_start",
@@ -1259,6 +1260,20 @@ def _tool_definitions() -> list[types.Tool]:
                     {"required": ["text"]},
                     {"required": ["desc"]},
                 ],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="select_option",
+            description="Select one native single-choice option by exact value or label; returns its screen.",
+            inputSchema={
+                "type": "object",
+                "properties": {"id": _ELEMENT_ID_PROP, "value": {"type": "string"},
+                               "label": {"type": "string"}, "observe": _OBSERVE_PROP,
+                               "with_image": _WITH_IMAGE_PROP},
+                "required": ["id"],
+                "oneOf": [{"required": ["value"], "not": {"required": ["label"]}},
+                          {"required": ["label"], "not": {"required": ["value"]}}],
                 "additionalProperties": False,
             },
         ),
@@ -3865,6 +3880,12 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
                 with_image=img,
             )
         )
+    if name == "select_option":
+        return _dump(engine.select_option(
+            _ordinal(args.get("id")), selector=_selector_from_args(args),
+            value=args.get("value"), label=args.get("label"),
+            observe=args.get("observe", True), with_image=img,
+        ))
     if name == "input":
         return _dump(
             engine.input_text(
