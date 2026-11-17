@@ -5,13 +5,25 @@ build-backend = "hatchling.build"
 [project]
 name = "android-ui-analyser"
 version = "0.47.0"
-description = "Fast, configurable CLI that gives an AI agent structured 'what's on screen and where' for Android UI testing — hierarchy-first, with pluggable vision/OCR/grounding fallbacks."
+description = "Give AI agents eyes on Android, iOS-simulator and web UIs: structured elements with stable IDs, not pixels. CLI + MCP server."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Eiliya" }]
 maintainers = [{ name = "Eiliya" }]
-keywords = ["android", "ui-testing", "uiautomator2", "set-of-marks", "accessibility", "ocr", "agent"]
+keywords = ["android", "ios", "web", "ui-testing", "mcp", "ai-agents", "uiautomator2", "set-of-marks", "accessibility", "ocr", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+]
 
 # Base install is intentionally light. Heavy perception backends live in extras and
 # are lazy-imported, so a missing optional dep never breaks the core CLI.
@@ -81,8 +93,17 @@ proxy = ["mitmproxy>=10.0"]
 lxml = ["lxml>=5.0"]
 
 
+[project.urls]
+Homepage = "https://github.com/The-Wordlab/Android-UI-Analyser"
+Documentation = "https://github.com/The-Wordlab/Android-UI-Analyser#readme"
+Changelog = "https://github.com/The-Wordlab/Android-UI-Analyser/blob/main/CHANGELOG.md"
+Issues = "https://github.com/The-Wordlab/Android-UI-Analyser/issues"
+
 [project.scripts]
 aua = "android_ui_analyser.cli:run"
+# Same entry point under the distribution's own name, so `uvx android-ui-analyser <command>`
+# works with no `--from`: uvx runs the executable named after the package it was given.
+android-ui-analyser = "android_ui_analyser.cli:run"
 
 # `typesafe-sdk` pins pydantic to a `typing-extensions` newer than `mitmproxy` allows (and
 # `h11` newer than mitmproxy 11 accepts), so the judge extra and the proxy extra cannot share one

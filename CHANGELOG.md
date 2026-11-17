@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- The package installs a second command, `android-ui-analyser`, identical to `aua`. A runner that
+  starts the executable named after the package it was given, such as `uvx`, therefore needs no
+  `--from`. The package metadata now carries the project, changelog and issue links, and its
+  summary names all three platforms.
+
 ## [0.47.0] - 2026-11-27
 
 ### Changed
