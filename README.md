@@ -97,8 +97,28 @@ for the underlying repository-marketplace flow.
 
 ### Run the CLI without installing AUA
 
-Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/), then run a pinned release
-directly from GitHub:
+Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/), then run the latest
+release from [PyPI](https://pypi.org/project/android-ui-analyser/):
+
+```bash
+uvx android-ui-analyser --version
+```
+
+`uvx` creates an isolated environment and caches it for later calls; no clone, `git pull`, editable
+environment, or global `aua` executable is needed. The package installs one command under two
+names, `aua` and `android-ui-analyser`, and `uvx` starts the one named after the package. Any AUA
+command follows it, for example `uvx android-ui-analyser doctor`.
+
+The base package reads the UI hierarchy. To add the OCR and emulator-audio extras, name them with
+`--from` and call `aua`:
+
+```bash
+uvx --from 'android-ui-analyser[apple,rapidocr,audio]' aua --version
+```
+
+For automation, pin a release so a later run starts the same code. Either append the version
+(`uvx android-ui-analyser@<version> …`), or install the tag straight from GitHub, which also
+reaches the releases before 0.48.0 that were never uploaded to PyPI:
 
 ```bash
 uvx --from \
@@ -106,15 +126,9 @@ uvx --from \
   aua --version
 ```
 
-`uvx` creates an isolated environment and caches it for later calls. Replace `v0.47.0` with the
-release you want; no clone, `git pull`, editable environment, or global `aua` executable is needed.
-The command is `uvx --from … aua`, not `uv aua`: the shorter `uvx aua` becomes possible only after
-the distribution is published to PyPI. Until then the explicit Git source keeps the release origin
-and version visible.
-
-For automation, replace `aua --version` with any AUA command while keeping the pinned `--from`
-argument. The [latest GitHub Release](https://github.com/The-Wordlab/Android-UI-Analyser/releases/latest)
-shows the current tag and its release notes.
+Replace `v0.47.0` with the release you want. The
+[latest GitHub Release](https://github.com/The-Wordlab/Android-UI-Analyser/releases/latest) shows
+the current tag and its release notes.
 
 ### Install the CLI permanently
 
@@ -704,8 +718,8 @@ so they do not drift from the CLI/MCP capability contract. After upgrading, re-r
 ### Prefer a different MCP client?
 
 `aua mcp` exposes the same actions over stdio (see [MCP server](#mcp-server)). Point another MCP
-client at a global `aua` install, or copy the repository's [`.mcp.json`](.mcp.json) configuration
-to let `uvx` run the pinned release without installing AUA.
+client at `uvx android-ui-analyser mcp`, at a global `aua` install, or copy the repository's
+[`.mcp.json`](.mcp.json) configuration to let `uvx` run the pinned release.
 
 ---
 
@@ -1857,7 +1871,21 @@ The full MCP profile also exposes `development_tools_status`, `development_tools
 the catalogue's profiler operations; `profile_kind: "heap"` selects heap session status or
 cancellation without affecting an owned trace.
 
-Example MCP client config (Claude Desktop / `claude_desktop_config.json`):
+Example MCP client config (Claude Desktop / `claude_desktop_config.json`), running the latest
+release from PyPI:
+
+```json
+{
+  "mcpServers": {
+    "android-ui": {
+      "command": "uvx",
+      "args": ["android-ui-analyser", "mcp"]
+    }
+  }
+}
+```
+
+The same server pinned to one release, with the OCR and emulator-audio extras:
 
 ```json
 {

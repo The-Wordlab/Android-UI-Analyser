@@ -13,6 +13,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- AUA is published on PyPI as `android-ui-analyser`, so `uvx android-ui-analyser --version` runs
+  the latest release with no Git URL, and an MCP client can start the server with
+  `uvx android-ui-analyser mcp`. Every release from this one on is uploaded by the release
+  workflow; earlier versions still install from their Git tag. The wheel is the one already
+  attached to each GitHub Release, including the bundled FunctionGemma adapter under the Gemma
+  Terms of Use.
 - The package installs a second command, `android-ui-analyser`, identical to `aua`. A runner that
   starts the executable named after the package it was given, such as `uvx`, therefore needs no
   `--from`. The package metadata now carries the project, changelog and issue links, and its

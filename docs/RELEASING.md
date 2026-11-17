@@ -72,11 +72,34 @@ lock would otherwise disagree with `pyproject.toml` silently and forever.
    files, runs ruff, mypy and the suite (the ordinary CI workflow does **not** run on tags, so the
    release workflow runs them itself — a tag that publishes untested code is the one failure mode
    worth spending a few minutes of CI on), builds the wheel and sdist, and publishes the GitHub
-   Release with the notes for that version lifted out of `CHANGELOG.md`.
+   Release with the notes for that version lifted out of `CHANGELOG.md`. Its last job uploads the
+   same wheel and sdist to PyPI.
 
 **Dry run first if you are unsure.** The workflow also accepts `workflow_dispatch`: run it from the
 Actions tab against a ref and it does everything except create the tag and the release, so you can
 watch the verify-build-notes path succeed before anything is public.
+
+## PyPI
+
+The `pypi` job in `release.yml` uploads to <https://pypi.org/project/android-ui-analyser/> on every
+tag, after the GitHub Release exists. It signs in with a PyPI API token stored as the
+`PYPI_API_TOKEN` secret of this repository's `pypi` environment; the token is never in the
+repository, and only a job that names that environment can use it.
+
+- **To replace the token**, create one on pypi.org limited to the `android-ui-analyser` project,
+  run `gh secret set PYPI_API_TOKEN --env pypi`, then delete the old token on PyPI. A token that
+  was deleted or has the wrong scope shows up as a `403` in the `pypi` job.
+- **If the `pypi` job fails, re-run that job** (`gh run rerun <run-id> --failed`). The GitHub
+  Release already exists and is unaffected.
+- **A version can be uploaded once.** PyPI never accepts the same filename twice, even after a
+  delete, so a bad release is fixed by a new patch version, and the bad one is *yanked* on PyPI.
+- **Each release adds about 64 MB** (30 MB wheel, 33 MB sdist) against PyPI's 10 GB per-project
+  quota, which is roughly 150 releases. Nearly all of it is the bundled FunctionGemma adapter.
+- **The wheel is not MIT throughout.** That adapter is distributed under the Gemma Terms of Use,
+  and its directory carries the terms, prohibited-use policy and notices. Publishing it to PyPI
+  was decided on 2026-11-17; the reasoning sits above the job in `release.yml`.
+
+Releases before 0.48.0 were never uploaded and install from their Git tag only.
 
 ## Consuming a release
 
