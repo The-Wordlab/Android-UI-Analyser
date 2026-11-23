@@ -80,6 +80,16 @@ URL: target identities appear in local lease and journal metadata. Use a private
 
 ## Connections and sessions
 
+The warm daemon owns the browser, its signed-in state, and its published element handles.
+`inspect` and `resolve` read that same context; they refuse rather than launch an empty browser
+when the session daemon is unavailable. `inspect` accepts both published `el:` handles and legacy
+numeric IDs.
+
+An idle visible browser stays open for 30 minutes to allow human sign-in and verification;
+headless browsers retain the five-minute idle limit. `daemon.idle_ttl_s` overrides either limit
+(seconds, `0` disables expiry). `session finish` still cleans up the owned browser immediately;
+extend the timeout for a long handoff rather than repeatedly reloading a login form.
+
 ### Parallel isolated sessions
 
 For concurrent agents, configure the destination with `platforms.web.url` and omit

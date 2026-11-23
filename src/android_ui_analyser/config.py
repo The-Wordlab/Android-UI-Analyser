@@ -490,7 +490,7 @@ class DaemonCfg(BaseModel):
     watch_interval_ms: int = 150
     # Exit after this long with no client request (0 = never). Agent sessions end without
     # stopping their daemon, and every survivor keeps polling a device forever. Unset means the
-    # platform's own default: 30 minutes, or 5 on the web, whose daemon keeps a browser running.
+    # platform's own default: 30 minutes for native/visible browsers, 5 for headless web.
     idle_ttl_s: int | None = None
 
 

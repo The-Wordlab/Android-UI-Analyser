@@ -416,8 +416,9 @@ class WebPlatform(PlatformAdapter):
         return False
 
     def daemon_idle_ttl_s(self) -> int:
-        # A warm web daemon keeps a whole headless browser running, about five processes.
-        return 300
+        # A visible browser may be waiting for a person to finish sign-in or verification.
+        # Keep the normal bounded native handoff window; unattended browsers retire sooner.
+        return 300 if self.options.get("headless", True) else 1800
 
     def connect(self, target_id: str | None = None) -> TargetRuntime:
         if self._connection_mode() == "existing-cdp":

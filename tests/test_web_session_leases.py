@@ -107,12 +107,15 @@ def test_an_isolated_browser_closes_when_its_session_finishes(tmp_path):
         engine.close()
 
 
-def test_a_web_daemon_idles_five_minutes_and_a_native_one_thirty(tmp_path):
-    """A warm web daemon keeps a whole browser running; a native one only a transport."""
+def test_headed_web_keeps_a_bounded_sign_in_window_and_headless_retires_sooner(tmp_path):
+    """Human handoffs get thirty minutes; unattended browsers still stop after five."""
     from android_ui_analyser.config import Config
     from android_ui_analyser.platforms.android import AndroidPlatform
 
-    assert engine_for(tmp_path, "agent-a").platform.daemon_idle_ttl_s() == 300
+    headed = engine_for(tmp_path, "agent-a").platform
+    assert headed.daemon_idle_ttl_s() == 1800
+    headless = WebPlatform(_config(tmp_path, url=URL, headless=True))
+    assert headless.daemon_idle_ttl_s() == 300
     assert AndroidPlatform(Config()).daemon_idle_ttl_s() == 1800
 
 

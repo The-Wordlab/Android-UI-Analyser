@@ -11,6 +11,16 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- CLI `inspect` and `resolve` reuse the browser session that produced the observation instead
+  of opening temporary empty browser windows. `inspect` accepts published `el:` handles as well
+  as legacy numeric IDs. If the session daemon is unavailable, these helpers report the missing
+  daemon rather than silently opening an unrelated page.
+- Visible web browsers allow 30 minutes for human sign-in and verification before idle shutdown.
+  Headless browsers keep their five-minute limit, explicit idle settings still take precedence,
+  and finishing a session still closes its owned browser.
+
 ## [0.41.1] - 2026-11-15
 
 ### Fixed

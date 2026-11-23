@@ -1967,7 +1967,10 @@ def _route(engine: Engine, method: str, **kwargs: Any) -> Any:
     runtime_session = method in {"session_start", "session_finish", "journey_start", "journey_finish"} and engine.platform.supports(
         "session.state"
     )
-    persistent_context = method.startswith("browser_") or runtime_session
+    # These reads inspect the page and handle cache owned by the warm session. A fresh
+    # in-process Engine would launch an unrelated browser rather than read that session.
+    session_read = method in {"inspect", "resolve"} and engine.platform.supports("session.state")
+    persistent_context = method.startswith("browser_") or runtime_session or session_read
     # Session bootstrap owns pool discovery, optional provisioning, and the first lease claim.
     # Run that boundary in this caller process so the lease is bound to the agent rather than a
     # detached daemon. Adapters with session.state instead need start/finish in the same
@@ -2987,14 +2990,13 @@ def screenshot(
 @app.command()
 def inspect(
     ctx: typer.Context,
-    element_id: int = typer.Argument(..., metavar="ID", help="Element id from the last analyze."),
+    element_id: str = typer.Argument(..., metavar="ID", help="Published element id from the last analyze (legacy integers also accepted)."),
 ) -> None:
     """Print full attributes for one element from the last analyze."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        _warm(engine)  # align the cache key with the serial a prior analyze wrote
-        el = engine.inspect(element_id)
-        typer.echo(el.model_dump_json(indent=2 if fmt is OutputFormat.pretty else None))
+        target = int(element_id) if element_id.isdecimal() else element_id
+        _emit(_route(engine, "inspect", element_id=target), fmt)
 
     _run(ctx, go)
 
@@ -4250,7 +4252,7 @@ def resolve(
     """
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
-        result = engine.resolve(target)
+        result = _route(engine, "resolve", target=target)
         _emit(result, fmt)
 
     _run(ctx, go)
