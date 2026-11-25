@@ -62,6 +62,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         cleanup="journey finish uses ordinary session cleanup",
     ),
     Capability(
+        "evidence_report",
+        "Turn a run's recording and screenshots into a page people can open: read the guide, "
+        "add AUA's seekable video player with chapters to your HTML, then publish the folder to "
+        "Drophere, public or limited to email domains/addresses, with an expiry and a check.",
+        ("report", "evidence page", "share", "publish", "drophere", "video player", "pr evidence"),
+        4, "aua report guide", "report_guide",
+        risk="publish uploads the folder to an external host; public unless an allow-list is given",
+    ),
+    Capability(
         "credentials",
         "Ask the user privately for a missing API key and save it to a host .env file; status only.",
         ("api key", "apikey", "credential", "secret", "openrouter", ".env"),

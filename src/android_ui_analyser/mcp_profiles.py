@@ -53,6 +53,9 @@ WEB_TOOL_NAMES = frozenset(
         "browser_mock",
         "browser_pages",
         "browser_trace",
+        "report_guide",
+        "report_player",
+        "report_publish",
     }
 )
 

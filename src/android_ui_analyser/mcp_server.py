@@ -492,9 +492,11 @@ def _tool_definitions() -> list[types.Tool]:
     match_enum = ["exact", "contains", "regex"]
     source_enum = ["auto", "hierarchy", "vision"]
     from .mcp_development_tools import tool_definitions as development_tool_definitions
+    from .mcp_report_tools import tool_definitions as report_tool_definitions
 
     tools = [
         *development_tool_definitions(),
+        *report_tool_definitions(),
         types.Tool(
             name="credential_request",
             description=(
@@ -3610,6 +3612,10 @@ def _dispatch_tool(engine: Engine, name: str, args: dict[str, Any]) -> Any:
     """Call the engine method for ``name`` and return a JSON-serialisable payload."""
     if name == "credential_request":
         return _request_credential(args)
+    from . import mcp_report_tools
+
+    if name in mcp_report_tools.TOOL_NAMES:
+        return mcp_report_tools.dispatch(name, args)
     from .mcp_development_tools import TOOL_NAMES as development_tool_names
 
     args = dict(args)
@@ -5038,6 +5044,9 @@ _LEASE_FREE_TOOLS = frozenset(
         "preview_inspect", "preview_check", "journey_validate", "journey_start",
         "journey_status", "journey_record",
         "credential_request",
+        "report_guide",
+        "report_player",
+        "report_publish",
         "app_log_prefs_get",
         "app_log_prefs_set",
         "capabilities",

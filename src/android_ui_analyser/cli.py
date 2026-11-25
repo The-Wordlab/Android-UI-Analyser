@@ -7543,6 +7543,80 @@ def record_stop_cmd(
     _run(ctx, go)
 
 
+report_app = typer.Typer(
+    help="Evidence pages for people: the guide, the video player, and publishing to Drophere.",
+    no_args_is_help=True,
+)
+app.add_typer(report_app, name="report")
+
+
+@report_app.command("guide")
+def report_guide_cmd() -> None:
+    """How to turn a run's recording and screenshots into a page people can open."""
+    from .report import guide
+
+    typer.echo(guide())
+
+
+@report_app.command("player")
+def report_player_cmd(
+    ctx: typer.Context,
+    pages: list[str] = typer.Argument(..., help="HTML pages; ones without a <video> are left alone."),
+) -> None:
+    """Put the video player into each page, just before </body>; running it again replaces it."""
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .report import add_player
+
+        typer.echo(json.dumps(add_player(pages), indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
+@report_app.command("publish")
+def report_publish_cmd(
+    ctx: typer.Context,
+    folder: str = typer.Argument(..., help="Folder with index.html at the top; dot files are skipped."),
+    ttl: str | None = typer.Option(
+        None, "--ttl", help="Expiry such as 24h or 7d (default 7d). Needs a Drophere API key."
+    ),
+    allow_domain: list[str] = typer.Option(
+        [], "--allow-domain", help="Only people with an email at this domain can open it. Repeatable."
+    ),
+    allow_email: list[str] = typer.Option(
+        [], "--allow-email", help="Only this email address can open it. Repeatable."
+    ),
+    slug: str | None = typer.Option(
+        None, "--slug", help="Publish a new version at this existing link; its expiry stays."
+    ),
+) -> None:
+    """Publish the folder to Drophere, then check the link, the expiry and who can open it.
+
+    With an allow-list, access is set before anything is uploaded. Without a Drophere API key
+    (DROPHERE_API_KEY or ~/.drophere/credentials) the page is public and expires after 24 hours.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .report import publish
+
+        result = publish(
+            folder, ttl=ttl, allow_domains=allow_domain, allow_emails=allow_email, slug=slug
+        )
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        _exit_unless_ok(
+            {**result, "detail": "published, but the check found a problem"},
+            ExitCode.ASSERTION,
+            code="publish_unverified",
+            hint="Read anonymous_status, visibility and failed before sharing the link.",
+        )
+
+    _run(ctx, go)
+
+
 clock_app = typer.Typer(help="Device clock (Maestro travel).")
 app.add_typer(clock_app, name="clock")
 

@@ -76,6 +76,9 @@ def test_web_profile_is_exact_and_preserves_schemas():
         "browser_mock",
         "browser_pages",
         "browser_trace",
+        "report_guide",
+        "report_player",
+        "report_publish",
     }
     assert expected == WEB_TOOL_NAMES
     server = mcp_server.build_server(_engine(), tool_profile="web")
