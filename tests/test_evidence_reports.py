@@ -171,3 +171,9 @@ def test_every_report_tool_is_published_over_mcp_and_needs_no_device() -> None:
     engine = Engine(make_config(), device=FakeDevice())
     assert _dispatch(engine, "report_guide", {})["guide"] == guide()
 
+
+def test_the_plugin_skill_teaches_the_same_guide() -> None:
+    skill = Path(__file__).resolve().parent.parent / "skills" / "aua-report" / "SKILL.md"
+    _, front_matter, body = skill.read_text(encoding="utf-8").split("---\n", 2)
+    assert "name: aua-report" in front_matter
+    assert body.lstrip("\n") == guide()

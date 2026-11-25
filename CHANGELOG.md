@@ -11,6 +11,17 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- Evidence pages for people. `aua report guide` (MCP `report_guide`) explains how to turn a run's
+  recording and screenshots into a page; how the page looks stays up to the agent. `aua report
+  player` (MCP `report_player`) adds a video player to that page: it seeks from memory, frames
+  portrait clips in a phone, and turns steps marked `data-seek` into chapters. `aua report
+  publish` (MCP `report_publish`) uploads the folder to Drophere, optionally limited to email
+  domains or addresses with an expiry, sets access before anything is uploaded, then checks the
+  link, expiry, anonymous access and every file. The plugin ships the same guide as the
+  `aua-report` skill.
+
 ## [0.41.2] - 2026-11-23
 
 ### Fixed
