@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-11-26
+
 ### Added
 
 - Evidence pages for people. `aua report guide` (MCP `report_guide`) explains how to turn a run's
@@ -1959,5 +1961,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.41.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.41.1
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.41.2...HEAD
 [0.41.2]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.41.2
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.42.0...HEAD
+[0.42.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.42.0
