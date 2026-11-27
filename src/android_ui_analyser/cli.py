@@ -7565,7 +7565,9 @@ def report_guide_cmd() -> None:
 @report_app.command("player")
 def report_player_cmd(
     ctx: typer.Context,
-    pages: list[str] = typer.Argument(..., help="HTML pages; ones without a <video> are left alone."),
+    pages: list[str] = typer.Argument(
+        ..., help="HTML pages; ones with neither a <video> nor an <img> are left alone."
+    ),
 ) -> None:
     """Put the video player and image viewer into each page, before </body>; reruns replace it."""
 
