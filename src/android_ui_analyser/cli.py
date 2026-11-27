@@ -6668,13 +6668,23 @@ def _browser_pairs(values: list[str], *, label: str) -> dict[str, str]:
 def browser_extension_install_cmd(
     ctx: typer.Context,
     browser: str = typer.Option("chrome", "--browser"),
+    show: bool = typer.Option(
+        True,
+        "--open/--no-open",
+        help="macOS: open chrome://extensions and show the folder, its path on the clipboard.",
+    ),
 ) -> None:
-    """Install the native host and print the unpacked extension directory."""
+    """Install the native host and the extension; load it once in Chrome, it updates itself."""
 
-    from .chrome_extension_setup import install_chrome_extension
+    from pathlib import Path
+
+    from .chrome_extension_setup import install_chrome_extension, show_extension_for_loading
 
     try:
-        _emulator_emit(install_chrome_extension(browser), ctx)
+        result = install_chrome_extension(browser)
+        if show:
+            result["opened"] = show_extension_for_loading(Path(result["extension_path"]))
+        _emulator_emit(result, ctx)
     except AuaError as err:
         emit_error(err)
         raise typer.Exit(int(err.exit_code)) from err

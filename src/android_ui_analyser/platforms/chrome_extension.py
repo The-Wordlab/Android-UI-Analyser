@@ -850,6 +850,11 @@ class ChromeExtensionConnection:
 class ChromeExtensionLauncher:
     def launch(self, target: str, options: ChromeAttachOptions) -> ChromeExtensionConnection:
         del target
+        from ..chrome_extension_setup import refresh_installed_extension
+
+        # A newer AUA brings a newer extension; the loaded copy picks it up by itself.
+        with contextlib.suppress(OSError):
+            refresh_installed_extension()
         return ChromeExtensionConnection(options)
 
 

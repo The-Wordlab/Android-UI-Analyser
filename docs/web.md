@@ -177,13 +177,15 @@ Install the native host and copy the bundled extension into a stable user direct
 
 ```bash
 aua browser extension install
-# Then open chrome://extensions, enable Developer mode, choose Load unpacked,
-# and select the extension_path printed by the command.
 aua browser extension status
 ```
 
-After updating AUA, run `aua browser extension install` again and press the reload button on the
-AUA card in `chrome://extensions`; Chrome keeps running the old copy until then.
+On macOS the install command opens `chrome://extensions`, shows the extension folder in Finder
+and copies its path. Load it once: turn on Developer mode, choose **Load unpacked**, press
+Cmd+Shift+G, paste and press Enter. Elsewhere, select the printed `extension_path`.
+
+That is the only manual step. A newer AUA refreshes the installed copy when attached mode
+starts, and the extension reloads itself the next time it is idle, so updates need no click.
 
 Configure a separate profile for attached operation:
 

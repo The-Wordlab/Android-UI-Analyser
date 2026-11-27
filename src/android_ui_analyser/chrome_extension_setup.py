@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
+import subprocess
 import sys
 from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .errors import ConfigError
 from .platforms.chrome_extension import BRIDGE_HOST_NAME
 
@@ -68,7 +71,15 @@ def native_manifest_path(browser: str = "chrome") -> Path:
     return roots[candidate] / f"{BRIDGE_HOST_NAME}.json"
 
 
-def install_chrome_extension(browser: str = "chrome") -> dict[str, Any]:
+def _extension_version() -> str:
+    parts = re.findall(r"\d+", __version__)[:4]
+    return ".".join(parts) or "0"
+
+
+def copy_extension_files() -> Path:
+    """Copy the bundled extension, stamped with this AUA version so a loaded copy sees it is old
+    and reloads itself."""
+
     destination = extension_install_dir()
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     source_ref = files("android_ui_analyser").joinpath("chrome_extension")
@@ -76,6 +87,50 @@ def install_chrome_extension(browser: str = "chrome") -> dict[str, Any]:
         if destination.exists():
             shutil.rmtree(destination)
         shutil.copytree(source, destination)
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["version"] = _extension_version()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return destination
+
+
+def refresh_installed_extension() -> bool:
+    """Bring an installed copy up to this AUA version; Chrome then reloads it on its own."""
+
+    manifest_path = extension_install_dir() / "manifest.json"
+    if not manifest_path.is_file():
+        return False
+    try:
+        installed = json.loads(manifest_path.read_text(encoding="utf-8")).get("version")
+    except ValueError:
+        installed = None
+    if installed == _extension_version():
+        return False
+    copy_extension_files()
+    return True
+
+
+def show_extension_for_loading(destination: Path) -> bool:
+    """macOS: open chrome://extensions, show the folder in Finder and put its path on the
+    clipboard, so loading it is three clicks."""
+
+    if sys.platform != "darwin":
+        return False
+    commands = (
+        ["open", "-a", "Google Chrome", "chrome://extensions"],
+        ["open", "-R", str(destination)],
+    )
+    try:
+        for command in commands:
+            subprocess.run(command, check=True, capture_output=True, timeout=10)
+        subprocess.run(["pbcopy"], input=str(destination).encode(), check=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def install_chrome_extension(browser: str = "chrome") -> dict[str, Any]:
+    destination = copy_extension_files()
 
     wrapper = host_wrapper_path()
     wrapper.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -115,8 +170,9 @@ def install_chrome_extension(browser: str = "chrome") -> dict[str, Any]:
         "next": [
             "Open chrome://extensions",
             "Enable Developer mode",
-            f"Choose Load unpacked and select {destination}",
-            "Open AUA on the tab you want to share and choose Attach this tab",
+            f"Choose Load unpacked and select {destination} (macOS: Cmd+Shift+G, paste, Enter)",
+            "Only once: from then on AUA keeps the loaded extension up to date by itself",
+            "Then open AUA on a tab and choose Attach this tab",
         ],
     }
 
@@ -144,6 +200,9 @@ __all__ = [
     "chrome_extension_status",
     "extension_install_dir",
     "host_wrapper_path",
+    "copy_extension_files",
     "install_chrome_extension",
     "native_manifest_path",
+    "refresh_installed_extension",
+    "show_extension_for_loading",
 ]

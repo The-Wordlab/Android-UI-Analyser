@@ -80,6 +80,21 @@ async function detachCurrent() {
       // The tab may already be gone.  The invariant we need is simply no attachment.
     }
   }
+  reloadIfUpdated();
+}
+
+// An unpacked extension keeps running its old code after AUA writes a newer copy to disk.
+// Reload into it, but never while a tab is attached.
+async function reloadIfUpdated() {
+  if (attachedTabId !== null) return false;
+  try {
+    const response = await fetch(chrome.runtime.getURL("manifest.json"), {cache: "no-store"});
+    if ((await response.json()).version === chrome.runtime.getManifest().version) return false;
+  } catch (_error) {
+    return false;
+  }
+  chrome.runtime.reload();
+  return true;
 }
 
 function connectNative() {

@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Changed
+
+- `aua browser extension install` opens `chrome://extensions` and the extension folder on macOS
+  and copies its path, so loading it once is a paste. After that the extension updates itself:
+  a newer AUA refreshes the installed copy and the extension reloads when it is idle.
+
 ## [0.45.0] - 2026-11-27
 
 ### Added
