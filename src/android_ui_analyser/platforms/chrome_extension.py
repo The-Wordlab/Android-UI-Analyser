@@ -16,6 +16,8 @@ import json
 import os
 import secrets
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -24,7 +26,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from PIL import Image
 
@@ -151,6 +153,7 @@ class ChromeAttachOptions:
     action_timeout_ms: int = 5_000
     bridge_socket: str | None = None
     bridge_config: str | None = None
+    open_url: str | None = None
 
 
 class ChromeBridge(Protocol):
@@ -173,6 +176,26 @@ class _PendingReply:
     value: dict[str, Any] | None = None
 
 
+def open_in_chrome(url: str) -> None:
+    """Have the AUA extension open *url* in a new tab and attach to it."""
+
+    from ..chrome_extension_setup import EXTENSION_ID
+
+    page = f"chrome-extension://{EXTENSION_ID}/open.html#{quote(url, safe='')}"
+    if sys.platform == "darwin":
+        command = ["open", "-g", "-a", "Google Chrome", page]
+    else:
+        command = ["google-chrome", page]
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        raise DeviceError(
+            "could not ask Chrome to open the page",
+            code="chrome_open_failed",
+            hint="Open the page yourself and choose Attach this tab in the AUA extension.",
+        ) from None
+
+
 class ChromeBridgeServer:
     """Authenticated request/reply bridge between one AUA runtime and the extension."""
 
@@ -182,10 +205,12 @@ class ChromeBridgeServer:
         socket_path: Path,
         config_path: Path,
         attach_timeout_ms: int,
+        open_url: str | None = None,
     ) -> None:
         self.socket_path = socket_path
         self.config_path = config_path
         self.attach_timeout_ms = attach_timeout_ms
+        self.open_url = open_url
         self._listener: socket.socket | None = None
         self._peer: socket.socket | None = None
         self._reader: threading.Thread | None = None
@@ -272,16 +297,26 @@ class ChromeBridgeServer:
             token = secrets.token_urlsafe(32)
             self._publish_config(token)
             self._listener = listener
+            if self.open_url:
+                open_in_chrome(self.open_url)
             try:
                 peer, _address = listener.accept()
             except TimeoutError:
+                hint = (
+                    "Open the AUA extension on the Chrome tab you want to share and choose "
+                    "Attach this tab, then retry."
+                )
+                if self.open_url:
+                    hint = (
+                        f"AUA opened {self.open_url} in Chrome, but the extension did not attach "
+                        "it. Retry once: an older extension updates itself on the first try. "
+                        "If it still fails, run `aua browser extension install` and load AUA "
+                        "in chrome://extensions."
+                    )
                 raise DeviceError(
                     "timed out waiting for a tab approved in the AUA Chrome extension",
                     code="chrome_extension_not_attached",
-                    hint=(
-                        "Open the AUA extension on the Chrome tab you want to share and choose "
-                        "Attach this tab, then retry."
-                    ),
+                    hint=hint,
                 ) from None
             peer.settimeout(max(1.0, self.attach_timeout_ms / 1000))
             stream = peer.makefile("rb")
@@ -473,6 +508,7 @@ class ChromeExtensionConnection:
                     else bridge_config_path()
                 ),
                 attach_timeout_ms=options.attach_timeout_ms,
+                open_url=options.open_url,
             )
             server.start()
             self._bridge = server

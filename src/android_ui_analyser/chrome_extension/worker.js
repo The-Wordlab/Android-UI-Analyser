@@ -97,6 +97,31 @@ async function reloadIfUpdated() {
   return true;
 }
 
+// AUA opens open.html#<url> in Chrome. That tab moves to the URL and is attached, so AUA only
+// ever drives a tab it opened itself.
+async function openAndAttach(tabId, url) {
+  if (!/^https?:\/\//i.test(url)) throw new Error("AUA can open only an http(s) page");
+  const loaded = new Promise((resolve, reject) => {
+    let navigating = false;
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error("the page did not finish loading"));
+    }, 30000);
+    function listener(updatedTabId, change) {
+      if (updatedTabId !== tabId) return;
+      if (change.status === "loading") navigating = true;
+      if (!navigating || change.status !== "complete") return;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+  await chrome.tabs.update(tabId, {url});
+  await loaded;
+  return attachTab(tabId);
+}
+
 function connectNative() {
   if (nativePort && nativeReady) return nativeReady;
   nativeReady = new Promise((resolve, reject) => {
@@ -378,7 +403,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     if (message?.action === "status") {
       const [active] = await chrome.tabs.query({active: true, currentWindow: true});
@@ -396,6 +421,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       if (tabId === null) throw new Error("No active tab");
       return {attached: true, current_tab: true, state: await attachTab(tabId)};
+    }
+    if (message?.action === "open") {
+      const fromOpenPage = sender.id === chrome.runtime.id && sender.tab &&
+        String(sender.url || "").startsWith(chrome.runtime.getURL("open.html"));
+      if (!fromOpenPage) throw new Error("AUA opens tabs only from its own page");
+      return {attached: true, current_tab: true, state: await openAndAttach(sender.tab.id, String(message.url || ""))};
     }
     if (message?.action === "detach") {
       await detachCurrent();

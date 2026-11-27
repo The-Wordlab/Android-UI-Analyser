@@ -197,12 +197,16 @@ device:
 platforms:
   web:
     connection: existing-chrome
+    url: https://example.com/    # optional
     attach_timeout_ms: 30000
     action_timeout_ms: 5000
 ```
 
-Start `aua analyze` or `aua session start` in a terminal, then open the AUA extension on the exact
-HTTP(S) tab you want to share and choose **Attach this tab**. The initial command waits up to
+With `url` set, AUA opens that page in a new background tab of your Chrome and attaches to it by
+itself; the tab stays open after the session. If the loaded extension predates this, the first
+run updates it and asks you to retry.
+Without it, start `aua analyze` or `aua session start` in a terminal, then open the AUA extension
+on the exact HTTP(S) tab you want to share and choose **Attach this tab**. The initial command waits up to
 `attach_timeout_ms`; the warm daemon keeps that one attachment for later commands. The Chrome
 debugger banner is expected. Choose **Detach** in the extension, run `session finish`, stop the
 daemon, or close the AUA process to release it. A killed process also closes the authenticated
@@ -212,7 +216,9 @@ Attached mode intentionally has a narrower authority boundary:
 
 - The extension receives `activeTab`, `debugger`, and `nativeMessaging`; it has no cookie,
   history, broad host, downloads, clipboard, or all-tabs permission.
-- Only the tab approved from the extension popup can be analyzed, pictured, focused, navigated,
+- AUA opens its own tab through the extension's `open.html` page, which websites cannot load; it
+  opens only http(s) pages and attaches only the tab it opened.
+- Only the tab approved from the extension popup, or opened by AUA, can be analyzed, pictured, focused, navigated,
   clicked, dragged, typed into, scrolled, or have its native dropdowns changed. `browser pages`
   reports only that tab. The AUA toolbar icon is grey until a tab is attached and turns blue
   and green while one is.
@@ -433,5 +439,5 @@ when another adapter does not provide them.
 | A control has no stable `rid:` | Add `data-testid` or an HTML `id`; text/ARIA labels still receive semantic stable keys. |
 | A service worker bypasses a mock/HAR rule | Configure `service_workers: block` for deterministic request interception. |
 | Bandwidth throttling is rejected | Use Chromium, or keep only `--latency-ms` on Firefox/WebKit. |
-| `chrome_extension_not_attached` | Start the AUA command first, then open the extension on the target tab and choose **Attach this tab**. |
+| `chrome_extension_not_attached` | Start the AUA command first, then open the extension on the target tab and choose **Attach this tab**. With `url` set, load the extension once (`aua browser extension install`) so it can open the page. |
 | The extension immediately detaches | Run `aua browser extension install`, restart Chrome after native-host installation, and confirm `aua browser extension status` is green. |

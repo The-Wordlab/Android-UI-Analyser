@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- Attached Chrome mode opens its own tab: with `platforms.web.url` set, AUA opens that page in a
+  new background tab of your Chrome and attaches to it, with no **Attach this tab** click. An
+  extension loaded from AUA 0.45 or older updates itself on that first run; retry it once.
+
 ### Changed
 
 - `aua browser extension install` opens `chrome://extensions` and the extension folder on macOS

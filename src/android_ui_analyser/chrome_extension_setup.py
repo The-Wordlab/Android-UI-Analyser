@@ -172,7 +172,8 @@ def install_chrome_extension(browser: str = "chrome") -> dict[str, Any]:
             "Enable Developer mode",
             f"Choose Load unpacked and select {destination} (macOS: Cmd+Shift+G, paste, Enter)",
             "Only once: from then on AUA keeps the loaded extension up to date by itself",
-            "Then open AUA on a tab and choose Attach this tab",
+            "With platforms.web.url set, AUA opens that page in a new tab and attaches by itself; "
+            "otherwise open AUA on a tab and choose Attach this tab",
         ],
     }
 

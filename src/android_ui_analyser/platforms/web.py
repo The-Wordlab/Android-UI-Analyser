@@ -285,7 +285,7 @@ class WebPlatform(PlatformAdapter):
                     "proxy_username",
                     "proxy_password_env",
                 )
-                if field in options
+                if field in options and not (field == "url" and connection == "existing-chrome")
             )
             if incompatible:
                 raise ConfigError(
@@ -317,6 +317,7 @@ class WebPlatform(PlatformAdapter):
         return ChromeAttachOptions(
             attach_timeout_ms=int(self.options.get("attach_timeout_ms", 30_000)),
             action_timeout_ms=int(self.options.get("action_timeout_ms", 5_000)),
+            open_url=self.options.get("url"),
         )
 
     def prepare_host(self) -> None:
