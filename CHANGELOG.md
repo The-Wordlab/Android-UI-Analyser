@@ -11,6 +11,31 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `aua journal stats [--days N] [--only web]` summarises this host's command journal: calls,
+  failure rate, error codes, failing and slow commands, help lookups and command-line mistakes
+  per surface, with web split into dedicated Chrome, extension and CDP.
+
+### Changed
+
+- Web `key` accepts the browser's own names (`PageDown`, `PageUp`, `End`, `ArrowDown`, …) as
+  well as AUA's. `home` still opens the start URL.
+- A scroll that moved nothing, and the MCP scroll tool, say that directions follow the finger:
+  `up` shows what is further down. Most logged web scroll failures were `down` meant as the
+  browser's down.
+- The journal records why a command line was refused (`no such option; closest: --fields`,
+  `missing …`), using AUA's own option names only.
+
+### Fixed
+
+- Changing the web URL or attachment no longer leaves the agent stuck on
+  `leased_target_unavailable`: a held web lease the current config cannot list is released
+  (after the same cleanup as `aua lease release`) instead of refused forever.
+- A one- to three-letter typed value is hidden in the journal only where it stands alone.
+  Before, typing `a` cut every `a` out of the record, error codes and element ids included.
+- `aua report player --help` says pages with only images are handled too.
+
 ## [0.44.0] - 2026-11-27
 
 ### Added
