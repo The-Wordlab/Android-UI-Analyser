@@ -143,3 +143,13 @@ def test_host_only_recovery_journal_uses_the_selected_platform(monkeypatch) -> N
     )
     assert events[-1]["cmd"] == "cli_help"
     assert events[-1]["platform"] == "strict-fake"
+
+
+def test_a_misspelled_flag_is_journaled_with_aua_suggestions_not_what_was_typed() -> None:
+    result = runner.invoke(app, ["analyze", "--field", "secret-value"])
+
+    assert result.exit_code == 2
+    event = _events()[-1]
+    assert event["cmd"] == "cli_usage_error"
+    assert event["error"]["message"].startswith("no such option; closest: --fields")
+    assert "secret-value" not in json.dumps(event)

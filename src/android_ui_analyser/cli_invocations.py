@@ -176,7 +176,10 @@ def _fallback(state: Invocation) -> None:
     }
     result.setdefault("ok", state.exit_code == 0)
     error = (
-        {"code": state.error.get("code"), "message": "CLI invocation failed."}
+        {
+            "code": state.error.get("code"),
+            "message": state.error.get("reason") or "CLI invocation failed.",
+        }
         if state.error
         else None
     )
@@ -209,6 +212,26 @@ def _fallback(state: Invocation) -> None:
     )
 
 
+def _usage_reason(exc: click.UsageError) -> str:
+    """Name what was wrong using AUA's own option names only, never anything that was typed:
+    an unknown flag can be a pasted secret."""
+
+    if isinstance(exc, click.NoSuchOption):
+        known = sorted(exc.possibilities or [])
+        return "no such option" + (f"; closest: {', '.join(known)}" if known else "")
+    if isinstance(exc, click.BadOptionUsage):
+        return "bad option use"
+    if isinstance(exc, click.MissingParameter):
+        return f"missing {exc.param_hint or (exc.param.name if exc.param else 'value')}"
+    if isinstance(exc, click.BadParameter):
+        return f"invalid value for {exc.param_hint or (exc.param.name if exc.param else 'value')}"
+    if exc.message.startswith("Got unexpected extra argument"):
+        return "unexpected extra argument"
+    if exc.message.startswith("No such command"):
+        return "no such command"
+    return "command-line parsing failed"
+
+
 class CommandAccounting:
     """Click mixin shared by ordinary commands, optional-value commands and groups."""
 
@@ -216,12 +239,13 @@ class CommandAccounting:
         context(ctx)
         try:
             return super().parse_args(ctx, args)  # type: ignore[misc]
-        except click.UsageError:
+        except click.UsageError as exc:
             state = current()
             if state is not None:
                 state.error = {
                     "code": "cli_usage_error",
                     "message": "Command-line parsing failed; no command was executed.",
+                    "reason": _usage_reason(exc),
                 }
             raise
 
