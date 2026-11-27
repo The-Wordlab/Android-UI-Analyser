@@ -179,9 +179,9 @@ class _PendingReply:
 def open_in_chrome(url: str) -> None:
     """Have the AUA extension open *url* in a new tab and attach to it."""
 
-    from ..chrome_extension_setup import EXTENSION_ID
+    from ..chrome_extension_setup import installed_extension_id
 
-    page = f"chrome-extension://{EXTENSION_ID}/open.html#{quote(url, safe='')}"
+    page = f"chrome-extension://{installed_extension_id()}/open.html#{quote(url, safe='')}"
     if sys.platform == "darwin":
         command = ["open", "-g", "-a", "Google Chrome", page]
     else:

@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from android_ui_analyser.chrome_extension_setup import EXTENSION_ID
+from android_ui_analyser.chrome_extension_setup import EXTENSION_ID, STORE_EXTENSION_ID
 from android_ui_analyser.errors import DeviceError
-from android_ui_analyser.platforms.chrome_extension import ChromeBridgeServer
+from android_ui_analyser.platforms.chrome_extension import ChromeBridgeServer, open_in_chrome
 from android_ui_analyser.platforms.registry import PlatformFactory
 from test_chrome_extension import _config
 
@@ -107,6 +107,7 @@ def test_only_the_open_page_can_open_and_only_http_pages(url: str, sender_url: s
 
 
 def test_aua_asks_chrome_to_open_the_configured_url(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
     commands = []
     monkeypatch.setattr(
         "android_ui_analyser.platforms.chrome_extension.subprocess.run",
@@ -126,6 +127,22 @@ def test_aua_asks_chrome_to_open_the_configured_url(tmp_path, monkeypatch) -> No
     assert page.startswith(f"chrome-extension://{EXTENSION_ID}/open.html#")
     assert urllib.parse.unquote(page.split("#", 1)[1]) == "https://example.com/a?b=1"
     assert "https://example.com/a?b=1" in str(error.value.hint)
+
+
+def test_aua_opens_the_web_store_copy_when_chrome_has_it(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("android_ui_analyser.chrome_extension_setup.sys.platform", "darwin")
+    commands = []
+    monkeypatch.setattr(
+        "android_ui_analyser.platforms.chrome_extension.subprocess.run",
+        lambda command, **_kwargs: commands.append(command),
+    )
+    profile = tmp_path / "Library/Application Support/Google/Chrome/Profile 1"
+    (profile / "Extensions" / STORE_EXTENSION_ID).mkdir(parents=True)
+
+    open_in_chrome("https://example.com/")
+
+    assert commands[0][-1].startswith(f"chrome-extension://{STORE_EXTENSION_ID}/open.html#")
 
 
 def test_attached_mode_accepts_a_url_to_open(tmp_path) -> None:

@@ -18,6 +18,8 @@ from .errors import ConfigError
 from .platforms.chrome_extension import BRIDGE_HOST_NAME
 
 EXTENSION_ID = "bjbfhnhjmddoehdkhjjnlpjfepbfkncb"
+STORE_EXTENSION_ID = "fblgfpfhgomcofbecmnpiceiahaebmia"
+STORE_URL = f"https://chromewebstore.google.com/detail/{STORE_EXTENSION_ID}"
 
 
 def _data_home() -> Path:
@@ -129,6 +131,18 @@ def show_extension_for_loading(destination: Path) -> bool:
     return True
 
 
+def installed_extension_id() -> str:
+    """The Web Store copy when Chrome has it installed, otherwise the loaded unpacked copy."""
+
+    try:
+        user_data = native_manifest_path("chrome").parent.parent
+    except ConfigError:
+        return EXTENSION_ID
+    if any(user_data.glob(f"*/Extensions/{STORE_EXTENSION_ID}")):
+        return STORE_EXTENSION_ID
+    return EXTENSION_ID
+
+
 def install_chrome_extension(browser: str = "chrome") -> dict[str, Any]:
     destination = copy_extension_files()
 
@@ -152,7 +166,10 @@ def install_chrome_extension(browser: str = "chrome") -> dict[str, Any]:
                 "description": "AUA bridge for one user-approved Chrome tab",
                 "path": str(wrapper),
                 "type": "stdio",
-                "allowed_origins": [f"chrome-extension://{EXTENSION_ID}/"],
+                "allowed_origins": [
+                    f"chrome-extension://{STORE_EXTENSION_ID}/",
+                    f"chrome-extension://{EXTENSION_ID}/",
+                ],
             },
             indent=2,
         )
@@ -187,7 +204,7 @@ def chrome_extension_status(browser: str = "chrome") -> dict[str, Any]:
         "ok": installed,
         "action": "browser-extension-status",
         "browser": browser,
-        "extension_id": EXTENSION_ID,
+        "extension_id": installed_extension_id(),
         "extension_path": str(extension),
         "extension_files": (extension / "manifest.json").is_file(),
         "native_host_manifest": str(manifest),
@@ -198,9 +215,12 @@ def chrome_extension_status(browser: str = "chrome") -> dict[str, Any]:
 
 __all__ = [
     "EXTENSION_ID",
+    "STORE_EXTENSION_ID",
+    "STORE_URL",
     "chrome_extension_status",
     "extension_install_dir",
     "host_wrapper_path",
+    "installed_extension_id",
     "copy_extension_files",
     "install_chrome_extension",
     "native_manifest_path",

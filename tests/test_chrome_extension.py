@@ -19,6 +19,7 @@ from PIL import Image
 
 from android_ui_analyser.chrome_extension_setup import (
     EXTENSION_ID,
+    STORE_EXTENSION_ID,
     chrome_extension_status,
     install_chrome_extension,
     native_manifest_path,
@@ -390,7 +391,10 @@ def test_extension_installer_registers_only_the_stable_extension(
     )
 
     assert status["ok"] is True
-    assert manifest["allowed_origins"] == [f"chrome-extension://{EXTENSION_ID}/"]
+    assert manifest["allowed_origins"] == [
+        f"chrome-extension://{STORE_EXTENSION_ID}/",
+        f"chrome-extension://{EXTENSION_ID}/",
+    ]
     assert extension_manifest["permissions"] == ["activeTab", "debugger", "nativeMessaging"]
     assert Path(manifest["path"]).stat().st_mode & 0o100
     assert str(Path(sys.executable).absolute()) in Path(manifest["path"]).read_text(

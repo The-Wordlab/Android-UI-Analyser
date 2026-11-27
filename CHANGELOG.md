@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- The attached-Chrome extension is in review on the Chrome Web Store (unlisted). AUA's native host
+  accepts the store copy as well as a copy loaded unpacked, and opens tabs through the store copy
+  when Chrome has it. Run `aua browser extension install` once more after updating.
+
 ## [0.46.0] - 2026-11-27
 
 ### Added
