@@ -7,7 +7,10 @@
    < / > speed, [ / ] chapter, 0–9 jump to 0–90 %, F full screen. Hold a step button to keep stepping.
    Portrait clips sit in a phone frame; landscape clips and data-frame="none" get a plain rounded frame.
    The player is sized by its width (the video's class/style move to it); colours follow the page's
-   light/dark theme (prefers-color-scheme, or data-theme on <html>). */
+   light/dark theme (prefers-color-scheme, or data-theme on <html>).
+   Every <img> outside a link and outside [data-no-zoom] opens in a viewer when clicked: fitted to the
+   screen, click or wheel or pinch to zoom, drag to pan, ←/→ through the page's images, Esc to close.
+   The caption is the image's figcaption, or its alt text. */
 (function () {
   "use strict";
 
@@ -16,6 +19,11 @@
     play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>',
     pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>',
     full: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h5v2H7v3H5zM14 5h5v5h-2V7h-3zM5 14h2v3h3v2H5zM17 14h2v5h-5v-2h3z"/></svg>',
+    close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></svg>',
+    prev: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12z"/></svg>',
+    next: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.6 5.4 10 4l8 8-8 8-1.4-1.4 6.6-6.6z"/></svg>',
+    minus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11h14v2H5z"/></svg>',
+    plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>',
   };
   const DARK = "--vp-accent:#8f9bff;--vp-on-accent:#10121b;--vp-panel:#1c1f2a;--vp-ink:#eef0f6;--vp-muted:#9a9fb2;--vp-line:rgba(255,255,255,.1);--vp-rail:rgba(255,255,255,.16);--vp-mark:rgba(255,255,255,.7);--vp-hover:rgba(255,255,255,.08);--vp-shadow:0 12px 32px -14px rgba(0,0,0,.8);--vp-drop:0 26px 50px -20px rgba(0,0,0,.9)";
   const CSS = `
@@ -75,6 +83,30 @@
 [data-seek]:hover{background:color-mix(in srgb,currentColor 6%,transparent);box-shadow:0 0 0 6px color-mix(in srgb,currentColor 6%,transparent)}
 [data-seek].vp-on{background:color-mix(in srgb,currentColor 11%,transparent);box-shadow:0 0 0 6px color-mix(in srgb,currentColor 11%,transparent)}
 [data-seek]:focus-visible{outline:2px solid #6c7bf0;outline-offset:6px}
+img.iv-zoomable{cursor:zoom-in}
+img.iv-zoomable:focus-visible{outline:2px solid #6c7bf0;outline-offset:4px}
+.iv.iv{position:fixed;inset:0;z-index:2147483000;background:rgba(9,10,15,.96);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);color:#eef0f6;font:600 13px/1.2 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;opacity:0;transition:opacity .16s;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+.iv.iv-open{opacity:1}
+.iv-stage{position:absolute;inset:0;overflow:hidden;touch-action:none;cursor:zoom-out}
+.iv-stage img{position:absolute;left:0;top:0;max-width:none;max-height:none;margin:0;padding:0;border:0;border-radius:0;box-shadow:0 20px 60px rgba(0,0,0,.5);transform-origin:0 0;cursor:zoom-in;-webkit-user-drag:none}
+.iv-zoomed .iv-stage img{cursor:grab}
+.iv-dragging .iv-stage img{cursor:grabbing}
+.iv-animate .iv-stage img{transition:transform .22s ease}
+.iv-top{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:6px;padding:12px;pointer-events:none}
+.iv-top>*{pointer-events:auto}
+.iv-count{flex:1 1 auto;padding-left:6px;color:#9a9fb2;font-variant-numeric:tabular-nums}
+.iv button{display:grid;place-items:center;min-width:40px;height:40px;padding:0 10px;margin:0;border:0;border-radius:999px;background:rgba(255,255,255,.1);color:inherit;font:inherit;cursor:pointer}
+.iv button:hover{background:rgba(255,255,255,.18)}
+.iv button:focus-visible{outline:2px solid #8f9bff;outline-offset:2px}
+.iv [hidden]{display:none}
+.iv svg{width:20px;height:20px;fill:currentColor}
+.iv .iv-level{min-width:64px;font-variant-numeric:tabular-nums}
+.iv .iv-nav{position:absolute;top:50%;width:48px;height:48px;margin-top:-24px;padding:0}
+.iv .iv-prev{left:12px}
+.iv .iv-next{right:12px}
+@media (pointer:coarse){.iv .iv-nav{display:none}}
+.iv-caption{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);width:max-content;max-width:min(720px,calc(100% - 32px));padding:8px 14px;border-radius:12px;background:rgba(0,0,0,.6);text-align:center;font-weight:500;line-height:1.35;pointer-events:none}
+.iv-caption:empty{display:none}
 `;
 
   function format(seconds, decimals) {
@@ -510,6 +542,265 @@
     });
   }
 
+  function captionOf(image) {
+    const figure = image.closest("figure");
+    const figcaption = figure ? figure.querySelector("figcaption") : null;
+    return (figcaption && figcaption.textContent.trim()) || image.alt || "";
+  }
+
+  function makeViewer(images) {
+    const SIDE = 16;
+    const TOP = 64;
+    const BOTTOM = 64;
+    const overlay = node("div", "iv");
+    const stage = node("div", "iv-stage");
+    const picture = node("img");
+    const bar = node("div", "iv-top");
+    const count = node("span", "iv-count");
+    const zoomOut = button("iv-out", "Zoom out (−)", ICON.minus);
+    const level = button("iv-level", "Fit to the screen (0)", "100%");
+    const zoomIn = button("iv-in", "Zoom in (+)", ICON.plus);
+    const close = button("iv-close", "Close (Esc)", ICON.close);
+    const prev = button("iv-nav iv-prev", "Previous image (←)", ICON.prev);
+    const next = button("iv-nav iv-next", "Next image (→)", ICON.next);
+    const caption = node("div", "iv-caption");
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", "Image viewer");
+    picture.draggable = false;
+    stage.append(picture);
+    bar.append(count, zoomOut, level, zoomIn, close);
+    overlay.append(stage, bar, prev, next, caption);
+
+    const pointers = new Map();
+    let gesture = null;
+    let index = 0;
+    let x = 0;
+    let y = 0;
+    let scale = 1;
+    let fit = 1;
+    let opener = null;
+    let pageOverflow = "";
+
+    function zoomed() {
+      return scale > fit * 1.01;
+    }
+
+    function maxScale() {
+      return Math.max(4, fit * 4);
+    }
+
+    // Centred while it fits the room between the bars, then the whole screen; panned past that.
+    function place(length, start, room, full, position) {
+      if (length <= room) return start + (room - length) / 2;
+      if (length <= full) return (full - length) / 2;
+      return Math.min(0, Math.max(full - length, position));
+    }
+
+    function apply(animate) {
+      const width = stage.clientWidth;
+      const height = stage.clientHeight;
+      x = place(picture.naturalWidth * scale, SIDE, width - 2 * SIDE, width, x);
+      y = place(picture.naturalHeight * scale, TOP, height - TOP - BOTTOM, height, y);
+      overlay.classList.toggle("iv-animate", Boolean(animate));
+      overlay.classList.toggle("iv-zoomed", zoomed());
+      picture.style.transform = "translate(" + x + "px," + y + "px) scale(" + scale + ")";
+      level.textContent = Math.round(scale * 100) + "%";
+    }
+
+    function zoomTo(target, px, py, animate) {
+      const wanted = Math.min(maxScale(), Math.max(fit, target));
+      x = px - ((px - x) * wanted) / scale;
+      y = py - ((py - y) * wanted) / scale;
+      scale = wanted;
+      apply(animate);
+    }
+
+    function zoomBy(factor) {
+      zoomTo(scale * factor, stage.clientWidth / 2, stage.clientHeight / 2, true);
+    }
+
+    function fitToScreen(animate) {
+      const width = picture.naturalWidth;
+      const height = picture.naturalHeight;
+      if (!width || !height) return;
+      picture.style.width = width + "px";
+      picture.style.height = height + "px";
+      const room = Math.min((stage.clientWidth - 2 * SIDE) / width, (stage.clientHeight - TOP - BOTTOM) / height);
+      fit = Math.max(0.05, Math.min(1, room));
+      scale = fit;
+      picture.style.visibility = "";
+      apply(animate);
+    }
+
+    function show(target) {
+      index = (target + images.length) % images.length;
+      const source = images[index];
+      count.textContent = images.length > 1 ? index + 1 + " / " + images.length : "";
+      caption.textContent = captionOf(source);
+      picture.alt = source.alt || "";
+      picture.style.visibility = "hidden";
+      picture.onload = () => fitToScreen(false);
+      picture.src = source.currentSrc || source.src;
+      if (picture.complete) fitToScreen(false);
+    }
+
+    function open(target) {
+      opener = document.activeElement;
+      pageOverflow = document.documentElement.style.overflow;
+      document.documentElement.style.overflow = "hidden";
+      document.body.append(overlay);
+      prev.hidden = images.length < 2;
+      next.hidden = images.length < 2;
+      show(target);
+      requestAnimationFrame(() => overlay.classList.add("iv-open"));
+      close.focus({ preventScroll: true });
+    }
+
+    function shut() {
+      overlay.classList.remove("iv-open");
+      overlay.remove();
+      pointers.clear();
+      gesture = null;
+      document.documentElement.style.overflow = pageOverflow;
+      if (opener && opener.focus) opener.focus({ preventScroll: true });
+    }
+
+    function local(event) {
+      const box = stage.getBoundingClientRect();
+      return [event.clientX - box.left, event.clientY - box.top];
+    }
+
+    function onPicture(px, py) {
+      return px >= x && py >= y && px <= x + picture.naturalWidth * scale && py <= y + picture.naturalHeight * scale;
+    }
+
+    function pinchState() {
+      const [a, b] = Array.from(pointers.values());
+      return { distance: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] };
+    }
+
+    stage.addEventListener("pointerdown", (event) => {
+      if (event.button > 0) return;
+      stage.setPointerCapture(event.pointerId);
+      const point = local(event);
+      pointers.set(event.pointerId, point);
+      if (pointers.size === 1) {
+        gesture = { kind: "pan", start: point, last: point, moved: false };
+      } else if (pointers.size === 2) {
+        const pinch = pinchState();
+        gesture = { kind: "pinch", distance: pinch.distance, mid: pinch.mid, scale };
+      }
+      event.preventDefault();
+    });
+
+    stage.addEventListener("pointermove", (event) => {
+      if (!gesture || !pointers.has(event.pointerId)) return;
+      const point = local(event);
+      pointers.set(event.pointerId, point);
+      if (gesture.kind === "pinch") {
+        if (pointers.size < 2) return;
+        const pinch = pinchState();
+        x += pinch.mid[0] - gesture.mid[0];
+        y += pinch.mid[1] - gesture.mid[1];
+        gesture.mid = pinch.mid;
+        zoomTo((gesture.scale * pinch.distance) / gesture.distance, pinch.mid[0], pinch.mid[1], false);
+        return;
+      }
+      if (Math.abs(point[0] - gesture.start[0]) + Math.abs(point[1] - gesture.start[1]) > 6) gesture.moved = true;
+      if (zoomed()) {
+        x += point[0] - gesture.last[0];
+        y += point[1] - gesture.last[1];
+        overlay.classList.add("iv-dragging");
+        apply(false);
+      }
+      gesture.last = point;
+    });
+
+    function endPointer(event) {
+      if (!pointers.delete(event.pointerId)) return;
+      overlay.classList.remove("iv-dragging");
+      if (!gesture || gesture.kind === "pinch") {
+        if (!pointers.size) gesture = null;
+        return;
+      }
+      const point = local(event);
+      const dx = point[0] - gesture.start[0];
+      const dy = point[1] - gesture.start[1];
+      const tapped = !gesture.moved && event.type === "pointerup";
+      gesture = null;
+      if (tapped && !onPicture(point[0], point[1])) {
+        shut();
+      } else if (tapped) {
+        zoomTo(zoomed() ? fit : Math.max(fit * 2.5, 1), point[0], point[1], true);
+      } else if (!zoomed() && event.pointerType !== "mouse" && images.length > 1 && Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy)) {
+        show(index + (dx < 0 ? 1 : -1));
+      }
+    }
+
+    stage.addEventListener("pointerup", endPointer);
+    stage.addEventListener("pointercancel", endPointer);
+    stage.addEventListener(
+      "wheel",
+      (event) => {
+        event.preventDefault();
+        const point = local(event);
+        const delta = Math.max(-300, Math.min(300, event.deltaMode === 1 ? event.deltaY * 33 : event.deltaY));
+        zoomTo(scale * Math.exp(-delta * (event.ctrlKey ? 0.01 : 0.002)), point[0], point[1], false);
+      },
+      { passive: false },
+    );
+
+    zoomIn.addEventListener("click", () => zoomBy(1.5));
+    zoomOut.addEventListener("click", () => zoomBy(1 / 1.5));
+    level.addEventListener("click", () => fitToScreen(true));
+    close.addEventListener("click", shut);
+    prev.addEventListener("click", () => show(index - 1));
+    next.addEventListener("click", () => show(index + 1));
+    window.addEventListener("resize", () => {
+      if (overlay.isConnected) fitToScreen(false);
+    });
+
+    overlay.addEventListener("keydown", (event) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const key = event.key;
+      if (key === "Escape") shut();
+      else if (key === "ArrowLeft" && images.length > 1) show(index - 1);
+      else if (key === "ArrowRight" && images.length > 1) show(index + 1);
+      else if (key === "+" || key === "=") zoomBy(1.5);
+      else if (key === "-" || key === "_") zoomBy(1 / 1.5);
+      else if (key === "0") fitToScreen(true);
+      else if (key === "Tab") {
+        const items = Array.from(overlay.querySelectorAll("button:not([hidden])"));
+        const at = items.indexOf(document.activeElement);
+        items[(at + (event.shiftKey ? -1 : 1) + items.length) % items.length].focus();
+      } else return;
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    return { open };
+  }
+
+  function attachImages() {
+    const images = Array.from(document.querySelectorAll("img")).filter(
+      (image) => !image.closest("a, .vp, .iv, [data-no-zoom]"),
+    );
+    if (!images.length) return;
+    const viewer = makeViewer(images);
+    images.forEach((image, position) => {
+      image.classList.add("iv-zoomable");
+      if (image.tabIndex < 0) image.tabIndex = 0;
+      if (!image.title) image.title = "Open larger";
+      image.addEventListener("click", () => viewer.open(position));
+      image.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        viewer.open(position);
+      });
+    });
+  }
+
   function init() {
     if (!document.getElementById("vp-css")) {
       const style = node("style");
@@ -524,6 +815,7 @@
       players.set(player.wrap, player);
     });
     attachChapters(players);
+    attachImages();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

@@ -7544,7 +7544,10 @@ def record_stop_cmd(
 
 
 report_app = typer.Typer(
-    help="Evidence pages for people: the guide, the video player, and publishing to Drophere.",
+    help=(
+        "Evidence pages for people: the guide, the video player and image viewer, and "
+        "publishing to Drophere."
+    ),
     no_args_is_help=True,
 )
 app.add_typer(report_app, name="report")
@@ -7563,7 +7566,7 @@ def report_player_cmd(
     ctx: typer.Context,
     pages: list[str] = typer.Argument(..., help="HTML pages; ones without a <video> are left alone."),
 ) -> None:
-    """Put the video player into each page, just before </body>; running it again replaces it."""
+    """Put the video player and image viewer into each page, before </body>; reruns replace it."""
 
     def go(engine: Engine, fmt: OutputFormat) -> None:
         import json

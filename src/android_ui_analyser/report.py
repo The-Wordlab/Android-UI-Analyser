@@ -55,7 +55,7 @@ def guide() -> str:
 
 
 def add_player(pages: list[str]) -> dict[str, Any]:
-    """Inline the player before ``</body>`` of each page that has a video, replacing an older copy."""
+    """Inline the player and image viewer before ``</body>`` of each page with a video or image."""
 
     if not pages:
         raise UsageError("name at least one HTML page")
@@ -69,8 +69,10 @@ def add_player(pages: list[str]) -> dict[str, Any]:
         before, body_end, after = html.rpartition("</body>")
         if not body_end:
             raise UsageError(f"{page}: no </body> to put the player before")
-        if "<video" not in html:
-            results.append({"page": str(page), "player": "skipped", "reason": "no <video> on the page"})
+        if "<video" not in html and "<img" not in html:
+            results.append(
+                {"page": str(page), "player": "skipped", "reason": "no <video> or <img> on the page"}
+            )
             continue
         page.write_text(before + script + body_end + after, encoding="utf-8")
         results.append({"page": str(page), "player": "inlined"})

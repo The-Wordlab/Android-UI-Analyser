@@ -2,8 +2,8 @@
 
 A verdict is a claim; a page with the recording and screenshots is what lets a person check it.
 How the page looks is up to you. AUA gives you the parts every report needs: this guide, a video
-player that seeks reliably, and a publish step that sets who can see the page before anything is
-uploaded, then checks the result.
+player that seeks reliably, an image viewer that zooms, and a publish step that sets who can see the
+page before anything is uploaded, then checks the result.
 
 ## 1. Collect the evidence
 
@@ -50,18 +50,23 @@ The video needs only this markup:
   play / +1 frame / +1 s, speed 0.25x-2x, full screen, and keys (Space play, arrows step,
   `<` `>` speed, `[` `]` chapter, F full screen).
 
+Screenshots need only `<img src="media/01-state.png" alt="What it shows">`, or a `<figure>` with a
+`<figcaption>`. Clicking one opens it in a viewer: fitted to the screen, click, wheel or pinch to
+zoom, drag to pan, ←/→ through the page's images, Esc to close. The caption is the figcaption, or
+else the alt text. Images inside a link, or inside an element with `data-no-zoom`, are left alone.
+
 ## 3. Add the player
 
-`aua report player <bundle>/index.html` (MCP `report_player`) puts the player into the page just
-before `</body>`. Running it again replaces the earlier copy. Pages without a `<video>` are left
-alone.
+`aua report player <bundle>/index.html` (MCP `report_player`) puts the video player and image
+viewer into the page just before `</body>`. Running it again replaces the earlier copy. Pages with
+neither a `<video>` nor an `<img>` are left alone.
 
 ## 4. Check the page
 
 Open it in a browser before publishing, for example with AUA on the web platform. MP4 (H.264)
 needs installed Chrome (`platforms.web.channel: chrome`); Playwright's own Chromium cannot play
 it. Check that the duration shows, the chapter marks sit on the timeline, tapping a step jumps
-there, and nothing spills over at phone width.
+there, a screenshot opens larger when clicked, and nothing spills over at phone width.
 
 ## 5. Publish
 

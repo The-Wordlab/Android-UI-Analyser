@@ -86,7 +86,17 @@ def test_the_player_goes_in_before_body_and_replaces_an_earlier_copy(tmp_path: P
     assert html.index("<script data-video-player>") < html.index("</body>")
 
 
-def test_a_page_without_a_video_is_left_alone(tmp_path: Path) -> None:
+def test_a_page_with_only_screenshots_gets_the_image_viewer(tmp_path: Path) -> None:
+    page = tmp_path / "shots.html"
+    page.write_text("<html><body><img src='media/01.png' alt='Home'>\n</body></html>")
+
+    result = add_player([str(page)])
+
+    assert result["pages"][0]["player"] == "inlined"
+    assert "<script data-video-player>" in page.read_text()
+
+
+def test_a_page_without_a_video_or_image_is_left_alone(tmp_path: Path) -> None:
     page = tmp_path / "notes.html"
     page.write_text("<html><body><p>No clip here.</p></body></html>")
 

@@ -23,9 +23,10 @@ def tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="report_player",
             description=(
-                "Put AUA's video player into HTML pages just before </body>; running it again "
-                "replaces the earlier copy. Every <video controls> becomes a player that seeks "
-                "from memory, and elements with data-seek become chapters."
+                "Put AUA's video player and image viewer into HTML pages just before </body>; "
+                "running it again replaces the earlier copy. Every <video controls> becomes a "
+                "player that seeks from memory, elements with data-seek become chapters, and every "
+                "<img> opens larger with zoom when clicked."
             ),
             inputSchema={
                 "type": "object",

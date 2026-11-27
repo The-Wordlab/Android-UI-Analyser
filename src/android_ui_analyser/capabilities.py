@@ -64,9 +64,11 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         "evidence_report",
         "Turn a run's recording and screenshots into a page people can open: read the guide, "
-        "add AUA's seekable video player with chapters to your HTML, then publish the folder to "
-        "Drophere, public or limited to email domains/addresses, with an expiry and a check.",
-        ("report", "evidence page", "share", "publish", "drophere", "video player", "pr evidence"),
+        "add AUA's seekable video player with chapters and a zooming image viewer to your HTML, "
+        "then publish the folder to Drophere, public or limited to email domains/addresses, with "
+        "an expiry and a check.",
+        ("report", "evidence page", "share", "publish", "drophere", "video player", "image viewer",
+         "pr evidence"),
         4, "aua report guide", "report_guide",
         risk="publish uploads the folder to an external host; public unless an allow-list is given",
     ),
