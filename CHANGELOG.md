@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- `aua` is now a package name on PyPI too, so `uvx aua mcp`, `uvx aua --version` and
+  `pip install aua` work. It holds no code: every release of `aua` installs the same version of
+  `android-ui-analyser`, and extras pass through, as in `aua[web]`. Both names are on PyPI from
+  0.48.0.
+
 ## [0.48.0] - 2026-11-27
 
 ### Added

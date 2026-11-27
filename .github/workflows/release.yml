@@ -236,9 +236,11 @@ jobs:
   #
   # The upload signs in with a PyPI API token, kept as the `PYPI_API_TOKEN` secret of this
   # repository's `pypi` environment, so only a job that names that environment can use it.
-  # To replace it, create a token on pypi.org limited to the `android-ui-analyser` project, run
+  # To replace it, create a token on pypi.org, run
   #     gh secret set PYPI_API_TOKEN --env pypi
-  # and delete the old token on PyPI. Renaming the environment below leaves the secret behind.
+  # and delete the old token on PyPI. The token must cover both projects uploaded here, and a
+  # PyPI token covers either one project or the whole account, so it is an account-wide one.
+  # Renaming the environment below leaves the secret behind.
   # ---------------------------------------------------------------------------------------
   pypi:
     name: publish to PyPI
@@ -258,8 +260,13 @@ jobs:
         with:
           enable-cache: true
       - run: uv build
+      # `aua` is the short name on PyPI: no code, this same version, and a pin on the wheel above.
+      - run: uv run --no-project scripts/build-aua-package.py dist
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+          # Two projects go up in one step. If the second one fails, a re-run must be able to
+          # pass over the files that already arrived.
+          skip-existing: true
           # Attestations need Trusted Publishing; with a token the action only warns about them.
           attestations: false

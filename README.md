@@ -102,27 +102,30 @@ for the underlying repository-marketplace flow.
 ### Run the CLI without installing AUA
 
 Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/), then run the latest
-release from [PyPI](https://pypi.org/project/android-ui-analyser/):
+release from [PyPI](https://pypi.org/project/aua/):
 
 ```bash
-uvx android-ui-analyser --version
+uvx aua --version
 ```
 
 `uvx` creates an isolated environment and caches it for later calls; no clone, `git pull`, editable
-environment, or global `aua` executable is needed. The package installs one command under two
-names, `aua` and `android-ui-analyser`, and `uvx` starts the one named after the package. Any AUA
-command follows it, for example `uvx android-ui-analyser doctor`.
+environment, or global `aua` executable is needed. Any AUA command follows it, for example
+`uvx aua doctor`.
+
+The tool has two names on PyPI. `android-ui-analyser` holds the code. `aua` is the short name: it
+holds no code and installs the same version of `android-ui-analyser`, so `pip install aua` and
+`uvx android-ui-analyser --version` both work too.
 
 The base package reads the UI hierarchy. To add the OCR and emulator-audio extras, name them with
-`--from` and call `aua`:
+`--from`:
 
 ```bash
-uvx --from 'android-ui-analyser[apple,rapidocr,audio]' aua --version
+uvx --from 'aua[apple,rapidocr,audio]' aua --version
 ```
 
 For automation, pin a release so a later run starts the same code. Either append the version
-(`uvx android-ui-analyser@<version> …`), or install the tag straight from GitHub, which also
-reaches the releases before 0.48.0 that were never uploaded to PyPI:
+(`uvx aua@<version> …`), or install the tag straight from GitHub, which also reaches the releases
+before 0.48.0 that were never uploaded to PyPI:
 
 ```bash
 uvx --from \
@@ -722,7 +725,7 @@ so they do not drift from the CLI/MCP capability contract. After upgrading, re-r
 ### Prefer a different MCP client?
 
 `aua mcp` exposes the same actions over stdio (see [MCP server](#mcp-server)). Point another MCP
-client at `uvx android-ui-analyser mcp`, at a global `aua` install, or copy the repository's
+client at `uvx aua mcp`, at a global `aua` install, or copy the repository's
 [`.mcp.json`](.mcp.json) configuration to let `uvx` run the pinned release.
 
 ---
@@ -1883,7 +1886,7 @@ release from PyPI:
   "mcpServers": {
     "android-ui": {
       "command": "uvx",
-      "args": ["android-ui-analyser", "mcp"]
+      "args": ["aua", "mcp"]
     }
   }
 }
