@@ -17,6 +17,12 @@ notes, so you can check for a newer version — and read what changed — withou
   on the page opens it fitted to the screen, with click, wheel or pinch zoom, drag to pan, ←/→
   through the page's images and Esc to close. Pages with screenshots but no video get it too.
 
+### Changed
+
+- The report guide records with animations on (`aua session start --animations`). AUA-started
+  emulators run with them off, which turned recordings into one still per second once the waits
+  were cut. It also asks for chapter times to a tenth of a second, read at several frames a second,
+  and for screenshots at the device's resolution.
 
 ## [0.42.0] - 2026-11-26
 

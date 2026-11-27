@@ -7,14 +7,22 @@ page before anything is uploaded, then checks the result.
 
 ## 1. Collect the evidence
 
+- Record with animations on. Emulators that AUA starts run with animations off so taps settle
+  faster; recorded like that, every screen appears in a single frame and the clip plays like a
+  slideshow. Start the session with `aua session start --animations` (MCP `session_start` with
+  `animations: true`); `session finish` puts the old scales back. In a session that is already
+  running, use `aua dev anim on` before recording and `aua dev anim restore` after.
 - Recording: `aua record start` before the flow and `aua record stop <work>/flow.mp4` after it
   (MCP `screen_record_start` / `screen_record_stop`). Save it outside the bundle: Android keeps
   `flow.mp4.segments/` and `flow.mp4.recording.json` next to it, and those should not be
   published. Copy only the MP4 into `<bundle>/media/`. If you have a tool that cuts the waiting
   (loading, typing, network), use it, and keep each result on screen for about a second.
 - Screenshots: `aua screenshot <bundle>/media/01-<state>.png` at each state the page claims
-  (MCP `screenshot`).
-- Write down the recording time of each step you describe. Those times become chapters.
+  (MCP `screenshot`). Keep them at the device's resolution: the page can show them small, and a
+  click opens them full size.
+- Write down the recording time of each step you describe, to a tenth of a second. Those times
+  become chapters. Read them from the clip at several frames a second around each step; a sheet
+  of one frame per second misses short states and puts chapters up to a second off.
 - Leave out raw logs, HAR files, tokens, account, device and advertising ids, and anything
   personal. Quote only the few log lines that prove a point, with identifiers removed.
 
