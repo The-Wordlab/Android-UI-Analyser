@@ -3809,7 +3809,8 @@ def scroll(
             ExitCode.NOT_FOUND,
             code="scroll_no_movement",
             hint="`already-at-end` means there is nothing more in that direction; "
-            "`scrollable=false` means no scrollable container was found on this screen.",
+            "`scrollable=false` means no scrollable container was found on this screen. "
+            "Directions follow the finger, as on a phone: `up` shows what is further down.",
         )
 
     _run(ctx, go)

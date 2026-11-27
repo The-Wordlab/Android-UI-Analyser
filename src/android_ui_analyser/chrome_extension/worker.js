@@ -158,7 +158,8 @@ function keyDescription(key) {
     ArrowRight: {key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39},
     ArrowDown: {key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40},
     PageUp: {key: "PageUp", code: "PageUp", windowsVirtualKeyCode: 33},
-    PageDown: {key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34}
+    PageDown: {key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34},
+    End: {key: "End", code: "End", windowsVirtualKeyCode: 35}
   };
   return table[key] || {key, code: key};
 }

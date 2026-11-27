@@ -38,6 +38,14 @@ _KEYS = {
     "page-down": "PageDown",
     "page_up": "PageUp",
     "page-up": "PageUp",
+    # The browser's own names, which agents reach for first.
+    "pagedown": "PageDown",
+    "pageup": "PageUp",
+    "end": "End",
+    "arrowdown": "ArrowDown",
+    "arrowup": "ArrowUp",
+    "arrowleft": "ArrowLeft",
+    "arrowright": "ArrowRight",
 }
 KEY_NAMES = frozenset(_KEYS) | {"back", "home", "refresh", "reload"}
 

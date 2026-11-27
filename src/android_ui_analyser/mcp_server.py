@@ -1978,7 +1978,8 @@ def _tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="scroll",
             description="Scroll a direction (up|down|left|right); optional percent of the "
-            "scrollable container.",
+            "scrollable container. Directions follow the finger, as on a phone: up shows what "
+            "is further down the page.",
             inputSchema={
                 "type": "object",
                 "properties": {

@@ -765,3 +765,14 @@ def test_playwright_drag_releases_the_button_when_a_move_fails() -> None:
     with pytest.raises(RuntimeError):
         connection.drag(0, 0, 50, 50, 200, 0)
     assert events[-1] == "up"
+
+
+@pytest.mark.parametrize(("name", "pressed"), [("PageDown", "PageDown"), ("End", "End"),
+                                               ("ArrowUp", "ArrowUp"), ("page_down", "PageDown")])
+def test_web_keys_accept_the_browsers_own_names(tmp_path: Path, name: str, pressed: str) -> None:
+    connection = FakeConnection()
+    runtime = _adapter(tmp_path, connection).connect(URL)
+
+    runtime.press(name)
+
+    assert connection.calls[-1] == ("press", pressed)
