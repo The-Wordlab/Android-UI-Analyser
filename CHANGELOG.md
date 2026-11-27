@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-11-27
+
 ### Added
 
 - Attached Chrome mode opens its own tab: with `platforms.web.url` set, AUA opens that page in a
@@ -2045,5 +2047,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.44.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.44.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.45.0...HEAD
 [0.45.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.45.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.46.0...HEAD
+[0.46.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.46.0
