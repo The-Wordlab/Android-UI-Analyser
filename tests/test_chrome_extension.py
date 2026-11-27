@@ -122,7 +122,9 @@ def _config(tmp_path: Path, **web_options) -> Config:
     return Config.model_validate(
         {
             "device": {"platform": "web", "serial": ATTACHED_TARGET_ID},
-            "platforms": {"web": {"connection": "existing-chrome", **web_options}},
+            "platforms": {
+                "web": {"connection": "existing-chrome", "url": "https://example.test/", **web_options}
+            },
             "cache": {"dir": str(tmp_path / "cache")},
             "memory": {"enabled": False},
             "lease": {"enabled": False},
@@ -159,7 +161,7 @@ def test_attached_connection_drives_only_the_approved_tab() -> None:
 
     with pytest.raises(UnsupportedPlatformCapabilityError, match="browser.storage"):
         connection.storage(include_values=False)
-    with pytest.raises(ConfigError, match="was not approved"):
+    with pytest.raises(ConfigError, match="is not the tab AUA opened"):
         connection.page_select("tab-99")
 
     connection.close()
@@ -395,7 +397,7 @@ def test_extension_installer_registers_only_the_stable_extension(
         f"chrome-extension://{STORE_EXTENSION_ID}/",
         f"chrome-extension://{EXTENSION_ID}/",
     ]
-    assert extension_manifest["permissions"] == ["activeTab", "debugger", "nativeMessaging"]
+    assert extension_manifest["permissions"] == ["debugger", "nativeMessaging"]
     assert Path(manifest["path"]).stat().st_mode & 0o100
     assert str(Path(sys.executable).absolute()) in Path(manifest["path"]).read_text(
         encoding="utf-8"

@@ -11,7 +11,7 @@ Choose a connection for the surface under test:
 | Surface | Connection | Session behavior |
 |---|---|---|
 | HTTP(S) websites, local development apps, SPAs and PWA pages | `isolated`, with `browser: chromium`, `firefox` or `webkit` | Separate leased contexts for concurrent agents; storage/network controls and traces |
-| An existing logged-in Chrome/Chromium tab | `existing-chrome` | One user-approved tab, preserving its profile |
+| Your own logged-in Chrome | `existing-chrome` | A tab AUA opens in your Chrome profile |
 | An existing Chromium browser or Electron window exposing local CDP | `existing-cdp` | One exact HTTP(S)/file page, preserving the running app |
 
 All three paths return the same AUA elements and action observations. CDP attachment is one
@@ -197,31 +197,28 @@ device:
 platforms:
   web:
     connection: existing-chrome
-    url: https://example.com/    # optional
+    url: https://example.com/
     attach_timeout_ms: 30000
     action_timeout_ms: 5000
 ```
 
-With `url` set, AUA opens that page in a new background tab of your Chrome and attaches to it by
-itself; the tab stays open after the session. If the loaded extension predates this, the first
-run updates it and asks you to retry.
-Without it, start `aua analyze` or `aua session start` in a terminal, then open the AUA extension
-on the exact HTTP(S) tab you want to share and choose **Attach this tab**. The initial command waits up to
-`attach_timeout_ms`; the warm daemon keeps that one attachment for later commands. The Chrome
-debugger banner is expected. Choose **Detach** in the extension, run `session finish`, stop the
-daemon, or close the AUA process to release it. A killed process also closes the authenticated
-native bridge, which makes the extension detach automatically.
+AUA opens `url` in a new background tab of your Chrome and attaches to it by itself; there is
+nothing to click. Use `aua open-and-analyze <url>` to move that tab to other pages. The warm
+daemon keeps the tab for later commands, and the tab stays open after the session. The Chrome
+debugger banner is expected. **Detach** in the extension popup, `session finish`, stopping the
+daemon or closing the AUA process releases it; a killed process also closes the authenticated
+native bridge, which makes the extension detach automatically. If the loaded extension predates
+this, the first run updates it and asks you to retry.
 
 Attached mode intentionally has a narrower authority boundary:
 
-- The extension receives `activeTab`, `debugger`, and `nativeMessaging`; it has no cookie,
-  history, broad host, downloads, clipboard, or all-tabs permission.
-- AUA opens its own tab through the extension's `open.html` page, which websites cannot load; it
-  opens only http(s) pages and attaches only the tab it opened.
-- Only the tab approved from the extension popup, or opened by AUA, can be analyzed, pictured, focused, navigated,
-  clicked, dragged, typed into, scrolled, or have its native dropdowns changed. `browser pages`
-  reports only that tab. The AUA toolbar icon is grey until a tab is attached and turns blue
-  and green while one is.
+- The extension receives `debugger` and `nativeMessaging`; it has no cookie, history, broad
+  host, downloads, clipboard, or all-tabs permission.
+- AUA opens its tab through the extension's `open.html` page, which websites cannot load; it
+  opens only http(s) pages and drives only the tab it opened. Your other tabs are never touched.
+- That tab can be analyzed, pictured, focused, navigated, clicked, dragged, typed into,
+  scrolled, or have its native dropdowns changed. `browser pages` reports only that tab. The AUA
+  toolbar icon is grey until a tab is attached and turns blue and green while one is.
 - AUA cannot silently select another tab, close a personal tab, export/clear storage or cache,
   reset the profile, change offline/throttle/proxy/CORS rules, mock traffic, record HAR, or start a
   Playwright trace. Those calls return `platform_capability_unsupported`.
@@ -439,5 +436,5 @@ when another adapter does not provide them.
 | A control has no stable `rid:` | Add `data-testid` or an HTML `id`; text/ARIA labels still receive semantic stable keys. |
 | A service worker bypasses a mock/HAR rule | Configure `service_workers: block` for deterministic request interception. |
 | Bandwidth throttling is rejected | Use Chromium, or keep only `--latency-ms` on Firefox/WebKit. |
-| `chrome_extension_not_attached` | Start the AUA command first, then open the extension on the target tab and choose **Attach this tab**. With `url` set, load the extension once (`aua browser extension install`) so it can open the page. |
+| `chrome_extension_not_attached` | Retry once (an older extension updates itself on the first try); otherwise install and load the extension once with `aua browser extension install`. |
 | The extension immediately detaches | Run `aua browser extension install`, restart Chrome after native-host installation, and confirm `aua browser extension status` is green. |

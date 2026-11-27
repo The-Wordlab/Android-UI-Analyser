@@ -19,7 +19,7 @@ The store sets the extension's identity, so the zip has no manifest `key`. Uploa
 ## Store listing
 
 - **Category:** Developer Tools · **Language:** English
-- **Summary** (from the manifest): Share one explicitly selected Chrome tab with Android UI Analyser.
+- **Summary** (from the manifest): Lets AUA (Android UI Analyser) and your coding agent test web pages in a tab of your own Chrome.
 - **Description:**
 
 ```text
@@ -27,7 +27,7 @@ AUA tab access connects one tab of your own Chrome to AUA (Android UI Analyser),
 
 It lets your agent close the loop on its own work: change the code, open the page, try the feature, read the console and network errors, fix and check again, without you clicking through every step or pasting screenshots back.
 
-AUA works as a command-line tool and as an MCP server, so any agent that runs commands or speaks MCP can use it. Give AUA a URL and it opens the page in a new tab and attaches by itself, or choose Attach this tab in the popup to share a tab you already have open.
+AUA works as a command-line tool and as an MCP server, so any agent that runs commands or speaks MCP can use it. Give AUA a URL and it opens the page in a new tab of your Chrome and attaches by itself; there is nothing to click.
 
 Once attached, your agent can:
 • read the page structure and text, and take screenshots
@@ -35,7 +35,7 @@ Once attached, your agent can:
 • navigate, go back and reload
 • read the tab's console messages and network activity to debug what failed
 
-You stay in control. Only that one tab is shared, and only while it is attached. Chrome shows its debugging banner the whole time, and Detach in the popup ends access at once. The extension cannot see other tabs, cookies, history or downloads, and it sends nothing to any server: it talks only to the AUA program on your computer, through Chrome native messaging.
+You stay in control. Only the tab AUA opened is shared, and only while it is attached. Chrome shows its debugging banner the whole time, and Detach in the popup ends access at once. The extension cannot see other tabs, cookies, history or downloads, and it sends nothing to any server: it talks only to the AUA program on your computer, through Chrome native messaging.
 
 Requires AUA: https://github.com/The-Wordlab/Android-UI-Analyser
 Run `aua browser extension install` once to connect it.
@@ -61,11 +61,8 @@ Chrome opens example.com in a new tab, the AUA icon turns blue and the command p
 
 ## Privacy practices
 
-- **Single purpose:** Connect one Chrome tab the user approves, or one the local AUA tool opens,
-  to the AUA command-line testing tool on the same computer, so it can inspect and operate that
+- **Single purpose:** Connect the Chrome tab the local AUA tool opens to the AUA command-line testing tool on the same computer, so it can inspect and operate that
   tab for UI testing.
-- **activeTab:** Attaches only to the tab the user picks in the popup, without access to any
-  other tab.
 - **debugger:** Reads the attached tab's page structure, screenshots, console and network
   activity, and performs the clicks, typing and scrolling of a UI test through the Chrome
   DevTools Protocol. Used on the one attached tab only.

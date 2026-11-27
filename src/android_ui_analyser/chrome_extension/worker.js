@@ -414,21 +414,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     if (message?.action === "status") {
-      const [active] = await chrome.tabs.query({active: true, currentWindow: true});
-      return {
-        attached: attachedTabId !== null,
-        current_tab: attachedTabId !== null && active?.id === attachedTabId,
-        state: attachedTabId === null ? null : await pageState()
-      };
-    }
-    if (message?.action === "attach") {
-      let tabId = Number.isInteger(message.tabId) ? message.tabId : null;
-      if (tabId === null) {
-        const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
-        tabId = tab?.id ?? null;
-      }
-      if (tabId === null) throw new Error("No active tab");
-      return {attached: true, current_tab: true, state: await attachTab(tabId)};
+      return {attached: attachedTabId !== null, state: attachedTabId === null ? null : await pageState()};
     }
     if (message?.action === "open") {
       const fromOpenPage = sender.id === chrome.runtime.id && sender.tab &&
@@ -436,13 +422,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!fromOpenPage) throw new Error("AUA opens tabs only from its own page");
       const state = await openAndAttach(sender.tab.windowId, String(message.url || ""));
       chrome.tabs.remove(sender.tab.id).catch(() => {});
-      return {attached: true, current_tab: true, state};
+      return {attached: true, state};
     }
     if (message?.action === "detach") {
       await detachCurrent();
       if (nativePort) nativePort.disconnect();
       nativePort = null;
-      return {attached: false, current_tab: false};
+      return {attached: false};
     }
     throw new Error("Unknown popup action");
   })().then(sendResponse).catch(error => sendResponse({error: String(error.message || error)}));

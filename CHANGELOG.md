@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Changed
+
+- Attached Chrome mode has one flow: AUA opens `platforms.web.url` in a new tab of your Chrome and
+  drives that tab. The extension's **Attach this tab** button and its `activeTab` permission are
+  gone; the popup shows what AUA is using and keeps **Detach**. Without a `url`, attached mode now
+  fails at once with `no_target` instead of waiting for a click.
+
 ### Fixed
 
 - The first attached run after Chrome had put the extension to sleep timed out. The extension now

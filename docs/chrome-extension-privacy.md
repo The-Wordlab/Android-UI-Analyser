@@ -6,8 +6,7 @@ does with data.
 
 ## What it reads
 
-Only the one tab you attach from the extension's popup, or the tab AUA opens for you, and only
-while it is attached. From that tab it reads what a UI test needs: the page structure and text,
+Only the tab AUA opens for you, and only while it is attached. From that tab it reads what a UI test needs: the page structure and text,
 screenshots, and the page's console messages and network activity.
 
 It cannot see other tabs, cookies, browsing history, bookmarks, downloads or the clipboard.
@@ -27,7 +26,6 @@ Nothing. The extension keeps no data of its own; detaching or closing the tab en
 
 ## Permissions
 
-- `activeTab`: attach to the tab you choose in the popup.
 - `debugger`: read the attached tab and perform the clicks, typing and scrolling AUA asks for.
 - `nativeMessaging`: talk to the AUA program on your computer.
 

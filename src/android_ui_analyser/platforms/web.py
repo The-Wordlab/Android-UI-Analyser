@@ -448,6 +448,12 @@ class WebPlatform(PlatformAdapter):
                     f"existing-chrome target must be {ATTACHED_TARGET_ID!r}",
                     code="no_target",
                 )
+            if not self.options.get("url"):
+                raise DeviceError(
+                    "no page to open in Chrome",
+                    code="no_target",
+                    hint="Set platforms.web.url; AUA opens that page in a new tab of your Chrome.",
+                )
             self.prepare_host()
             connection = self._extension_launcher.launch(ATTACHED_TARGET_ID, self._attach_options())
             runtime = WebRuntime(connection, ATTACHED_TARGET_ID, home_url=connection.url)

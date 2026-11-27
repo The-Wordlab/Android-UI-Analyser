@@ -192,7 +192,7 @@ def open_in_chrome(url: str) -> None:
         raise DeviceError(
             "could not ask Chrome to open the page",
             code="chrome_open_failed",
-            hint="Open the page yourself and choose Attach this tab in the AUA extension.",
+            hint="Check that Google Chrome is installed, then retry.",
         ) from None
 
 
@@ -303,16 +303,10 @@ class ChromeBridgeServer:
                 peer, _address = listener.accept()
             except TimeoutError:
                 hint = (
-                    "Open the AUA extension on the Chrome tab you want to share and choose "
-                    "Attach this tab, then retry."
+                    f"AUA opened {self.open_url} in Chrome, but the extension did not attach it. "
+                    "Retry once: an older extension updates itself on the first try. If it "
+                    "still fails, install the AUA extension (`aua browser extension install`)."
                 )
-                if self.open_url:
-                    hint = (
-                        f"AUA opened {self.open_url} in Chrome, but the extension did not attach "
-                        "it. Retry once: an older extension updates itself on the first try. "
-                        "If it still fails, run `aua browser extension install` and load AUA "
-                        "in chrome://extensions."
-                    )
                 raise DeviceError(
                     "timed out waiting for a tab approved in the AUA Chrome extension",
                     code="chrome_extension_not_attached",
@@ -342,9 +336,10 @@ class ChromeBridgeServer:
             self._reader.start()
             if not self._hello.wait(max(0.1, self.attach_timeout_ms / 1000)):
                 raise DeviceError(
-                    "the Chrome extension connected but no tab was approved",
+                    "the Chrome extension connected but did not attach the page",
                     code="chrome_extension_no_tab",
-                    hint="Open the AUA extension on the target tab and choose Attach this tab.",
+                    hint="AUA attaches only http(s) pages; some pages, such as the Chrome Web Store, "
+                    "refuse every extension.",
                 )
         except BaseException:
             self.close()
@@ -829,8 +824,8 @@ class ChromeExtensionConnection:
         current = self.pages()["pages"][0]
         if page_id != current["id"] and page_id != "0":
             raise ConfigError(
-                f"tab {page_id!r} was not approved",
-                hint="Open the AUA extension on that tab and choose Attach this tab.",
+                f"tab {page_id!r} is not the tab AUA opened",
+                hint="AUA drives only its own tab; move it with `aua open-and-analyze <url>`.",
             )
         self._request("focus")
         return {

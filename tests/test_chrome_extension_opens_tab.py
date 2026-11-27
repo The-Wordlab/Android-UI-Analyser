@@ -148,6 +148,17 @@ def test_aua_opens_the_web_store_copy_when_chrome_has_it(tmp_path, monkeypatch) 
     assert commands[0][-1].startswith(f"chrome-extension://{STORE_EXTENSION_ID}/open.html#")
 
 
+def test_attached_mode_without_a_url_fails_at_once(tmp_path) -> None:
+    config = _config(tmp_path)
+    config.platforms["web"].pop("url")
+    platform = PlatformFactory(config).create("web")
+
+    with pytest.raises(DeviceError, match="no page to open") as error:
+        platform.connect()
+
+    assert error.value.code == "no_target"
+
+
 def test_attached_mode_accepts_a_url_to_open(tmp_path) -> None:
     platform = PlatformFactory(_config(tmp_path, url="https://example.com/")).create("web")
 
