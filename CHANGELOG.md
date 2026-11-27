@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- A visible Chromium window (`platforms.web.headless: false`) no longer flickers on HiDPI
+  screens. Pages render at device scale factor 1, so every screenshot, including the rolling
+  capture's, redrew the window at a quarter of its size. Headed Chromium now starts with its own
+  scale forced to 1 too; screenshots are unchanged.
+
 ## [0.43.0] - 2026-11-27
 
 ### Added

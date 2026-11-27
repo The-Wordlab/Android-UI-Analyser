@@ -306,3 +306,42 @@ def test_shutdown_does_not_reopen_a_closed_page(driver, extension):
     connection.close()
     assert driver.contexts[0].closed
     assert driver.stopped == [True]
+
+
+def test_a_visible_extension_window_matches_the_page_scale(driver, extension):
+    options = WebLaunchOptions(headless=False, extension_paths=(str(extension),))
+    connection = PlaywrightLauncher().launch("https://example.test", options)
+    try:
+        _, kwargs = driver.launches[0]
+        assert "--force-device-scale-factor=1" in kwargs["args"]
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(("headless", "expected"), [(False, ["--force-device-scale-factor=1"]), (True, [])])
+def test_a_visible_chromium_window_matches_the_page_scale(monkeypatch, headless, expected):
+    launches = []
+    browser = SimpleNamespace(new_context=lambda **kwargs: Context(), close=lambda: None)
+
+    def launch(**kwargs):
+        launches.append(kwargs)
+        return browser
+
+    runtime = SimpleNamespace(
+        _impl_obj=SimpleNamespace(_connection=object()),
+        chromium=SimpleNamespace(launch=launch),
+        stop=lambda: None,
+    )
+    monkeypatch.setitem(sys.modules, "playwright", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "playwright.sync_api",
+        SimpleNamespace(sync_playwright=lambda: SimpleNamespace(start=lambda: runtime)),
+    )
+    connection = PlaywrightLauncher().launch(
+        "https://example.test", WebLaunchOptions(headless=headless, channel="chrome")
+    )
+    try:
+        assert launches[0]["args"] == expected
+    finally:
+        connection.close()

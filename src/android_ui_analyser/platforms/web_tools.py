@@ -47,6 +47,14 @@ class WebLaunchOptions:
     proxy_password: str | None = None
 
 
+def _window_args(options: WebLaunchOptions) -> list[str]:
+    # Contexts render at device_scale_factor 1. On a HiDPI screen a visible Chromium window
+    # otherwise redraws at a quarter of its size on every screenshot, so it flickers.
+    if options.headless or options.browser != "chromium":
+        return []
+    return ["--force-device-scale-factor=1"]
+
+
 class WebConnection(Protocol):
     @property
     def url(self) -> str: ...
@@ -541,7 +549,11 @@ class PlaywrightConnection:
                 "",
                 channel="chromium",
                 headless=self._options.headless,
-                args=[f"--disable-extensions-except={paths}", f"--load-extension={paths}"],
+                args=[
+                    f"--disable-extensions-except={paths}",
+                    f"--load-extension={paths}",
+                    *_window_args(self._options),
+                ],
                 **self._context_kwargs(),
             )
             if storage_state is not None:
@@ -1713,7 +1725,10 @@ class PlaywrightLauncher:
                     )
                 if options.extension_paths:
                     return playwright, browser_type, None
-                launch_kwargs: dict[str, Any] = {"headless": options.headless}
+                launch_kwargs: dict[str, Any] = {
+                    "headless": options.headless,
+                    "args": _window_args(options),
+                }
                 if options.channel:
                     launch_kwargs["channel"] = options.channel
                 if options.executable_path:
@@ -1723,7 +1738,9 @@ class PlaywrightLauncher:
                 except Exception:
                     if options.browser != "chromium" or options.channel or options.executable_path:
                         raise
-                    browser = browser_type.launch(headless=options.headless, channel="chrome")
+                    browser = browser_type.launch(
+                        headless=options.headless, channel="chrome", args=_window_args(options)
+                    )
                 return playwright, browser_type, browser
             except BaseException:
                 if browser is not None:
