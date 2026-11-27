@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-11-27
+
 ### Added
 
 - `aua` is now a package name on PyPI too, so `uvx aua mcp`, `uvx aua --version` and
@@ -2100,5 +2102,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.47.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.47.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.48.0...HEAD
 [0.48.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.48.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.49.0...HEAD
+[0.49.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.49.0
