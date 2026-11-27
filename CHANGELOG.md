@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.46.1] - 2026-11-27
+
 ### Added
 
 - The attached-Chrome extension is in review on the Chrome Web Store (unlisted). AUA's native host
@@ -2055,5 +2057,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.45.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.45.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.46.0...HEAD
 [0.46.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.46.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.46.1...HEAD
+[0.46.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.46.1
