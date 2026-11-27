@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Fixed
+
+- The first attached run after Chrome had put the extension to sleep timed out. The extension now
+  opens the page in a new tab beside its opening page, and closes that page once it is attached;
+  if opening fails, the page stays and shows why.
+
 ## [0.46.1] - 2026-11-27
 
 ### Added

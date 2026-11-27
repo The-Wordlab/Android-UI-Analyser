@@ -2,6 +2,11 @@ const status = document.querySelector("#status");
 const url = decodeURIComponent(location.hash.slice(1));
 status.textContent = url;
 
+function fail(message) {
+  status.textContent = message;
+  document.title = `AUA could not open the page: ${message}`;
+}
+
 async function open() {
   const result = await chrome.runtime.sendMessage({action: "open", url});
   if (result?.error === "Unknown popup action") {
@@ -10,9 +15,7 @@ async function open() {
     chrome.runtime.reload();
     return;
   }
-  if (result?.error) status.textContent = result.error;
+  if (result?.error) fail(result.error);
 }
 
-open().catch(() => {
-  // The tab has already moved on to the page; nothing is left to show here.
-});
+open().catch(error => fail(String(error.message || error)));

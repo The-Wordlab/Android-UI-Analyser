@@ -38,11 +38,13 @@ globalThis.chrome = {
   tabs: {
     onRemoved: {addListener() {}},
     onUpdated: {addListener(fn) { onUpdated = fn; }, removeListener() {}},
-    async update(tabId, props) {
-      calls.push(["update", tabId, props.url]);
-      setTimeout(() => { onUpdated(tabId, {status: "loading"}); onUpdated(tabId, {status: "complete"}); });
+    async create(props) {
+      calls.push(["create", props.windowId, props.url]);
+      setTimeout(() => onUpdated(42, {status: "complete"}));
+      return {id: 42};
     },
-    async get(tabId) { return {id: tabId}; },
+    async get(tabId) { return {id: tabId, status: "loading"}; },
+    async remove(tabId) { calls.push(["remove", tabId]); },
     async query() { return []; }
   },
   action: {setIcon: async () => {}, setTitle: async () => {}},
@@ -80,13 +82,14 @@ def _send(message: dict, sender: dict) -> dict:
 
 
 def test_the_extension_opens_the_url_in_its_own_tab_and_attaches_it() -> None:
-    sender = {"id": "aua", "tab": {"id": 7}, "url": "chrome-extension://aua/open.html#x"}
+    sender = {"id": "aua", "tab": {"id": 7, "windowId": 3}, "url": "chrome-extension://aua/open.html#x"}
 
     result = _send({"action": "open", "url": "https://example.com/"}, sender)
 
     assert result["response"]["attached"] is True
-    assert ["update", 7, "https://example.com/"] in result["calls"]
-    assert ["attach", 7] in result["calls"]
+    assert ["create", 3, "https://example.com/"] in result["calls"]
+    assert ["attach", 42] in result["calls"]
+    assert ["remove", 7] in result["calls"]
     assert ["native", "hello"] in result["calls"]
 
 
@@ -98,7 +101,7 @@ def test_the_extension_opens_the_url_in_its_own_tab_and_attaches_it() -> None:
     ],
 )
 def test_only_the_open_page_can_open_and_only_http_pages(url: str, sender_url: str) -> None:
-    sender = {"id": "aua", "tab": {"id": 7}, "url": sender_url}
+    sender = {"id": "aua", "tab": {"id": 7, "windowId": 3}, "url": sender_url}
 
     result = _send({"action": "open", "url": url}, sender)
 
