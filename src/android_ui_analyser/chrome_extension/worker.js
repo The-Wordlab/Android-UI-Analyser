@@ -196,6 +196,24 @@ async function handleAuaMessage(message) {
       await cdp("Input.dispatchMouseEvent", {type: "mouseReleased", x: params.x, y: params.y, button: "left", clickCount: 1});
       result = {};
       break;
+    case "drag": {
+      const sleep = ms => new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+      const points = Array.isArray(params.points) ? params.points : [];
+      const [endX, endY] = points.at(-1) || [params.x, params.y];
+      await cdp("Input.dispatchMouseEvent", {type: "mouseMoved", x: params.x, y: params.y});
+      await cdp("Input.dispatchMouseEvent", {type: "mousePressed", x: params.x, y: params.y, button: "left", buttons: 1, clickCount: 1});
+      try {
+        await sleep(params.hold_ms);
+        for (const [x, y] of points) {
+          await cdp("Input.dispatchMouseEvent", {type: "mouseMoved", x, y, button: "left", buttons: 1});
+          await sleep(params.pause_ms);
+        }
+      } finally {
+        await cdp("Input.dispatchMouseEvent", {type: "mouseReleased", x: endX, y: endY, button: "left", buttons: 0, clickCount: 1});
+      }
+      result = {};
+      break;
+    }
     case "type_text":
       await cdp("Input.insertText", {text: String(params.text || "")});
       result = {};

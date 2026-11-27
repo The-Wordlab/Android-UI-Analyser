@@ -13,6 +13,9 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ### Added
 
+- Attached Chrome tabs (`connection: existing-chrome`) can now change native dropdowns
+  (`select-option`, MCP `select_option`) and drag (`drag-and-analyze`), like the isolated
+  browser. Dropdowns work with an already loaded extension; drag needs the updated one.
 - The Chrome extension has an AUA logo. Its toolbar icon is grey while no tab is attached and
   switches to colour while one is. Reinstall it with `aua browser extension install` and reload
   it in `chrome://extensions`.

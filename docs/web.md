@@ -211,7 +211,8 @@ Attached mode intentionally has a narrower authority boundary:
 - The extension receives `activeTab`, `debugger`, and `nativeMessaging`; it has no cookie,
   history, broad host, downloads, clipboard, or all-tabs permission.
 - Only the tab approved from the extension popup can be analyzed, pictured, focused, navigated,
-  clicked, typed into, or scrolled. `browser pages` reports only that tab. The AUA toolbar icon is grey until a tab is attached and turns blue
+  clicked, dragged, typed into, scrolled, or have its native dropdowns changed. `browser pages`
+  reports only that tab. The AUA toolbar icon is grey until a tab is attached and turns blue
   and green while one is.
 - AUA cannot silently select another tab, close a personal tab, export/clear storage or cache,
   reset the profile, change offline/throttle/proxy/CORS rules, mock traffic, record HAR, or start a

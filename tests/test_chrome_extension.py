@@ -26,7 +26,11 @@ from android_ui_analyser.chrome_extension_setup import (
 from android_ui_analyser.chrome_native_host import read_native_message, write_native_message
 from android_ui_analyser.config import Config
 from android_ui_analyser.engine import Engine
-from android_ui_analyser.errors import ConfigError, UnsupportedPlatformCapabilityError
+from android_ui_analyser.errors import (
+    ConfigError,
+    UnsupportedPlatformCapabilityError,
+    UsageError,
+)
 from android_ui_analyser.platforms.chrome_extension import (
     ATTACHED_TARGET_ID,
     BRIDGE_PROTOCOL,
@@ -36,6 +40,7 @@ from android_ui_analyser.platforms.chrome_extension import (
 )
 from android_ui_analyser.platforms.registry import PlatformFactory
 from android_ui_analyser.platforms.web import WebPlatform
+from android_ui_analyser.schema import Element, center_of
 
 
 def _png() -> bytes:
@@ -394,6 +399,77 @@ def test_extension_installer_registers_only_the_stable_extension(
     assert "Google/ChromeForTesting/NativeMessagingHosts" in str(
         native_manifest_path("chrome-for-testing")
     )
+
+
+class SelectBridge(FakeBridge):
+    def request(self, method, params=None, *, timeout_ms):
+        expression = str((params or {}).get("expression") or "")
+        if method == "evaluate" and "option.selected = true" in expression:
+            self.calls.append((method, dict(params or {})))
+            return "a"
+        if method == "evaluate" and "selectedOptions" in expression:
+            self.calls.append((method, dict(params or {})))
+            return {
+                "viewport": [320, 240],
+                "controls": [
+                    {
+                        "rid": "rich",
+                        "text": "Use Amplitude (no override)",
+                        "bounds": [42.2, 8, 226.2, 27],
+                        "visible": True,
+                        "disabled": False,
+                        "multiple": False,
+                        "options": [
+                            {"value": "", "label": "Use Amplitude (no override)", "disabled": False},
+                            {"value": "a", "label": "a", "disabled": False},
+                        ],
+                    }
+                ],
+            }
+        return super().request(method, params, timeout_ms=timeout_ms)
+
+
+def _select_element() -> Element:
+    bounds = (42, 8, 226, 27)
+    return Element(id="el:rich", type="ComboBox", text="Use Amplitude (no override)",
+                   resource_id="rich", bounds=bounds, center=center_of(bounds), clickable=True)
+
+
+def test_attached_tab_changes_a_native_dropdown() -> None:
+    bridge = SelectBridge()
+    connection = ChromeExtensionConnection(ChromeAttachOptions(), bridge=bridge)
+
+    assert connection.select_option(_select_element(), label="a") == "a"
+    choose = bridge.calls[-1][1]["expression"]
+    assert '"option": 1' in choose and '"value": "a"' in choose
+
+
+def test_attached_tab_refuses_a_dropdown_option_it_cannot_find() -> None:
+    connection = ChromeExtensionConnection(ChromeAttachOptions(), bridge=SelectBridge())
+
+    with pytest.raises(UsageError, match="option is missing"):
+        connection.select_option(_select_element(), value="c")
+
+
+def test_attached_tab_drags_along_a_path() -> None:
+    bridge = FakeBridge()
+    connection = ChromeExtensionConnection(ChromeAttachOptions(), bridge=bridge)
+
+    connection.drag(40, 500, 300, 200, 400, 150)
+
+    method, params = bridge.calls[-1]
+    assert method == "drag"
+    assert (params["x"], params["y"]) == (40, 500)
+    assert params["points"][-1] == (300, 200)
+    assert params["hold_ms"] == 150
+
+
+def test_attached_mode_offers_dropdowns_and_drag(tmp_path: Path) -> None:
+    platform = WebPlatform(_config(tmp_path))
+
+    assert platform.supports("ui.select")
+    assert platform.supports("device.drag")
+    assert not platform.supports("browser.storage")
 
 
 def test_every_extension_icon_ships_with_the_extension() -> None:

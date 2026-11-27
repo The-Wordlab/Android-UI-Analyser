@@ -28,8 +28,58 @@ from urllib.parse import urlsplit, urlunsplit
 
 from PIL import Image
 
-from ..errors import ConfigError, DeviceError, UnsupportedPlatformCapabilityError
+from ..errors import ConfigError, DeviceError, UnsupportedPlatformCapabilityError, UsageError
+from ..schema import Element
+from .drag_path import drag_path
 from .web_tools import _DOM_SNAPSHOT_SCRIPT
+from .web_tree import _bounds as _snapshot_bounds
+
+# Every <select>, shadow roots included, in one stable order for both scripts below.
+_SELECTS = r"""() => {
+  const found = [];
+  const walk = root => {
+    for (const element of root.querySelectorAll('*')) {
+      if (element.tagName === 'SELECT') found.push(element);
+      if (element.shadowRoot) walk(element.shadowRoot);
+    }
+  };
+  walk(document);
+  return found;
+}"""
+
+_SELECT_FACTS_SCRIPT = r"""() => {
+  const compact = value => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+  const controls = (SELECTS)().map(element => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return {
+      rid: compact(element.getAttribute('data-testid') || element.getAttribute('data-test-id') ||
+        element.getAttribute('data-test') || element.id || ''),
+      text: compact(element.selectedOptions[0]?.textContent || ''),
+      bounds: [rect.left, rect.top, rect.right, rect.bottom],
+      visible: style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0,
+      disabled: element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true',
+      multiple: element.multiple,
+      options: Array.from(element.options, option => ({
+        value: option.value, label: option.label,
+        disabled: option.disabled || Boolean(option.closest('optgroup')?.disabled)
+      }))
+    };
+  });
+  return {viewport: [innerWidth, innerHeight], controls};
+}""".replace("SELECTS", _SELECTS)
+
+_SELECT_CHOOSE_SCRIPT = r"""request => {
+  const compact = value => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+  const element = (SELECTS)()[request.index];
+  if (!element || compact(element.selectedOptions[0]?.textContent || '') !== request.text) return null;
+  const option = element.options[request.option];
+  if (!option || option.value !== request.value) return null;
+  option.selected = true;
+  element.dispatchEvent(new Event('input', {bubbles: true, composed: true}));
+  element.dispatchEvent(new Event('change', {bubbles: true}));
+  return element.value;
+}""".replace("SELECTS", _SELECTS)
 
 BRIDGE_PROTOCOL = 1
 BRIDGE_HOST_NAME = "com.aua.chrome_bridge"
@@ -508,11 +558,57 @@ class ChromeExtensionConnection:
     def drag(
         self, x1: int, y1: int, x2: int, y2: int, duration_ms: int, hold_ms: int
     ) -> None:
-        raise DeviceError(
-            "drag is unsupported on an approved existing Chrome tab",
-            code="drag_unsupported",
-            hint="Use the isolated browser or an existing-cdp connection.",
+        points, pause = drag_path(x1, y1, x2, y2, duration_ms)
+        self._request(
+            "drag",
+            {"x": x1, "y": y1, "points": points, "pause_ms": round(pause * 1000),
+             "hold_ms": hold_ms},
+            timeout_ms=duration_ms + hold_ms + self._options.action_timeout_ms,
         )
+
+    def select_option(
+        self, element: Element, *, value: str | None = None, label: str | None = None
+    ) -> str:
+        """Bind the observed control, validate one option, then fire the native change events."""
+        if (value is None) == (label is None):
+            raise UsageError("select-option requires exactly one value or label")
+        facts = self._request("evaluate", {"expression": f"({_SELECT_FACTS_SCRIPT})()"})
+        if not isinstance(facts, dict):
+            raise DeviceError("Chrome returned invalid select data", code="chrome_bridge_protocol")
+        width, height = facts.get("viewport") or (0, 0)
+        targets = []
+        for index, control in enumerate(facts.get("controls") or []):
+            bounds = _snapshot_bounds(control, (int(width), int(height)))
+            if bounds is None or not control.get("visible"):
+                continue
+            if element.resource_id:
+                matches = control.get("rid") == element.resource_id
+            else:
+                matches = bounds == element.bounds and control.get("text") == (element.text or "")
+            if matches and element.type == "ComboBox":
+                targets.append((index, control))
+        if len(targets) != 1:
+            raise UsageError("native select target is missing, ambiguous, or not a select")
+        index, control = targets[0]
+        if control.get("disabled") or control.get("multiple"):
+            raise UsageError("native select must be enabled and single-choice")
+        field, wanted = ("value", value) if value is not None else ("label", label)
+        options = [
+            (number, option)
+            for number, option in enumerate(control.get("options") or [])
+            if option.get(field) == wanted
+        ]
+        if len(options) != 1 or options[0][1].get("disabled"):
+            raise UsageError("native select option is missing, ambiguous, or disabled")
+        number, option = options[0]
+        request = {"index": index, "text": control.get("text"), "option": number,
+                   "value": option.get("value")}
+        selected = self._request(
+            "evaluate", {"expression": f"({_SELECT_CHOOSE_SCRIPT})({json.dumps(request)})"}
+        )
+        if selected != option.get("value"):
+            raise DeviceError("native select did not confirm the requested choice")
+        return str(selected)
 
     def type_text(self, text: str) -> None:
         self._request("type_text", {"text": text})

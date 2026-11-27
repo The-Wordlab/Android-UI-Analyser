@@ -123,8 +123,6 @@ class WebPlatform(PlatformAdapter):
 
     def supports(self, capability: str) -> bool:
         key = normalize_capability(capability)
-        if key == "ui.select" and self._connection_mode() == "existing-chrome":
-            return False
         if (
             self._connection_mode() in {"existing-chrome", "existing-cdp"}
             and key in _ATTACHED_UNSAFE_CAPABILITIES
