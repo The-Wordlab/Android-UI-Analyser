@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -325,13 +326,21 @@ def _detail_value(
     if isinstance(value, str) and sensitive_literals:
         for literal in sorted(sensitive_literals, key=len, reverse=True):
             if literal:
-                value = value.replace(literal, "<redacted>")
+                value = _scrub_literal(value, literal)
         return value
     if isinstance(value, (int, float, bool)) and str(value) in sensitive_literals:
         return "<redacted>"
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
+
+
+def _scrub_literal(value: str, literal: str) -> str:
+    # A short typed value such as "a" would otherwise be cut out of every word in the record,
+    # error codes and element ids included; hide it only where it stands on its own.
+    if len(literal) >= 4:
+        return value.replace(literal, "<redacted>")
+    return re.sub(rf"(?<![A-Za-z0-9]){re.escape(literal)}(?![A-Za-z0-9])", "<redacted>", value)
 
 
 def _private_response_value(

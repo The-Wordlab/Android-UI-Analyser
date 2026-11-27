@@ -223,3 +223,25 @@ def test_input_text_never_enters_compact_or_full_journal(tmp_path: Path) -> None
     assert private_input not in json.dumps(detail)
     assert "correct horse" not in json.dumps(detail)
     assert "battery staple" not in json.dumps(detail)
+
+
+def test_a_one_letter_typed_value_is_hidden_without_cutting_that_letter_from_every_word(tmp_path):
+    journal.record(
+        cache_dir=tmp_path,
+        serial="browser:abc:0",
+        source="daemon",
+        cmd="input",
+        args={"text": "a", "selector": {"key": "el:58cd2b0a19c0"}},
+        ok=False,
+        error={"code": "platform_capability_unsupported", "message": "typed a"},
+    )
+
+    event = journal.read_since(tmp_path, "browser:abc:0", limit=1)[0]
+    detail = journal.read_detail(tmp_path, "browser:abc:0", event["detail_id"])
+
+    for record in (event, detail):
+        text = json.dumps(record)
+        assert "platform_capability_unsupported" in text
+        assert "el:58cd2b0a19c0" in text
+        assert "pl<redacted>tform" not in text
+        assert '"a"' not in text
