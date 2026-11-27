@@ -647,6 +647,9 @@ class Engine:
                 platform=platform_name,
             )
         )
+        if platform_name == "web":
+            unlisted = held_before - {serial for serial, _ in initial} - {explicit}
+            held_before -= self._release_unlisted_web_leases(owner, unlisted)
         if not initial and not self._lease_wait_s:
             if explicit is not None:
                 # Explicit/injected targets retain the historical lazy-connect seam. The
@@ -690,6 +693,22 @@ class Engine:
         self._lease_selection_reason = why
         self._lease_was_preexisting = serial in held_before
         return serial
+
+    def _release_unlisted_web_leases(self, owner: str, unlisted: set[str]) -> set[str]:
+        """Web targets exist only for the URL or attachment that names them, so a held one the
+        current config cannot list was left by an earlier config, not a browser that went away."""
+
+        from . import leases
+        from .teardown import cleanup_complete
+
+        released: set[str] = set()
+        for serial in sorted(unlisted):
+            with leases.device_transaction(self._lease_registry_dir, serial, platform="web"):
+                if not cleanup_complete(self.teardown_run(serial=serial, force=True)):
+                    continue
+                if leases.release(self._lease_registry_dir, serial, owner=owner, platform="web"):
+                    released.add(serial)
+        return released
 
     def _selected_target_has_app(self, serial: str, package: str) -> bool:
         """Check app presence only after this caller has safely leased *serial*."""

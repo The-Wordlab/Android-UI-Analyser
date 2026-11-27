@@ -11,8 +11,8 @@ from android_ui_analyser.platforms.web import WebPlatform
 from test_web_platform import URL, FakeConnection, FakeLauncher, _config
 
 
-def engine_for(tmp_path, owner, *, slots=2, serial=None, connection=None):
-    cfg = _config(tmp_path, url=URL, headless=False, context_slots=slots)
+def engine_for(tmp_path, owner, *, slots=2, serial=None, connection=None, url=URL):
+    cfg = _config(tmp_path, url=url, headless=False, context_slots=slots)
     cfg.device.serial = serial
     cfg.lease.enabled = True
     cfg.lease.registry_dir = str(tmp_path / "leases")
@@ -335,3 +335,24 @@ def test_cli_transfers_claim_origin_to_the_session_daemon(tmp_path, monkeypatch,
         assert calls[0][1].get("_bootstrap_new_lease", False) is (not preexisting)
     finally:
         engine.close()
+
+
+def test_switching_url_releases_the_agents_browser_for_the_old_one(tmp_path):
+    first = engine_for(tmp_path, "agent-a")
+    old = first._lease_device()
+
+    moved = engine_for(tmp_path, "agent-a", url="https://other.example.test/")
+    new = moved._lease_device()
+
+    assert new != old
+    assert leases.holder(first.config.lease.registry_dir, old, platform="web") is None
+    assert leases.holder(first.config.lease.registry_dir, new, platform="web") == "agent-a"
+
+
+def test_switching_url_leaves_another_agents_browser_alone(tmp_path):
+    other = engine_for(tmp_path, "agent-b")
+    theirs = other._lease_device()
+
+    engine_for(tmp_path, "agent-a", url="https://other.example.test/")._lease_device()
+
+    assert leases.holder(other.config.lease.registry_dir, theirs, platform="web") == "agent-b"
