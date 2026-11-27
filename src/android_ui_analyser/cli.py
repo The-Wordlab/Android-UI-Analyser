@@ -7544,6 +7544,37 @@ def record_stop_cmd(
     _run(ctx, go)
 
 
+journal_app = typer.Typer(
+    help="What AUA has been doing on this host, read from its own command journal.",
+    no_args_is_help=True,
+)
+app.add_typer(journal_app, name="journal")
+
+
+@journal_app.command("stats")
+def journal_stats_cmd(
+    ctx: typer.Context,
+    days: float | None = typer.Option(None, "--days", help="Only the last N days."),
+    only: str | None = typer.Option(
+        None, "--only", help="Only one platform: android, ios, ios-device or web."
+    ),
+) -> None:
+    """Calls, failure rate, error codes, slow commands and usage mistakes per surface.
+
+    Web is split by attachment: dedicated (AUA's own Chrome), extension and cdp.
+    """
+
+    def go(engine: Engine, fmt: OutputFormat) -> None:
+        import json
+
+        from .journal_stats import summarize
+
+        summary = summarize(engine.config.cache.dir, platform=only, days=days)
+        typer.echo(json.dumps(summary, indent=2, ensure_ascii=False))
+
+    _run(ctx, go)
+
+
 report_app = typer.Typer(
     help=(
         "Evidence pages for people: the guide, the video player and image viewer, and "
