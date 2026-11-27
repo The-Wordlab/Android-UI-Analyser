@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-11-27
+
 ### Added
 
 - `aua report player` (MCP `report_player`) now also adds an image viewer: clicking a screenshot
@@ -1976,5 +1978,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.41.2]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.41.2
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.42.0...HEAD
 [0.42.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.42.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.43.0...HEAD
+[0.43.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.43.0
