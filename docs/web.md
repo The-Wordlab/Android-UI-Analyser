@@ -182,6 +182,9 @@ aua browser extension install
 aua browser extension status
 ```
 
+After updating AUA, run `aua browser extension install` again and press the reload button on the
+AUA card in `chrome://extensions`; Chrome keeps running the old copy until then.
+
 Configure a separate profile for attached operation:
 
 ```yaml
@@ -208,7 +211,8 @@ Attached mode intentionally has a narrower authority boundary:
 - The extension receives `activeTab`, `debugger`, and `nativeMessaging`; it has no cookie,
   history, broad host, downloads, clipboard, or all-tabs permission.
 - Only the tab approved from the extension popup can be analyzed, pictured, focused, navigated,
-  clicked, typed into, or scrolled. `browser pages` reports only that tab.
+  clicked, typed into, or scrolled. `browser pages` reports only that tab. The AUA toolbar icon is grey until a tab is attached and turns blue
+  and green while one is.
 - AUA cannot silently select another tab, close a personal tab, export/clear storage or cache,
   reset the profile, change offline/throttle/proxy/CORS rules, mock traffic, record HAR, or start a
   Playwright trace. Those calls return `platform_capability_unsupported`.

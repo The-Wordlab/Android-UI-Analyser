@@ -14,6 +14,7 @@ function render(result) {
     : attached
       ? `Another tab is attached: ${result.state?.title || result.state?.url || "Chrome tab"}`
       : "This tab is not attached.";
+  document.querySelector("#logo").src = attached ? "icons/attached-32.png" : "icons/idle-32.png";
   attach.hidden = currentTab;
   attach.textContent = attached ? "Switch AUA to this tab" : "Attach this tab";
   detach.hidden = !attached;

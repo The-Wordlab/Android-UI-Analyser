@@ -23,6 +23,7 @@ htmlcov/
 *.png
 !tests/**/*.png
 !src/android_ui_analyser/data/aua-dashboard-logo.png
+!src/android_ui_analyser/chrome_extension/icons/*.png
 runs/
 # An AUA run cache placed inside the checkout. `runs/` was ignored but `.run/` was not,
 # so a local lane's cache showed up as untracked and tripped the app-specific-reference

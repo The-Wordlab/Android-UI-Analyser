@@ -7,6 +7,15 @@ let nativeReady = null;
 let resolveNativeReady = null;
 let rejectNativeReady = null;
 const pendingRequests = new Map();
+const IDLE_ICON = {16: "icons/idle-16.png", 32: "icons/idle-32.png"};
+const ATTACHED_ICON = {16: "icons/attached-16.png", 32: "icons/attached-32.png"};
+
+function setAttachedTab(tabId) {
+  attachedTabId = tabId;
+  const attached = tabId !== null;
+  chrome.action.setIcon({path: attached ? ATTACHED_ICON : IDLE_ICON}).catch(() => {});
+  chrome.action.setTitle({title: attached ? "AUA tab access: a tab is attached" : "AUA tab access"}).catch(() => {});
+}
 
 function debuggee() {
   if (attachedTabId === null) throw new Error("No tab is attached");
@@ -62,7 +71,7 @@ function sendHello() {
 
 async function detachCurrent() {
   const tabId = attachedTabId;
-  attachedTabId = null;
+  setAttachedTab(null);
   pendingRequests.clear();
   if (tabId !== null) {
     try {
@@ -119,7 +128,7 @@ async function attachTab(tabId) {
   await connectNative();
   if (attachedTabId === null) {
     await chrome.debugger.attach({tabId}, "1.3");
-    attachedTabId = tabId;
+    setAttachedTab(tabId);
     try {
       await cdp("Page.enable");
       await cdp("Runtime.enable");
@@ -323,14 +332,14 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener(source => {
   if (source.tabId === attachedTabId) {
-    attachedTabId = null;
+    setAttachedTab(null);
     pendingRequests.clear();
   }
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {
   if (tabId === attachedTabId) {
-    attachedTabId = null;
+    setAttachedTab(null);
     pendingRequests.clear();
   }
 });

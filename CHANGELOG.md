@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- The Chrome extension has an AUA logo. Its toolbar icon is grey while no tab is attached and
+  switches to colour while one is. Reinstall it with `aua browser extension install` and reload
+  it in `chrome://extensions`.
+
 ## [0.43.1] - 2026-11-27
 
 ### Fixed

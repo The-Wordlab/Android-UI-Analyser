@@ -1,10 +1,16 @@
 {
   "manifest_version": 3,
   "name": "AUA Existing Chrome Tab",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Share one explicitly selected Chrome tab with Android UI Analyser.",
   "minimum_chrome_version": "116",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5hYTohOKXXk1qRSbf02BW1f35zfeUrQOOpuBj/T067JNyrvfuSuLL7FrU5EwjF38SFgp7RkJzxXrQaXtNxECLg7f9pvK7RstsyKiv9B54h7vhQQPQ1T/QcAn9+RZEeQA3ATzD6tdyNqAgtcfUhxZsMnvGXX4oycahdlYLo4o/qn/7jc+I256kcPjHu5GehJ5hc20mycCVsTvIya0q02F548eUvnSJ7DcuWRDIzuS+R7FmSSrBmhx9w3N/ZxByCTILgtX2usg54ijMFps3o1pY1WTixy1uXZ9yKuNfZlrpZGimpjtQHj4InnC75n9dsL5dEsx473Da/TzXgjwuhV2OwIDAQAB",
+  "icons": {
+    "16": "icons/attached-16.png",
+    "32": "icons/attached-32.png",
+    "48": "icons/attached-48.png",
+    "128": "icons/attached-128.png"
+  },
   "permissions": [
     "activeTab",
     "debugger",
@@ -15,6 +21,10 @@
   },
   "action": {
     "default_title": "AUA tab access",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/idle-16.png",
+      "32": "icons/idle-32.png"
+    }
   }
 }

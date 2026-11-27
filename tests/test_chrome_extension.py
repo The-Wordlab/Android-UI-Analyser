@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -393,3 +394,14 @@ def test_extension_installer_registers_only_the_stable_extension(
     assert "Google/ChromeForTesting/NativeMessagingHosts" in str(
         native_manifest_path("chrome-for-testing")
     )
+
+
+def test_every_extension_icon_ships_with_the_extension() -> None:
+    root = Path(__file__).resolve().parent.parent / "src" / "android_ui_analyser" / "chrome_extension"
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    paths = [*manifest["icons"].values(), *manifest["action"]["default_icon"].values()]
+    worker = (root / "worker.js").read_text(encoding="utf-8")
+    paths += re.findall(r'"(icons/[^"]+\.png)"', worker)
+    assert paths
+    for path in paths:
+        assert (root / path).is_file(), path

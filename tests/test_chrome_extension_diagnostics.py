@@ -36,6 +36,7 @@ def _worker(script: str) -> dict:
         async detach() {}
       },
       tabs: {onRemoved: {addListener() {}}},
+      action: {setIcon: async () => {}, setTitle: async () => {}},
       runtime: {onMessage: {addListener() {}}}
     };
     """
