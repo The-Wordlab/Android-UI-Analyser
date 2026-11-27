@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-11-27
+
 ### Added
 
 - Attached Chrome tabs (`connection: existing-chrome`) can now change native dropdowns
@@ -2000,5 +2002,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.43.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.43.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.43.1...HEAD
 [0.43.1]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.43.1
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.44.0...HEAD
+[0.44.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.44.0
