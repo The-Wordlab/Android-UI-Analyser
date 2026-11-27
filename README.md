@@ -1,5 +1,9 @@
 # android-ui-analyser (`aua`)
 
+> **The android in the name is your AI agent, not the platform.** Read it as "a UI analyser for
+> androids": the robot is the one looking, and what it looks at can be Android, an iOS simulator,
+> or the web.
+
 `aua` is a configurable CLI that gives an AI agent structured "what's on screen and where" for
 Android, iOS-simulator, and web UI testing. It reads the native accessibility/view hierarchy or
 browser DOM first, returning elements with tracked IDs, types, text, and bounding boxes.
