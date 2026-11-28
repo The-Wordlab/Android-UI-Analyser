@@ -12,6 +12,14 @@ data. The agent sends a published ID to `aua tap-and-analyze <id>` or
 `aua input-and-analyze <id> "hello"`; AUA resolves the element on the current screen and computes
 the coordinates.
 
+Try it without installing AUA. With [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+and `adb` on your computer and an Android device or emulator attached:
+
+```bash
+uvx aua doctor                     # checks adb, the attached device and the providers
+uvx aua --format compact analyze   # the current screen as elements with stable IDs
+```
+
 > **New here?** Start with [Installation help](#installation-help). Claude Code and Codex users
 > can install one plugin that supplies the AUA skill and starts the matching released MCP server;
 > no clone or permanent AUA install is required.
@@ -26,7 +34,7 @@ Choose the path that matches how you want to use AUA:
 |---|---|---|
 | Use AUA from **Claude Code** | [Install the Claude Code plugin](#claude-code-plugin) | No |
 | Use AUA from **Codex** | [Install the Codex plugin](#codex-plugin) | No |
-| Run one CLI command or pin AUA in automation | [Run it with `uvx`](#run-the-cli-without-installing-aua) | No |
+| Run any `aua` command without installing it, or pin AUA in automation | [Run it with `uvx`](#run-the-cli-without-installing-aua) | No |
 | Use the `aua` command everywhere or contribute | [Clone and bootstrap](#install-the-cli-permanently) | Yes |
 
 The plugin paths are the easiest option for agents: each bundles the operating skill and starts
@@ -109,8 +117,24 @@ uvx aua --version
 ```
 
 `uvx` creates an isolated environment and caches it for later calls; no clone, `git pull`, editable
-environment, or global `aua` executable is needed. Any AUA command follows it, for example
-`uvx aua doctor`.
+environment, or global `aua` executable is needed. Every AUA command works this way: write
+`uvx aua` where the rest of this README writes `aua`, for example `uvx aua doctor` or
+`uvx aua tap-and-analyze <id>`. After the first download a call starts as fast as an installed
+`aua`.
+
+What `uvx` does not do for you:
+
+- **It does not install the platform tools.** Android still needs `adb` and a device or emulator;
+  see [Prerequisites](#prerequisites).
+- **It does not update by itself.** `uvx aua` keeps running the release it downloaded first.
+  `uvx aua@latest --version` fetches the newest one.
+- **It does not install the agent skill.** An MCP client gets the operating instructions from
+  `uvx aua mcp`. For an agent that calls the CLI, write the skill file once:
+
+  ```bash
+  uvx aua guide --emit-skill ~/.claude/skills/android-ui-analyser/SKILL.md   # Claude Code
+  uvx aua guide --emit-skill ~/.agents/skills/android-ui-analyser/SKILL.md   # Codex
+  ```
 
 The tool has two names on PyPI. `android-ui-analyser` holds the code. `aua` is the short name: it
 holds no code and installs the same version of `android-ui-analyser`, so `pip install aua` and
