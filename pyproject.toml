@@ -96,7 +96,8 @@ lxml = ["lxml>=5.0"]
 
 
 [project.urls]
-Homepage = "https://github.com/The-Wordlab/Android-UI-Analyser"
+Homepage = "https://the-wordlab.github.io/Android-UI-Analyser/"
+Repository = "https://github.com/The-Wordlab/Android-UI-Analyser"
 Documentation = "https://github.com/The-Wordlab/Android-UI-Analyser#readme"
 Changelog = "https://github.com/The-Wordlab/Android-UI-Analyser/blob/main/CHANGELOG.md"
 Issues = "https://github.com/The-Wordlab/Android-UI-Analyser/issues"

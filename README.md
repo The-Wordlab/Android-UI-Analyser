@@ -12,6 +12,9 @@ data. The agent sends a published ID to `aua tap-and-analyze <id>` or
 `aua input-and-analyze <id> "hello"`; AUA resolves the element on the current screen and computes
 the coordinates.
 
+**[See it working](https://the-wordlab.github.io/Android-UI-Analyser/):** recordings of an agent
+checking one feature on Android and iOS, finding a crash, and proving the fix.
+
 Try it without installing AUA. With [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 and `adb` on your computer and an Android device or emulator attached:
 
