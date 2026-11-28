@@ -18,6 +18,14 @@ notes, so you can check for a newer version — and read what changed — withou
   to `LICENSE` in the wheel and the sdist. The package's license field is now
   `MIT AND LicenseRef-Gemma-Terms-of-Use`. Nothing about the terms themselves changed.
 
+### Fixed
+
+- `analyze --annotate [PATH]` wrote no file when the screen had not changed since the last
+  observation, which is the usual case right after `session start` or an action. It exited 0
+  with no `meta.annotated_image`. The marked screenshot is now written on an unchanged screen
+  too, on every platform. A later `analyze` without `--annotate` no longer repeats the path of an
+  earlier call's annotated screenshot.
+
 ## [0.49.0] - 2026-11-27
 
 ### Added

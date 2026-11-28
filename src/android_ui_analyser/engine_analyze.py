@@ -1036,6 +1036,11 @@ def _analyze_screen(
                             "fingerprint": xml_hash,
                             "known_screen": known,
                             **learned,
+                            # The marks are this call's request, not the tree's property:
+                            # write them when asked, and never report an earlier call's file.
+                            "annotated_image": self._maybe_annotate(
+                                annotate, device, tracked, img
+                            ),
                             "via": "hierarchy-unchanged",
                             "element_diff": _identity_diff(prev.elements, tracked)
                             if self.config.perf.differential
