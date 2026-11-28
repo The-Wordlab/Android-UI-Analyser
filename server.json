@@ -3,7 +3,7 @@
   "name": "io.github.The-Wordlab/aua",
   "title": "AUA (Android UI Analyser)",
   "description": "See and operate Android, iOS-simulator and web UIs by stable element ID, not pixels.",
-  "version": "0.49.0",
+  "version": "0.50.0",
   "websiteUrl": "https://the-wordlab.github.io/Android-UI-Analyser/",
   "repository": {
     "url": "https://github.com/The-Wordlab/Android-UI-Analyser",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "aua",
-      "version": "0.49.0",
+      "version": "0.50.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

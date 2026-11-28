@@ -11,6 +11,8 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-11-28
+
 ### Added
 
 - AUA is listed in the official MCP Registry as `io.github.The-Wordlab/aua`, so MCP clients and
@@ -2134,5 +2136,7 @@ of the first tag rather than a reconstruction of the untagged versions it passed
 
 [0.48.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.48.0
 
-[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.49.0...HEAD
 [0.49.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.49.0
+
+[Unreleased]: https://github.com/The-Wordlab/Android-UI-Analyser/compare/v0.50.0...HEAD
+[0.50.0]: https://github.com/The-Wordlab/Android-UI-Analyser/releases/tag/v0.50.0

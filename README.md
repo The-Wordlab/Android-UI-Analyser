@@ -156,11 +156,11 @@ before 0.48.0 that were never uploaded to PyPI:
 
 ```bash
 uvx --from \
-  'android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.49.0' \
+  'android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.50.0' \
   aua --version
 ```
 
-Replace `v0.49.0` with the release you want. The
+Replace `v0.50.0` with the release you want. The
 [latest GitHub Release](https://github.com/The-Wordlab/Android-UI-Analyser/releases/latest) shows
 the current tag and its release notes.
 
@@ -388,7 +388,7 @@ Pin a clone-based install to a release instead of tracking `main`:
 
 ```bash
 git fetch --tags
-git checkout v0.49.0
+git checkout v0.50.0
 ./install.sh
 ```
 
@@ -1933,7 +1933,7 @@ The same server pinned to one release, with the OCR and emulator-audio extras:
       "args": [
         "--quiet",
         "--from",
-        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.49.0",
+        "android-ui-analyser[apple,rapidocr,audio] @ git+https://github.com/The-Wordlab/Android-UI-Analyser.git@v0.50.0",
         "aua",
         "mcp"
       ]
