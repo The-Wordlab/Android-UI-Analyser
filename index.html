@@ -1,0 +1,1328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AUA: give your AI agent eyes</title>
+<meta name="description" content="AUA shows an AI agent what is on the screen of an Android app, an iOS simulator or a web page as elements with stable IDs, so it can use and test what it builds. Open source CLI and MCP server.">
+<meta property="og:title" content="AUA: give your AI agent eyes">
+<meta property="og:description" content="Structured UI elements with stable IDs, not pixels, for Android, iOS simulators and the web. CLI and MCP server.">
+<meta property="og:type" content="website">
+<script>
+(function () {
+  var theme = new URLSearchParams(location.search).get("theme");
+  if (theme === "dark" || theme === "light") document.documentElement.setAttribute("data-theme", theme);
+})();
+</script>
+<style>
+:root{
+  --bg:#faf9f5; --ink:#15171c; --muted:#5a606c; --card:#ffffff; --line:#e4e1d8; --soft:#f1efe8;
+  --accent:#0b7f52; --accent-ink:#ffffff; --accent-soft:#e2f3ea; --code-bg:#14171c; --code-ink:#e9edf3;
+  --warn:#a15c00; --bad:#b3261e; --good:#0b7f52;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0c0e11; --ink:#eef0f4; --muted:#9aa2b1; --card:#14171c; --line:#252a33; --soft:#181c22;
+  --accent:#3ddc97; --accent-ink:#06130d; --accent-soft:#11281f; --code-bg:#06080a; --code-ink:#e9edf3;
+  --warn:#f0b35a; --bad:#ff8a80; --good:#3ddc97;
+}}
+:root[data-theme="dark"]{
+  --bg:#0c0e11; --ink:#eef0f4; --muted:#9aa2b1; --card:#14171c; --line:#252a33; --soft:#181c22;
+  --accent:#3ddc97; --accent-ink:#06130d; --accent-soft:#11281f; --code-bg:#06080a; --code-ink:#e9edf3;
+  --warn:#f0b35a; --bad:#ff8a80; --good:#3ddc97;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+.hero>*,.grid3>*,.seen>*,.pair>*,.clip>*,.loop>*,.feat>*,.install>*{min-width:0}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.55 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:inherit}
+.wrap{max-width:1120px;margin:0 auto;padding:0 20px}
+header.top{display:flex;align-items:center;justify-content:space-between;padding:18px 0}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-.01em;text-decoration:none}
+.brand .eye{width:30px;height:30px;border-radius:9px;background:var(--ink);display:grid;place-items:center}
+.brand .eye i{width:12px;height:12px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px var(--bg) inset}
+nav.links{display:flex;gap:22px;font-size:15px}
+nav.links a{text-decoration:none;color:var(--muted)}
+nav.links a:hover{color:var(--ink)}
+@media (max-width:640px){nav.links a.opt{display:none}}
+
+.hero{display:grid;grid-template-columns:1.05fr .95fr;gap:40px;align-items:center;padding:48px 0 64px}
+.eyebrow{font:600 13px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--accent)}
+h1{font-size:clamp(38px,5.6vw,64px);line-height:1.02;letter-spacing:-.035em;margin:16px 0 18px;font-weight:750}
+.lede{font-size:20px;color:var(--muted);max-width:33em;margin:0 0 26px}
+.lede b{color:var(--ink);font-weight:600}
+.cmd{display:flex;align-items:center;gap:10px;background:var(--code-bg);color:var(--code-ink);border-radius:12px;padding:14px 14px 14px 18px;font:15px/1.4 var(--mono);max-width:440px}
+.cmd code{flex:1;overflow-x:auto;white-space:nowrap}
+.cmd .p{color:#6b7482;user-select:none}
+button.copy{font:600 12px/1 var(--sans);color:var(--code-ink);background:#262c35;border:1px solid #39414d;border-radius:8px;padding:8px 10px;cursor:pointer}
+button.copy:hover{background:#303844}
+.cta{display:flex;flex-wrap:wrap;gap:12px;margin-top:18px;align-items:center}
+.btn{display:inline-flex;align-items:center;gap:8px;text-decoration:none;font-weight:600;font-size:15px;padding:11px 16px;border-radius:10px;border:1px solid var(--line);background:var(--card)}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.fine{font-size:14px;color:var(--muted);margin-top:14px}
+.phones{display:flex;gap:18px;justify-content:center;align-items:flex-start}
+.phone{width:min(46%,236px);border-radius:34px;padding:9px;background:#1b1e24;box-shadow:0 0 0 1px #343a45,0 30px 60px -25px rgba(0,0,0,.45)}
+.phone video{display:block;width:100%;border-radius:26px;background:#000}
+.phone.b{margin-top:44px}
+.phones figcaption,.tag{font:600 12px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+.phones figure{margin:0;display:contents}
+.plabel{display:flex;justify-content:center;gap:18px;margin-top:14px}
+.plabel span{width:min(46%,236px);text-align:center}
+@media (max-width:900px){.hero{grid-template-columns:1fr;padding-top:24px}}
+
+section{padding:72px 0;border-top:1px solid var(--line)}
+h2{font-size:clamp(28px,3.6vw,40px);line-height:1.1;letter-spacing:-.025em;margin:10px 0 14px;font-weight:720}
+.sub{font-size:19px;color:var(--muted);max-width:44em;margin:0 0 34px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+@media (max-width:860px){.grid3{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px}
+.card h3{margin:10px 0 8px;font-size:20px;letter-spacing:-.01em}
+.card p{margin:0;color:var(--muted);font-size:16px}
+.num{font:600 13px/1 var(--mono);color:var(--accent)}
+pre{margin:14px 0 0;background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:12px 14px;font:13.5px/1.5 var(--mono);overflow-x:auto}
+pre .c{color:#7d8794}
+code.i{font:.92em var(--mono);background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+
+.seen{display:grid;grid-template-columns:1.1fr .9fr;gap:22px;margin-top:26px;align-items:start}
+@media (max-width:860px){.seen{grid-template-columns:1fr}}
+.seen figure{margin:0}
+.seen img{display:block;width:100%;border-radius:12px;border:1px solid var(--line)}
+figcaption.cap,.cap{font-size:14.5px;color:var(--muted);margin-top:10px}
+
+.tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 22px}
+.tabs button{font:600 15px/1 var(--sans);padding:11px 15px;border-radius:999px;border:1px solid var(--line);background:var(--card);color:var(--muted);cursor:pointer}
+.tabs button[aria-selected="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+@media (max-width:760px){.pair{grid-template-columns:1fr}}
+.clip{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;display:grid;grid-template-columns:auto 1fr;gap:20px;align-items:start}
+@media (max-width:1000px){.clip{grid-template-columns:1fr;justify-items:center}}
+.clip .side{width:100%}
+.clip h4{margin:0 0 4px;font-size:17px}
+.clip .tag{display:block;margin-bottom:12px}
+ol.steps{list-style:none;margin:0;padding:0;display:grid;gap:6px;counter-reset:s}
+ol.steps li{counter-increment:s;display:flex;gap:10px;align-items:baseline;padding:8px 10px;border-radius:9px;border:1px solid transparent;cursor:pointer;font-size:15px;color:var(--muted)}
+ol.steps li::before{content:counter(s);font:600 12px/1 var(--mono);color:var(--muted);min-width:1.2em}
+ol.steps li b{font-weight:600;color:var(--ink)}
+ol.steps li:hover{background:var(--soft)}
+ol.steps li.vp-on{background:var(--accent-soft);border-color:var(--accent)}
+ol.steps li.vp-on::before{color:var(--accent)}
+.note{margin-top:22px;font-size:15px;color:var(--muted)}
+
+table{width:100%;border-collapse:collapse;font-size:16px;margin-top:8px}
+th,td{text-align:left;padding:12px 10px;border-bottom:1px solid var(--line)}
+th{font:600 12px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+.ok{color:var(--good);font-weight:600}.no{color:var(--bad);font-weight:600}
+.tablewrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:8px 14px;margin-top:26px}
+.catch{margin-top:18px;padding:16px 18px;border-radius:12px;background:var(--accent-soft);border:1px solid var(--accent);font-size:16px}
+
+.loop{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
+@media (max-width:900px){.loop{grid-template-columns:1fr 1fr}}
+@media (max-width:560px){.loop{grid-template-columns:1fr}}
+.loop .card{padding:18px}
+.loop .card h3{font-size:18px}
+.loop .card p{font-size:15px}
+
+.feat{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--card)}
+.feat div{padding:22px;border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
+.feat h3{margin:0 0 6px;font-size:17px}
+.feat p{margin:0;color:var(--muted);font-size:15.5px}
+@media (max-width:860px){.feat{grid-template-columns:1fr}}
+
+.install{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:860px){.install{grid-template-columns:1fr}}
+.install .card pre{white-space:pre}
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.row button.copy{background:var(--soft);color:var(--ink);border-color:var(--line)}
+footer{border-top:1px solid var(--line);padding:34px 0 60px;color:var(--muted);font-size:14.5px}
+footer a{color:var(--muted)}
+footer .f{display:flex;flex-wrap:wrap;gap:8px 22px;justify-content:space-between}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <a class="brand" href="#top" aria-label="AUA home"><span class="eye"><i></i></span>AUA</a>
+  <nav class="links">
+    <a class="opt" href="#how">How it works</a>
+    <a class="opt" href="#phones">On real apps</a>
+    <a class="opt" href="#loop">Closing the loop</a>
+    <a class="opt" href="#web">Web</a>
+    <a href="#install">Install</a>
+    <a href="https://github.com/The-Wordlab/Android-UI-Analyser">GitHub</a>
+  </nav>
+</header>
+
+<main id="top">
+<div class="hero">
+  <div>
+    <div class="eyebrow">android-ui-analyser · open source</div>
+    <h1>Your agent wrote the app. Now it can use it.</h1>
+    <p class="lede">AUA shows an AI agent what is on the screen of an <b>Android app</b>, an <b>iOS simulator</b> or a <b>web page</b> as a list of elements with stable IDs. The agent taps and types by ID, sees what happened, and proves its change works.</p>
+    <div class="cmd"><span class="p">$</span><code id="try">uvx aua doctor</code><button class="copy" data-copy="try">Copy</button></div>
+    <div class="cta">
+      <a class="btn primary" href="#install">Install</a>
+      <a class="btn" href="https://github.com/The-Wordlab/Android-UI-Analyser">GitHub</a>
+      <a class="btn" href="https://pypi.org/project/aua/">PyPI</a>
+    </div>
+    <p class="fine">CLI and MCP server. Works with Claude Code, Codex and any MCP client. The android in the name is your agent, not the platform.</p>
+  </div>
+  <div>
+    <div class="phones">
+      <div class="phone"><video src="media/android-flashcards.mp4" poster="media/android-flashcards.jpg" autoplay muted loop playsinline aria-label="An agent driving an Android app"></video></div>
+      <div class="phone b"><video src="media/ios-flashcards.mp4" poster="media/ios-flashcards.jpg" autoplay muted loop playsinline aria-label="An agent driving an iPhone simulator"></video></div>
+    </div>
+    <div class="plabel"><span class="tag">Android emulator</span><span class="tag">iPhone simulator</span></div>
+    <p class="fine" style="text-align:center">Nobody is touching these phones. An agent is driving both.</p>
+  </div>
+</div>
+</main>
+
+<section id="how">
+  <div class="eyebrow">How it works</div>
+  <h2>Three calls an agent can understand</h2>
+  <p class="sub">A screenshot is expensive for an agent to read and still leaves it guessing where to tap. AUA hands it the screen as data.</p>
+  <div class="grid3">
+    <div class="card"><span class="num">01 · SEE</span><h3>Every element, with an ID</h3><p>Text, type, position and a stable ID for each control. Read from the accessibility tree or the DOM in tens of milliseconds, with OCR and vision for screens that have none.</p>
+<pre>aua --format compact analyze</pre></div>
+    <div class="card"><span class="num">02 · ACT</span><h3>Tap and type by ID</h3><p>The agent names the element. AUA finds it on the current screen, acts, and returns the screen that follows in the same call.</p>
+<pre>aua tap-and-analyze &lt;id&gt;
+aua input-and-analyze &lt;id&gt; "hello"</pre></div>
+    <div class="card"><span class="num">03 · PROVE</span><h3>Evidence, not a claim</h3><p>Screenshots, screen recordings with the waiting cut out, and a report the agent builds from the run. The recordings on this page were made that way.</p>
+<pre>aua wait-and-analyze --for "Saved"
+aua has "Sign in"   <span class="c"># exit 0 or 1</span></pre></div>
+  </div>
+  <div class="seen">
+    <figure>
+      <img src="media/seen-web.png" alt="The top of this page with a numbered box on each of the 12 controls AUA found" loading="lazy">
+      <figcaption class="cap">The top of this page, as AUA showed it to the agent that built it: 12 controls. The boxes are drawn from the positions AUA returned.</figcaption>
+    </figure>
+    <div>
+<pre style="font-size:12.5px"><span class="c"># aua --platform web --format compact analyze</span>
+{"id": "el:eff996c9…", "text": "Install", "type": "Link"}
+{"id": "el:70b9c052…", "text": "GitHub",  "type": "Link"}
+{"id": "el:bbe26e2d…", "text": "Copy",    "type": "Button"}
+{"id": "el:eac806f3…", "text": "Install", "type": "Link"}
+{"id": "el:76fa0c54…", "text": "GitHub",  "type": "Link"}
+{"id": "el:d52f406a…", "text": "PyPI",    "type": "Link"}
+
+<span class="c"># aua --platform web tap-and-analyze el:bbe26e2d…</span>
+{"id": "el:86312d86…", "text": "Copied",  "type": "Button"}</pre>
+      <p class="cap">Rows 5 to 10 of the answer, with the IDs shortened. The agent asked what was on the screen, tapped box 7 by its ID, and the answer to the tap already showed the button reading "Copied". No screenshot was read and no coordinates were guessed.</p>
+    </div>
+  </div>
+</section>
+
+<section id="phones">
+  <div class="eyebrow">On real apps</div>
+  <h2>One feature, checked on both phones</h2>
+  <p class="sub">Luzia was adding study cards to its chat. An agent ran the same five flows on the Android app and on the iPhone app with AUA and recorded each one. Pick a flow, then tap a step to jump to it.</p>
+
+  <div class="tabs" role="tablist" aria-label="Flows">
+    <button role="tab" aria-selected="true" data-tab="flashcards">Flash cards</button>
+    <button role="tab" aria-selected="false" data-tab="plan">Study plan</button>
+    <button role="tab" aria-selected="false" data-tab="quiz">Practice round</button>
+    <button role="tab" aria-selected="false" data-tab="homework">Homework</button>
+    <button role="tab" aria-selected="false" data-tab="studies">Studies screen</button>
+  </div>
+
+  <div class="pair" data-panel="flashcards">
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/android-flashcards.mp4" poster="media/android-flashcards.jpg" controls playsinline muted preload="metadata" aria-label="Recording: flash cards on Android"></video>
+      <div class="side"><h4>Android</h4><span class="tag">emulator · 12 s</span>
+        <ol class="steps">
+          <li data-seek="1"><b>Asks for flash cards</b></li>
+          <li data-seek="2"><b>Loader while the card is written</b></li>
+          <li data-seek="5"><b>Deck shows in the chat</b></li>
+          <li data-seek="7"><b>Flip shows the answer</b></li>
+          <li data-seek="9"><b>"Got it" moves to the next card</b></li>
+        </ol></div>
+    </div>
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/ios-flashcards.mp4" poster="media/ios-flashcards.jpg" controls playsinline muted preload="metadata" aria-label="Recording: flash cards on iOS"></video>
+      <div class="side"><h4>iOS</h4><span class="tag">simulator · 17 s</span>
+        <ol class="steps">
+          <li data-seek="1.5"><b>Asks for flash cards</b></li>
+          <li data-seek="4"><b>Loader while the card is written</b></li>
+          <li data-seek="7"><b>Deck shows in the chat</b></li>
+          <li data-seek="10"><b>Flip shows the answer</b></li>
+          <li data-seek="12"><b>"Got it" moves to the next card</b></li>
+        </ol></div>
+    </div>
+  </div>
+
+  <div class="pair" data-panel="plan" hidden>
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/android-study-plan.mp4" poster="media/android-study-plan.jpg" controls playsinline muted preload="metadata" aria-label="Recording: study plan on Android"></video>
+      <div class="side"><h4>Android</h4><span class="tag">emulator · 10 s</span>
+        <ol class="steps">
+          <li data-seek="1"><b>Asks for a study plan</b></li>
+          <li data-seek="4"><b>Loader</b></li>
+          <li data-seek="6"><b>Plan shows in the chat</b></li>
+          <li data-seek="8"><b>Phases: prepare, practise, mock exam</b></li>
+        </ol></div>
+    </div>
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/ios-study-plan.mp4" poster="media/ios-study-plan.jpg" controls playsinline muted preload="metadata" aria-label="Recording: study plan on iOS"></video>
+      <div class="side"><h4>iOS</h4><span class="tag">simulator · 11 s</span>
+        <ol class="steps">
+          <li data-seek="1.5"><b>Asks for a study plan</b></li>
+          <li data-seek="4"><b>Loader</b></li>
+          <li data-seek="7"><b>Intro line</b></li>
+          <li data-seek="8"><b>Plan shows in the chat</b></li>
+        </ol></div>
+    </div>
+  </div>
+
+  <div class="pair" data-panel="quiz" hidden>
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/android-practice-round.mp4" poster="media/android-practice-round.jpg" controls playsinline muted preload="metadata" aria-label="Recording: practice round on Android"></video>
+      <div class="side"><h4>Android</h4><span class="tag">emulator · 32 s</span>
+        <ol class="steps">
+          <li data-seek="1"><b>Asks for a quiz</b></li>
+          <li data-seek="4"><b>Loader</b></li>
+          <li data-seek="6"><b>Question 1 of 5</b></li>
+          <li data-seek="10"><b>Answer checked: not quite</b></li>
+          <li data-seek="25"><b>End round: 0 of 1</b></li>
+          <li data-seek="27"><b>Taps "Quiz me on the planets again"</b></li>
+        </ol></div>
+    </div>
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/ios-practice-round.mp4" poster="media/ios-practice-round.jpg" controls playsinline muted preload="metadata" aria-label="Recording: practice round on iOS"></video>
+      <div class="side"><h4>iOS</h4><span class="tag">simulator · 23 s</span>
+        <ol class="steps">
+          <li data-seek="1.5"><b>Asks for a quiz</b></li>
+          <li data-seek="5"><b>Loader</b></li>
+          <li data-seek="11"><b>Question 1 of 5</b></li>
+          <li data-seek="15"><b>Answer checked: correct</b></li>
+          <li data-seek="20"><b>End round: 1 of 1</b></li>
+        </ol></div>
+    </div>
+  </div>
+
+  <div class="pair" data-panel="homework" hidden>
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/android-homework.mp4" poster="media/android-homework.jpg" controls playsinline muted preload="metadata" aria-label="Recording: homework on Android"></video>
+      <div class="side"><h4>Android</h4><span class="tag">emulator · 20 s</span>
+        <ol class="steps">
+          <li data-seek="1"><b>Asks for homework help</b></li>
+          <li data-seek="3"><b>Loader</b></li>
+          <li data-seek="5"><b>Question 1 of 3</b></li>
+          <li data-seek="9"><b>Show working</b></li>
+          <li data-seek="13"><b>All 3 answered</b></li>
+          <li data-seek="15"><b>Taps "Quiz me on these"</b></li>
+        </ol></div>
+    </div>
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/ios-homework.mp4" poster="media/ios-homework.jpg" controls playsinline muted preload="metadata" aria-label="Recording: homework on iOS"></video>
+      <div class="side"><h4>iOS</h4><span class="tag">simulator · 32 s</span>
+        <ol class="steps">
+          <li data-seek="1.5"><b>Asks for homework help</b></li>
+          <li data-seek="5"><b>Loader</b></li>
+          <li data-seek="8"><b>Question 1 of 3</b></li>
+          <li data-seek="12"><b>Show working</b></li>
+          <li data-seek="21"><b>All 3 answered</b></li>
+          <li data-seek="26"><b>Taps "Quiz me on these"</b></li>
+        </ol></div>
+    </div>
+  </div>
+
+  <div class="pair" data-panel="studies" hidden>
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/android-studies.mp4" poster="media/android-studies.jpg" controls playsinline muted preload="metadata" aria-label="Recording: Studies screen on Android"></video>
+      <div class="side"><h4>Android</h4><span class="tag">emulator · 9 s</span>
+        <ol class="steps">
+          <li data-seek="0"><b>Studies list</b></li>
+          <li data-seek="1"><b>Plan opens</b></li>
+          <li data-seek="4"><b>Deck opens</b></li>
+          <li data-seek="5"><b>Flip, then "Got it"</b></li>
+          <li data-seek="7"><b>View in chat</b></li>
+        </ol></div>
+    </div>
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/ios-studies.mp4" poster="media/ios-studies.jpg" controls playsinline muted preload="metadata" aria-label="Recording: Studies screen on iOS"></video>
+      <div class="side"><h4>iOS</h4><span class="tag">simulator · 21 s</span>
+        <ol class="steps">
+          <li data-seek="0"><b>Studies list</b></li>
+          <li data-seek="2"><b>Plan opens</b></li>
+          <li data-seek="7"><b>Deck opens at card 1 of 4</b></li>
+          <li data-seek="11"><b>Flip, then "Got it"</b></li>
+          <li data-seek="18"><b>View in chat</b></li>
+        </ol></div>
+    </div>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Flow</th><th>Android</th><th>iOS</th></tr></thead>
+      <tbody>
+        <tr><td>Flash cards</td><td class="ok">Card shows, grading works</td><td class="ok">Card shows, grading works</td></tr>
+        <tr><td>Study plan</td><td class="ok">Card shows</td><td class="ok">Card shows</td></tr>
+        <tr><td>Practice round</td><td class="ok">Answer, end round, follow-up</td><td class="ok">Answer, end round</td></tr>
+        <tr><td>Homework</td><td class="ok">All steps, follow-up</td><td class="ok">All steps, follow-up</td></tr>
+        <tr><td>Studies screen</td><td class="ok">Open, grade, back to chat</td><td class="ok">Open, grade, back to chat</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="catch"><b>It also caught a bug a quick look would miss.</b> The plan for an exam on 20 December showed "Sat 20 Dec" on both phones. 20 December 2026 is a Sunday: the card had picked the wrong year.</div>
+  <p class="note">Recorded on the Luzia app for Android and iOS with a guest account and test prompts. The waiting is cut out of each recording; animations play at real speed. The Android emulator is in dark mode and the iPhone simulator in light mode.</p>
+</section>
+
+<section id="loop">
+  <div class="eyebrow">Closing the loop</div>
+  <h2>Find the crash, then prove the fix</h2>
+  <p class="sub">An agent that can use the app can do more than tick boxes. Here it tested a new character carousel on Android, hit a crash nobody could trigger on purpose, and came back to prove the fix.</p>
+  <div class="loop">
+    <div class="card"><span class="num">01 · DRIVE</span><h3>8 scenarios</h3><p>Swipes both ways, opening a chat from a card, rotating the phone, pressing Back in the middle of an animation. 7 passed.</p></div>
+    <div class="card"><span class="num">02 · CATCH</span><h3>Two crashes while idle</h3><p>The app closed twice while nothing was being touched. The agent could not repeat it on demand, so it read the crash from the device and named a suspect: the tilt effect receiving a value that is not a number.</p></div>
+    <div class="card"><span class="num">03 · FIX</span><h3>A fix goes in</h3><p>The finding went to the pull request with the recording and the crash, and the code was changed.</p></div>
+    <div class="card"><span class="num">04 · PROVE</span><h3>Old build closes, new one holds</h3><p>The agent made the emulator's motion sensor report "not a number". The old build closed at once. The fixed build kept drawing for 60 seconds, and stayed up through four idle waits of 60 to 130 seconds.</p></div>
+  </div>
+  <div class="pair">
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/loop-first-run.mp4" poster="media/loop-first-run.jpg" controls playsinline muted preload="metadata" aria-label="Recording: first run, with both crashes"></video>
+      <div class="side"><h4>First run</h4><span class="tag">94 s · both crashes included</span>
+        <ol class="steps">
+          <li data-seek="0"><b>Opens the carousel</b></li>
+          <li data-seek="7"><b>First swipe</b></li>
+          <li data-seek="22"><b>Opens a chat from a card</b></li>
+          <li data-seek="43"><b>Crash 1, while idle</b></li>
+          <li data-seek="64"><b>Crash 2, while idle</b></li>
+          <li data-seek="73"><b>Landscape</b></li>
+          <li data-seek="83"><b>Back in mid-animation</b></li>
+        </ol></div>
+    </div>
+    <div class="clip">
+      <video style="width:230px;max-width:100%" src="media/loop-recheck.mp4" poster="media/loop-recheck.jpg" controls playsinline muted preload="metadata" aria-label="Recording: re-check of the fix against the old build"></video>
+      <div class="side"><h4>Re-check</h4><span class="tag">72 s · fix, then the old build</span>
+        <ol class="steps">
+          <li data-seek="0"><b>Fixed build opens</b></li>
+          <li data-seek="15"><b>Reopened with animations on</b></li>
+          <li data-seek="20"><b>Idle, no crash</b><span>130 s cut here</span></li>
+          <li data-seek="26"><b>Sensor reports "not a number"</b><span>still drawing</span></li>
+          <li data-seek="54"><b>Old build opens</b></li>
+          <li data-seek="67"><b>Same sensor value: the app closes</b></li>
+        </ol></div>
+    </div>
+  </div>
+  <p class="note">Recorded on the Luzia app on an Android emulator. The second recording is in Portuguese because that is the language the emulator was set to.</p>
+</section>
+
+<section id="web">
+  <div class="eyebrow">On the web</div>
+  <h2>This page was checked the same way</h2>
+  <p class="sub">The agent that built this page opened it in Chrome through AUA and used it before showing it to anyone. The first run failed.</p>
+  <div class="catch"><b>What it caught.</b> After the agent tapped "Study plan", AUA's answer still listed the flash-card steps. All five flows were showing at once, because one style rule cancelled the <code class="i">hidden</code> attribute. One line fixed it, and the same check passed on the next run.</div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Check</th><th>How</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>The copy button copies</td><td>Tap it by ID; the button reads "Copied"</td><td class="ok">Pass</td></tr>
+        <tr><td>Each flow tab shows only its own recordings</td><td>Tap all five tabs; read which steps are on screen</td><td class="ok">Pass, after the fix</td></tr>
+        <tr><td>A step jumps the recording to that moment</td><td>Tap a step; read the player's time</td><td class="ok">Pass</td></tr>
+        <tr><td>Nothing fails to load</td><td>AUA's browser report: console errors and failed requests</td><td class="ok">Pass</td></tr>
+        <tr><td>It fits a phone</td><td>Open at 390 px wide; read each section's positions and screenshot</td><td class="ok">Pass</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="what">
+  <div class="eyebrow">What your agent gets</div>
+  <h2>Built for agents, usable by people</h2>
+  <p class="sub">The same commands work in a terminal and over MCP, on all three platforms.</p>
+  <div class="feat">
+    <div><h3>Android, iOS simulator, web</h3><p>Android devices and emulators from Android 7.0, iOS simulators on macOS, and Chromium, Firefox and WebKit through Playwright.</p></div>
+    <div><h3>IDs that survive a redraw</h3><p>An element keeps its ID while the screen changes around it, so the agent can keep acting without looking again.</p></div>
+    <div><h3>The result comes back with the action</h3><p>Every tap, type and swipe returns the screen that followed. No second call to see what happened.</p></div>
+    <div><h3>Wait on state, not on time</h3><p>Wait for text to appear or the screen to change instead of sleeping and hoping.</p></div>
+    <div><h3>Saved flows and known routes</h3><p>Replay a journey in one call, and jump to a screen the tool has already learned how to reach.</p></div>
+    <div><h3>Evidence built in</h3><p>Screenshots, recordings, logs and a report page, so a person can check what the agent says it did.</p></div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="eyebrow">Install</div>
+  <h2>Try it in one line</h2>
+  <p class="sub">You need <a href="https://docs.astral.sh/uv/getting-started/installation/">uv</a>. For Android you also need <code class="i">adb</code> and a device or emulator.</p>
+  <div class="install">
+    <div class="card"><div class="row"><h3>Run it without installing</h3><button class="copy" data-copy="i1">Copy</button></div>
+<pre id="i1">uvx aua doctor
+uvx aua --format compact analyze</pre></div>
+    <div class="card"><div class="row"><h3>Claude Code plugin</h3><button class="copy" data-copy="i2">Copy</button></div>
+<pre id="i2">/plugin marketplace add The-Wordlab/Android-UI-Analyser
+/plugin install android-ui-analyser@the-wordlab</pre></div>
+    <div class="card"><div class="row"><h3>Codex plugin</h3><button class="copy" data-copy="i3">Copy</button></div>
+<pre id="i3">codex plugin marketplace add The-Wordlab/Android-UI-Analyser
+codex plugin add android-ui-analyser@the-wordlab</pre></div>
+    <div class="card"><div class="row"><h3>Any MCP client</h3><button class="copy" data-copy="i4">Copy</button></div>
+<pre id="i4">{
+  "mcpServers": {
+    "android-ui": { "command": "uvx", "args": ["aua", "mcp"] }
+  }
+}</pre></div>
+  </div>
+  <div class="cta" style="margin-top:26px">
+    <a class="btn primary" href="https://github.com/The-Wordlab/Android-UI-Analyser#installation-help">Full install guide</a>
+    <a class="btn" href="https://github.com/The-Wordlab/Android-UI-Analyser">Star it on GitHub</a>
+  </div>
+</section>
+
+<footer>
+  <div class="f">
+    <span>© 2026 The Wordlab. Code under the MIT license; the optional bundled policy model has its own terms (see NOTICE).</span>
+    <span><a href="https://github.com/The-Wordlab/Android-UI-Analyser">GitHub</a> · <a href="https://pypi.org/project/aua/">PyPI</a> · <a href="https://github.com/The-Wordlab/Android-UI-Analyser/blob/main/CHANGELOG.md">Changelog</a></span>
+  </div>
+</footer>
+</div>
+
+<script>
+document.querySelectorAll("[data-tab]").forEach(function (tab) {
+  tab.addEventListener("click", function () {
+    document.querySelectorAll("[data-tab]").forEach(function (other) {
+      other.setAttribute("aria-selected", other === tab ? "true" : "false");
+    });
+    document.querySelectorAll("[data-panel]").forEach(function (panel) {
+      var show = panel.getAttribute("data-panel") === tab.getAttribute("data-tab");
+      if (!show) panel.querySelectorAll("video").forEach(function (video) { video.pause(); });
+      panel.hidden = !show;
+    });
+  });
+});
+document.querySelectorAll("button.copy").forEach(function (button) {
+  button.addEventListener("click", function () {
+    var text = document.getElementById(button.getAttribute("data-copy")).textContent;
+    var done = function () { button.textContent = "Copied"; setTimeout(function () { button.textContent = "Copy"; }, 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, done);
+    else done();
+  });
+});
+</script>
+<script data-video-player>
+/* Video player for report pages. Inline it at the end of <body> (or <script src="video-player.js" defer>).
+   Every <video controls> becomes a player; add data-native to keep the browser's own controls.
+   An element with data-seek="7.5" (or "0:07.5") next to a video becomes a chapter: a mark on the timeline,
+   click to play from there, highlighted while that part plays. data-label overrides its timeline label.
+   The file is loaded into memory before playing: Drophere ignores Range requests, so the browser's own
+   streaming can't seek reliably. Keys when the player has focus: Space/K play, ←/→ one frame (Shift: 1 s),
+   < / > speed, [ / ] chapter, 0–9 jump to 0–90 %, F full screen. Hold a step button to keep stepping.
+   Portrait clips sit in a phone frame; landscape clips and data-frame="none" get a plain rounded frame.
+   The player is sized by its width (the video's class/style move to it); colours follow the page's
+   light/dark theme (prefers-color-scheme, or data-theme on <html>).
+   Every <img> outside a link and outside [data-no-zoom] opens in a viewer when clicked: fitted to the
+   screen, click or wheel or pinch to zoom, drag to pan, ←/→ through the page's images, Esc to close.
+   The caption is the image's figcaption, or its alt text. */
+(function () {
+  "use strict";
+
+  const SPEEDS = [0.25, 0.5, 1, 1.5, 2];
+  const ICON = {
+    play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>',
+    pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>',
+    full: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h5v2H7v3H5zM14 5h5v5h-2V7h-3zM5 14h2v3h3v2H5zM17 14h2v5h-5v-2h3z"/></svg>',
+    close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></svg>',
+    prev: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12z"/></svg>',
+    next: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.6 5.4 10 4l8 8-8 8-1.4-1.4 6.6-6.6z"/></svg>',
+    minus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11h14v2H5z"/></svg>',
+    plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>',
+  };
+  const DARK = "--vp-accent:#8f9bff;--vp-on-accent:#10121b;--vp-panel:#1c1f2a;--vp-ink:#eef0f6;--vp-muted:#9a9fb2;--vp-line:rgba(255,255,255,.1);--vp-rail:rgba(255,255,255,.16);--vp-mark:rgba(255,255,255,.7);--vp-hover:rgba(255,255,255,.08);--vp-shadow:0 12px 32px -14px rgba(0,0,0,.8);--vp-drop:0 26px 50px -20px rgba(0,0,0,.9)";
+  const CSS = `
+:where(.vp){--vp-accent:#4b5be0;--vp-on-accent:#fff;--vp-panel:#fff;--vp-ink:#1d2030;--vp-muted:#6b7084;--vp-line:rgba(29,32,48,.12);--vp-rail:rgba(29,32,48,.13);--vp-mark:rgba(29,32,48,.5);--vp-hover:rgba(29,32,48,.07);--vp-shadow:0 1px 2px rgba(20,22,40,.06),0 10px 26px -14px rgba(20,22,40,.3);--vp-drop:0 26px 50px -22px rgba(20,22,40,.55)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) :where(.vp){${DARK}}}
+:root[data-theme="dark"] :where(.vp){${DARK}}
+.vp.vp{position:relative;display:flex;flex-direction:column;gap:12px;overflow:visible;background:none;border-radius:22px;box-shadow:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+.vp:focus{outline:none}
+.vp:focus-visible{outline:2px solid var(--vp-accent);outline-offset:6px}
+.vp-device{position:relative;flex:1 1 auto;min-height:0;display:flex;margin:0 3px;padding:8px;border:2px solid transparent;border-radius:10.5%/6%;background:linear-gradient(#07080b,#07080b) padding-box,linear-gradient(140deg,#c3c7d1 0%,#454955 20%,#80858f 46%,#2b2e36 70%,#a7abb6 100%) border-box;box-shadow:0 0 0 1px rgba(0,0,0,.4),var(--vp-drop)}
+.vp-device::before,.vp-device::after{content:"";position:absolute;width:3px;border-radius:2px;background:linear-gradient(90deg,#4d515b,#b9bdc7 55%,#5d616b)}
+.vp-device::before{right:-6px;top:25%;height:9%}
+.vp-device::after{left:-6px;top:15%;height:14%}
+.vp-cam{position:absolute;top:1px;left:50%;width:6px;height:6px;margin-left:-3px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#4a5a85,#0b0d14 65%);pointer-events:none}
+.vp-stage{position:relative;flex:1 1 auto;min-width:0;min-height:0;display:flex;overflow:hidden;border-radius:8%/4.5%;background:#000;cursor:pointer;isolation:isolate}
+.vp.vp video{flex:1 1 auto;min-width:0;min-height:0;width:100%;height:auto;aspect-ratio:var(--vp-ar,9/16);max-width:none;max-height:none;margin:0;padding:0;border:0;border-radius:0;box-shadow:none;object-fit:contain;background:#000;display:block}
+.vp-plain .vp-device{margin:0;padding:0;border:1px solid var(--vp-line);border-radius:14px;background:#000;box-shadow:var(--vp-shadow)}
+.vp-plain .vp-device::before,.vp-plain .vp-device::after,.vp-plain .vp-cam{display:none}
+.vp-plain .vp-stage{border-radius:13px}
+.vp-big{position:absolute;left:50%;top:50%;width:64px;height:64px;margin:-32px 0 0 -32px;border-radius:50%;background:var(--vp-accent);box-shadow:0 0 0 7px color-mix(in srgb,var(--vp-accent) 30%,transparent),0 10px 28px rgba(0,0,0,.45);display:grid;place-items:center;pointer-events:none;transition:opacity .2s,transform .2s}
+.vp-big svg{width:28px;height:28px;fill:var(--vp-on-accent);margin-left:3px}
+.vp-playing .vp-big,.vp-started .vp-big{opacity:0;transform:scale(.85)}
+.vp-bar{flex:none;container-type:inline-size;margin:0 3px;padding:4px 10px 6px;border:1px solid var(--vp-line);border-radius:16px;background:var(--vp-panel);color:var(--vp-ink);box-shadow:var(--vp-shadow);font:600 12px/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.vp-plain .vp-bar{margin:0}
+.vp-track{position:relative;height:24px;cursor:pointer;touch-action:none}
+.vp-rail{position:absolute;left:0;right:0;top:10px;height:4px;border-radius:2px;background:var(--vp-rail);overflow:hidden;transition:height .12s,top .12s}
+.vp-track:hover .vp-rail{top:9px;height:6px}
+.vp-load,.vp-fill{position:absolute;left:0;top:0;bottom:0;width:0}
+.vp-load{background:var(--vp-rail)}
+.vp-fill{background:var(--vp-accent)}
+.vp-knob{position:absolute;top:5px;left:0;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:var(--vp-accent);box-shadow:0 0 0 3px var(--vp-panel),0 1px 4px 2px rgba(0,0,0,.22);pointer-events:none;transition:transform .12s}
+.vp-track:hover .vp-knob{transform:scale(1.15)}
+.vp-mark{position:absolute;top:7px;width:2px;height:10px;margin-left:-1px;border-radius:1px;background:var(--vp-mark);pointer-events:none}
+.vp-tip{position:absolute;bottom:28px;left:0;transform:translateX(-50%);max-width:100%;padding:6px 9px;border-radius:8px;background:#151824;color:#fff;box-shadow:0 6px 18px rgba(0,0,0,.3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;display:none}
+.vp-row{display:flex;align-items:center;gap:1px}
+.vp-row button{flex:none;display:grid;place-items:center;height:30px;min-width:28px;padding:0 4px;margin:0;border:0;border-radius:8px;background:none;color:inherit;font:inherit;cursor:pointer}
+.vp-row button:hover{background:var(--vp-hover)}
+.vp-row button:focus-visible{outline:2px solid var(--vp-accent);outline-offset:-2px}
+.vp-row svg{width:18px;height:18px;fill:currentColor}
+.vp-row .vp-play{width:32px;min-width:32px;height:32px;margin:0 3px;border-radius:50%;background:var(--vp-accent);color:var(--vp-on-accent);box-shadow:0 3px 10px -3px var(--vp-accent)}
+.vp-row .vp-play:hover{background:var(--vp-accent);filter:brightness(1.08)}
+.vp-row .vp-play:focus-visible{outline-offset:2px}
+.vp-row .vp-speed{min-width:34px;height:24px;margin:0 2px;border-radius:999px;box-shadow:inset 0 0 0 1px var(--vp-line);font-size:11px}
+.vp-time{flex:1 1 auto;min-width:0;text-align:center;font-variant-numeric:tabular-nums;font-weight:600;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vp-time span{font-weight:500;color:var(--vp-muted)}
+@container (max-width:309px){.vp-row .vp-sec{display:none}}
+@container (max-width:279px){.vp-time span{display:none}}
+@container (max-width:209px){.vp-row .vp-frame{display:none}}
+@container (max-width:159px){.vp-row .vp-speed{display:none}}
+.vp.vp:fullscreen{gap:0;border-radius:0;background:#000;${DARK}}
+.vp:fullscreen .vp-device{margin:0;padding:0;border:0;border-radius:0;background:#000;box-shadow:none}
+.vp:fullscreen .vp-device::before,.vp:fullscreen .vp-device::after,.vp:fullscreen .vp-cam{display:none}
+.vp:fullscreen .vp-stage{border-radius:0}
+.vp.vp:fullscreen video{aspect-ratio:auto}
+.vp:fullscreen .vp-bar{margin:0;border-width:1px 0 0;border-radius:0;box-shadow:none}
+[data-seek]{cursor:pointer;border-radius:8px;transition:background-color .15s,box-shadow .15s}
+[data-seek]:hover{background:color-mix(in srgb,currentColor 6%,transparent);box-shadow:0 0 0 6px color-mix(in srgb,currentColor 6%,transparent)}
+[data-seek].vp-on{background:color-mix(in srgb,currentColor 11%,transparent);box-shadow:0 0 0 6px color-mix(in srgb,currentColor 11%,transparent)}
+[data-seek]:focus-visible{outline:2px solid #6c7bf0;outline-offset:6px}
+img.iv-zoomable{cursor:zoom-in}
+img.iv-zoomable:focus-visible{outline:2px solid #6c7bf0;outline-offset:4px}
+.iv.iv{position:fixed;inset:0;z-index:2147483000;background:rgba(9,10,15,.96);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);color:#eef0f6;font:600 13px/1.2 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;opacity:0;transition:opacity .16s;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+.iv.iv-open{opacity:1}
+.iv-stage{position:absolute;inset:0;overflow:hidden;touch-action:none;cursor:zoom-out}
+.iv-stage img{position:absolute;left:0;top:0;max-width:none;max-height:none;margin:0;padding:0;border:0;border-radius:0;box-shadow:0 20px 60px rgba(0,0,0,.5);transform-origin:0 0;cursor:zoom-in;-webkit-user-drag:none}
+.iv-zoomed .iv-stage img{cursor:grab}
+.iv-dragging .iv-stage img{cursor:grabbing}
+.iv-animate .iv-stage img{transition:transform .22s ease}
+.iv-top{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:6px;padding:12px;pointer-events:none}
+.iv-top>*{pointer-events:auto}
+.iv-count{flex:1 1 auto;padding-left:6px;color:#9a9fb2;font-variant-numeric:tabular-nums}
+.iv button{display:grid;place-items:center;min-width:40px;height:40px;padding:0 10px;margin:0;border:0;border-radius:999px;background:rgba(255,255,255,.1);color:inherit;font:inherit;cursor:pointer}
+.iv button:hover{background:rgba(255,255,255,.18)}
+.iv button:focus-visible{outline:2px solid #8f9bff;outline-offset:2px}
+.iv [hidden]{display:none}
+.iv svg{width:20px;height:20px;fill:currentColor}
+.iv .iv-level{min-width:64px;font-variant-numeric:tabular-nums}
+.iv .iv-nav{position:absolute;top:50%;width:48px;height:48px;margin-top:-24px;padding:0}
+.iv .iv-prev{left:12px}
+.iv .iv-next{right:12px}
+@media (pointer:coarse){.iv .iv-nav{display:none}}
+.iv-caption{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);width:max-content;max-width:min(720px,calc(100% - 32px));padding:8px 14px;border-radius:12px;background:rgba(0,0,0,.6);text-align:center;font-weight:500;line-height:1.35;pointer-events:none}
+.iv-caption:empty{display:none}
+`;
+
+  function format(seconds, decimals) {
+    if (!isFinite(seconds) || seconds < 0) return "–:––";
+    const scale = Math.pow(10, decimals);
+    const units = Math.floor(seconds * scale + 1e-6);
+    const minutes = Math.floor(units / (60 * scale));
+    const rest = (units % (60 * scale)) / scale;
+    return minutes + ":" + (rest < 10 ? "0" : "") + rest.toFixed(decimals);
+  }
+
+  function parseTime(text) {
+    let seconds = 0;
+    for (const part of String(text).split(":")) seconds = seconds * 60 + parseFloat(part);
+    return seconds;
+  }
+
+  function node(tag, className, html) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (html) element.innerHTML = html;
+    return element;
+  }
+
+  function button(className, label, html) {
+    const element = node("button", className, html);
+    element.type = "button";
+    element.title = label;
+    element.setAttribute("aria-label", label);
+    return element;
+  }
+
+  function makePlayer(video) {
+    const fps = parseFloat(video.getAttribute("data-fps")) || 30;
+    const sourceElement = video.querySelector("source");
+    const url = video.currentSrc || video.src || (sourceElement ? sourceElement.src : "");
+    const lazy = video.getAttribute("preload") === "none";
+    const chapters = [];
+    let activeChapter = null;
+    let loading = false;
+    let loaded = false;
+    let wantPlay = false;
+    let pendingSeek = -1;
+    let scrubbing = false;
+    let resumeAfterScrub = false;
+    let shownPlaying = null;
+    let frameRequest = 0;
+
+    const wrap = node("div", ("vp " + video.className).trim());
+    const device = node("div", "vp-device");
+    const camera = node("span", "vp-cam");
+    const stage = node("div", "vp-stage");
+    const big = node("div", "vp-big", ICON.play);
+    const bar = node("div", "vp-bar");
+    const track = node("div", "vp-track");
+    const rail = node("div", "vp-rail");
+    const loadFill = node("div", "vp-load");
+    const playFill = node("div", "vp-fill");
+    const knob = node("div", "vp-knob");
+    const tip = node("div", "vp-tip");
+    const row = node("div", "vp-row");
+    const back = button("vp-sec", "Back 1 s, hold to repeat (Shift+←)", "−1s");
+    const prevFrame = button("vp-frame", "Previous frame, hold to keep stepping (←)", "−1f");
+    const play = button("vp-play", "Play / pause (Space)", ICON.play);
+    const nextFrame = button("vp-frame", "Next frame, hold to keep stepping (→)", "+1f");
+    const forward = button("vp-sec", "Forward 1 s, hold to repeat (Shift+→)", "+1s");
+    const time = node("span", "vp-time");
+    const timeNow = node("b");
+    const timeTotal = node("span");
+    const speed = button("vp-speed", "Speed (< >)", "1×");
+    speed.setAttribute("aria-label", "Speed 1×");
+    const full = button("vp-full", "Full screen (F)", ICON.full);
+
+    if (video.getAttribute("style")) wrap.setAttribute("style", video.getAttribute("style"));
+    if (video.getAttribute("data-frame") === "none") wrap.classList.add("vp-plain");
+    video.removeAttribute("style");
+    video.className = "";
+    video.removeAttribute("controls");
+    video.removeAttribute("src");
+    video.querySelectorAll("source").forEach((source) => source.remove());
+    video.load();
+
+    video.parentNode.insertBefore(wrap, video);
+    stage.append(video, big);
+    device.append(stage, camera);
+    rail.append(loadFill, playFill);
+    track.append(rail, knob, tip);
+    track.setAttribute("role", "slider");
+    track.setAttribute("aria-label", "Seek");
+    time.append(timeNow, timeTotal);
+    row.append(back, prevFrame, play, nextFrame, forward, time, speed, full);
+    bar.append(track, row);
+    wrap.append(device, bar);
+    wrap.tabIndex = 0;
+
+    function useShape(width, height) {
+      if (!width || !height) return;
+      wrap.style.setProperty("--vp-ar", width + " / " + height);
+      if (width > height) wrap.classList.add("vp-plain");
+    }
+
+    if (video.poster) {
+      const posterImage = new Image();
+      posterImage.onload = () => useShape(posterImage.naturalWidth, posterImage.naturalHeight);
+      posterImage.src = video.poster;
+    }
+
+    function duration() {
+      return loaded && isFinite(video.duration) ? video.duration : 0;
+    }
+
+    function safePlay() {
+      const promise = video.play();
+      if (promise && promise.catch) promise.catch(() => {});
+    }
+
+    function useSource(src) {
+      loaded = true;
+      loadFill.style.width = "100%";
+      video.preload = "auto";
+      video.src = src;
+      if (wantPlay) safePlay();
+      render();
+    }
+
+    function startLoading() {
+      if (loading || !url) return;
+      loading = true;
+      const request = new XMLHttpRequest();
+      request.open("GET", url);
+      request.responseType = "blob";
+      request.onprogress = (event) => {
+        if (event.lengthComputable) loadFill.style.width = (100 * event.loaded) / event.total + "%";
+      };
+      request.onload = () => useSource(request.status === 200 ? URL.createObjectURL(request.response) : url);
+      request.onerror = () => useSource(url);
+      request.send();
+      render();
+    }
+
+    function togglePlay() {
+      if (!loaded) {
+        wantPlay = !wantPlay;
+        startLoading();
+        render();
+        return;
+      }
+      if (video.paused || video.ended) safePlay();
+      else video.pause();
+    }
+
+    function seek(seconds) {
+      const total = duration();
+      if (!total) return;
+      video.currentTime = Math.max(0, Math.min(total, seconds));
+      render();
+    }
+
+    function stepFrame(direction) {
+      video.pause();
+      const frame = Math.floor(video.currentTime * fps + 1e-3) + direction;
+      seek((frame + 0.5) / fps);
+    }
+
+    function changeSpeed(direction) {
+      let index = SPEEDS.indexOf(video.playbackRate);
+      if (index < 0) index = SPEEDS.indexOf(1);
+      if (direction === 0) index = (index + 1) % SPEEDS.length;
+      else index = Math.max(0, Math.min(SPEEDS.length - 1, index + direction));
+      video.defaultPlaybackRate = SPEEDS[index];
+      video.playbackRate = SPEEDS[index];
+      speed.textContent = SPEEDS[index] + "×";
+      speed.setAttribute("aria-label", "Speed " + SPEEDS[index] + "×");
+    }
+
+    function jumpChapter(direction) {
+      const now = video.currentTime;
+      let target = direction < 0 ? 0 : -1;
+      for (const chapter of chapters) {
+        if (direction > 0 && chapter.seconds > now + 0.1) {
+          target = chapter.seconds;
+          break;
+        }
+        if (direction < 0 && chapter.seconds < now - 1) target = chapter.seconds;
+      }
+      if (target >= 0) seek(target);
+    }
+
+    function playFrom(seconds) {
+      wrap.focus({ preventScroll: true });
+      if (!loaded) {
+        pendingSeek = seconds;
+        wantPlay = true;
+        startLoading();
+        render();
+        return;
+      }
+      seek(seconds);
+      safePlay();
+    }
+
+    function toggleFullscreen() {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      } else if (wrap.requestFullscreen) {
+        wrap.requestFullscreen();
+      } else if (wrap.webkitRequestFullscreen) {
+        wrap.webkitRequestFullscreen();
+      } else if (video.webkitEnterFullscreen) {
+        video.webkitEnterFullscreen();
+      }
+    }
+
+    function chapterAt(seconds) {
+      let found = null;
+      for (const chapter of chapters) {
+        if (chapter.seconds <= seconds + 0.05) found = chapter;
+      }
+      return found;
+    }
+
+    function render() {
+      const total = duration();
+      const now = loaded ? video.currentTime : 0;
+      const percent = total ? Math.min(100, (100 * now) / total) : 0;
+      playFill.style.width = percent + "%";
+      knob.style.left = percent + "%";
+      track.setAttribute("aria-valuetext", format(now, 2));
+      if (loading && !loaded && wantPlay) {
+        timeNow.textContent = "Loading…";
+        timeTotal.textContent = "";
+      } else {
+        timeNow.textContent = format(now, 2);
+        timeTotal.textContent = " / " + format(total || NaN, 0);
+      }
+
+      const playing = loaded ? !video.paused : wantPlay;
+      if (playing !== shownPlaying) {
+        shownPlaying = playing;
+        wrap.classList.toggle("vp-playing", playing);
+        play.innerHTML = playing ? ICON.pause : ICON.play;
+      }
+
+      const chapter = loaded ? chapterAt(now) : null;
+      if (chapter !== activeChapter) {
+        if (activeChapter) activeChapter.element.classList.remove("vp-on");
+        if (chapter) chapter.element.classList.add("vp-on");
+        activeChapter = chapter;
+      }
+    }
+
+    function drawMarks() {
+      const total = duration();
+      track.querySelectorAll(".vp-mark").forEach((mark) => mark.remove());
+      if (!total) return;
+      for (const chapter of chapters) {
+        if (chapter.seconds > total) continue;
+        const mark = node("div", "vp-mark");
+        mark.style.left = (100 * chapter.seconds) / total + "%";
+        track.insertBefore(mark, knob);
+      }
+    }
+
+    function fractionAt(clientX) {
+      const box = track.getBoundingClientRect();
+      return Math.max(0, Math.min(1, (clientX - box.left) / box.width));
+    }
+
+    function showTip(clientX) {
+      const total = duration();
+      if (!total) return;
+      const fraction = fractionAt(clientX);
+      const chapter = chapterAt(fraction * total);
+      tip.textContent = format(fraction * total, 1) + (chapter ? " · " + chapter.label : "");
+      tip.style.display = "block";
+      const width = track.offsetWidth;
+      const half = tip.offsetWidth / 2;
+      tip.style.left = Math.max(half, Math.min(width - half, fraction * width)) + "px";
+    }
+
+    function endScrub(event) {
+      if (!scrubbing) return;
+      scrubbing = false;
+      if (event.pointerType !== "mouse") tip.style.display = "none";
+      if (resumeAfterScrub) safePlay();
+    }
+
+    function loop() {
+      render();
+      frameRequest = video.paused ? 0 : requestAnimationFrame(loop);
+    }
+
+    video.addEventListener("play", () => {
+      if (!frameRequest) frameRequest = requestAnimationFrame(loop);
+    });
+    ["pause", "seeked", "timeupdate", "ended"].forEach((type) => video.addEventListener(type, render));
+    ["play", "seeking"].forEach((type) => video.addEventListener(type, () => wrap.classList.add("vp-started")));
+    video.addEventListener("loadedmetadata", () => {
+      useShape(video.videoWidth, video.videoHeight);
+      if (pendingSeek >= 0) video.currentTime = pendingSeek;
+      pendingSeek = -1;
+      drawMarks();
+      render();
+    });
+
+    function holdToRepeat(element, action, everyMs) {
+      let delay = 0;
+      let timer = 0;
+      function stop() {
+        clearTimeout(delay);
+        clearInterval(timer);
+      }
+      element.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        action();
+        delay = setTimeout(() => {
+          timer = setInterval(action, everyMs);
+        }, 400);
+      });
+      ["pointerup", "pointerleave", "pointercancel"].forEach((type) => element.addEventListener(type, stop));
+      element.addEventListener("click", (event) => {
+        if (event.detail === 0) action();
+      });
+      element.addEventListener("contextmenu", (event) => event.preventDefault());
+    }
+
+    stage.addEventListener("click", togglePlay);
+    play.addEventListener("click", togglePlay);
+    holdToRepeat(back, () => seek(video.currentTime - 1), 250);
+    holdToRepeat(forward, () => seek(video.currentTime + 1), 250);
+    holdToRepeat(prevFrame, () => stepFrame(-1), 80);
+    holdToRepeat(nextFrame, () => stepFrame(1), 80);
+    speed.addEventListener("click", () => changeSpeed(0));
+    full.addEventListener("click", toggleFullscreen);
+    wrap.addEventListener("pointerdown", () => wrap.focus({ preventScroll: true }));
+
+    track.addEventListener("pointerdown", (event) => {
+      if (!loaded) {
+        startLoading();
+        return;
+      }
+      scrubbing = true;
+      resumeAfterScrub = !video.paused;
+      video.pause();
+      track.setPointerCapture(event.pointerId);
+      seek(fractionAt(event.clientX) * duration());
+      showTip(event.clientX);
+      event.preventDefault();
+    });
+    track.addEventListener("pointermove", (event) => {
+      if (event.pointerType === "mouse" || scrubbing) showTip(event.clientX);
+      if (scrubbing) seek(fractionAt(event.clientX) * duration());
+    });
+    track.addEventListener("pointerup", endScrub);
+    track.addEventListener("pointercancel", endScrub);
+    track.addEventListener("pointerleave", () => {
+      if (!scrubbing) tip.style.display = "none";
+    });
+
+    wrap.addEventListener("keydown", (event) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const key = event.key;
+      if (key === " " || key === "k") togglePlay();
+      else if (key === "ArrowLeft" && event.shiftKey) seek(video.currentTime - 1);
+      else if (key === "ArrowRight" && event.shiftKey) seek(video.currentTime + 1);
+      else if (key === "ArrowLeft") stepFrame(-1);
+      else if (key === "ArrowRight") stepFrame(1);
+      else if (key === ",") stepFrame(-1);
+      else if (key === ".") stepFrame(1);
+      else if (key === "<") changeSpeed(-1);
+      else if (key === ">") changeSpeed(1);
+      else if (key === "[") jumpChapter(-1);
+      else if (key === "]") jumpChapter(1);
+      else if (key === "Home") seek(0);
+      else if (key === "End") seek(duration());
+      else if (key === "f") toggleFullscreen();
+      else if (key.length === 1 && key >= "0" && key <= "9") seek((duration() * Number(key)) / 10);
+      else return;
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    if (!lazy && "IntersectionObserver" in window) {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (!entries.some((entry) => entry.isIntersecting)) return;
+          observer.disconnect();
+          startLoading();
+        },
+        { rootMargin: "300px" },
+      );
+      observer.observe(wrap);
+    } else if (!lazy) {
+      startLoading();
+    }
+    render();
+
+    return {
+      wrap,
+      playFrom,
+      addChapter(seconds, element, label) {
+        chapters.push({ seconds, element, label });
+        chapters.sort((a, b) => a.seconds - b.seconds);
+        drawMarks();
+        render();
+      },
+    };
+  }
+
+  function attachChapters(players) {
+    document.querySelectorAll("[data-seek]").forEach((element) => {
+      let owner = element.parentElement;
+      while (owner && !owner.querySelector(".vp")) owner = owner.parentElement;
+      if (!owner) return;
+      const player = players.get(owner.querySelector(".vp"));
+      const seconds = parseTime(element.getAttribute("data-seek"));
+      if (!player || !isFinite(seconds)) return;
+      const heading = element.querySelector("b, strong") || element;
+      const label = element.getAttribute("data-label") || heading.textContent.trim();
+      player.addChapter(seconds, element, label);
+      if (element.tabIndex < 0) element.tabIndex = 0;
+      element.title = "Play from " + format(seconds, 1);
+      element.addEventListener("click", (event) => {
+        if (event.target.closest("a")) return;
+        player.playFrom(seconds);
+      });
+      element.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        player.playFrom(seconds);
+      });
+    });
+  }
+
+  function captionOf(image) {
+    const figure = image.closest("figure");
+    const figcaption = figure ? figure.querySelector("figcaption") : null;
+    return (figcaption && figcaption.textContent.trim()) || image.alt || "";
+  }
+
+  function makeViewer(images) {
+    const SIDE = 16;
+    const TOP = 64;
+    const BOTTOM = 64;
+    const overlay = node("div", "iv");
+    const stage = node("div", "iv-stage");
+    const picture = node("img");
+    const bar = node("div", "iv-top");
+    const count = node("span", "iv-count");
+    const zoomOut = button("iv-out", "Zoom out (−)", ICON.minus);
+    const level = button("iv-level", "Fit to the screen (0)", "100%");
+    const zoomIn = button("iv-in", "Zoom in (+)", ICON.plus);
+    const close = button("iv-close", "Close (Esc)", ICON.close);
+    const prev = button("iv-nav iv-prev", "Previous image (←)", ICON.prev);
+    const next = button("iv-nav iv-next", "Next image (→)", ICON.next);
+    const caption = node("div", "iv-caption");
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", "Image viewer");
+    picture.draggable = false;
+    stage.append(picture);
+    bar.append(count, zoomOut, level, zoomIn, close);
+    overlay.append(stage, bar, prev, next, caption);
+
+    const pointers = new Map();
+    let gesture = null;
+    let index = 0;
+    let x = 0;
+    let y = 0;
+    let scale = 1;
+    let fit = 1;
+    let opener = null;
+    let pageOverflow = "";
+
+    function zoomed() {
+      return scale > fit * 1.01;
+    }
+
+    function maxScale() {
+      return Math.max(4, fit * 4);
+    }
+
+    // Centred while it fits the room between the bars, then the whole screen; panned past that.
+    function place(length, start, room, full, position) {
+      if (length <= room) return start + (room - length) / 2;
+      if (length <= full) return (full - length) / 2;
+      return Math.min(0, Math.max(full - length, position));
+    }
+
+    function apply(animate) {
+      const width = stage.clientWidth;
+      const height = stage.clientHeight;
+      x = place(picture.naturalWidth * scale, SIDE, width - 2 * SIDE, width, x);
+      y = place(picture.naturalHeight * scale, TOP, height - TOP - BOTTOM, height, y);
+      overlay.classList.toggle("iv-animate", Boolean(animate));
+      overlay.classList.toggle("iv-zoomed", zoomed());
+      picture.style.transform = "translate(" + x + "px," + y + "px) scale(" + scale + ")";
+      level.textContent = Math.round(scale * 100) + "%";
+    }
+
+    function zoomTo(target, px, py, animate) {
+      const wanted = Math.min(maxScale(), Math.max(fit, target));
+      x = px - ((px - x) * wanted) / scale;
+      y = py - ((py - y) * wanted) / scale;
+      scale = wanted;
+      apply(animate);
+    }
+
+    function zoomBy(factor) {
+      zoomTo(scale * factor, stage.clientWidth / 2, stage.clientHeight / 2, true);
+    }
+
+    function fitToScreen(animate) {
+      const width = picture.naturalWidth;
+      const height = picture.naturalHeight;
+      if (!width || !height) return;
+      picture.style.width = width + "px";
+      picture.style.height = height + "px";
+      const room = Math.min((stage.clientWidth - 2 * SIDE) / width, (stage.clientHeight - TOP - BOTTOM) / height);
+      fit = Math.max(0.05, Math.min(1, room));
+      scale = fit;
+      picture.style.visibility = "";
+      apply(animate);
+    }
+
+    function show(target) {
+      index = (target + images.length) % images.length;
+      const source = images[index];
+      count.textContent = images.length > 1 ? index + 1 + " / " + images.length : "";
+      caption.textContent = captionOf(source);
+      picture.alt = source.alt || "";
+      picture.style.visibility = "hidden";
+      picture.onload = () => fitToScreen(false);
+      picture.src = source.currentSrc || source.src;
+      if (picture.complete) fitToScreen(false);
+    }
+
+    function open(target) {
+      opener = document.activeElement;
+      pageOverflow = document.documentElement.style.overflow;
+      document.documentElement.style.overflow = "hidden";
+      document.body.append(overlay);
+      prev.hidden = images.length < 2;
+      next.hidden = images.length < 2;
+      show(target);
+      requestAnimationFrame(() => overlay.classList.add("iv-open"));
+      close.focus({ preventScroll: true });
+    }
+
+    function shut() {
+      overlay.classList.remove("iv-open");
+      overlay.remove();
+      pointers.clear();
+      gesture = null;
+      document.documentElement.style.overflow = pageOverflow;
+      if (opener && opener.focus) opener.focus({ preventScroll: true });
+    }
+
+    function local(event) {
+      const box = stage.getBoundingClientRect();
+      return [event.clientX - box.left, event.clientY - box.top];
+    }
+
+    function onPicture(px, py) {
+      return px >= x && py >= y && px <= x + picture.naturalWidth * scale && py <= y + picture.naturalHeight * scale;
+    }
+
+    function pinchState() {
+      const [a, b] = Array.from(pointers.values());
+      return { distance: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] };
+    }
+
+    stage.addEventListener("pointerdown", (event) => {
+      if (event.button > 0) return;
+      stage.setPointerCapture(event.pointerId);
+      const point = local(event);
+      pointers.set(event.pointerId, point);
+      if (pointers.size === 1) {
+        gesture = { kind: "pan", start: point, last: point, moved: false };
+      } else if (pointers.size === 2) {
+        const pinch = pinchState();
+        gesture = { kind: "pinch", distance: pinch.distance, mid: pinch.mid, scale };
+      }
+      event.preventDefault();
+    });
+
+    stage.addEventListener("pointermove", (event) => {
+      if (!gesture || !pointers.has(event.pointerId)) return;
+      const point = local(event);
+      pointers.set(event.pointerId, point);
+      if (gesture.kind === "pinch") {
+        if (pointers.size < 2) return;
+        const pinch = pinchState();
+        x += pinch.mid[0] - gesture.mid[0];
+        y += pinch.mid[1] - gesture.mid[1];
+        gesture.mid = pinch.mid;
+        zoomTo((gesture.scale * pinch.distance) / gesture.distance, pinch.mid[0], pinch.mid[1], false);
+        return;
+      }
+      if (Math.abs(point[0] - gesture.start[0]) + Math.abs(point[1] - gesture.start[1]) > 6) gesture.moved = true;
+      if (zoomed()) {
+        x += point[0] - gesture.last[0];
+        y += point[1] - gesture.last[1];
+        overlay.classList.add("iv-dragging");
+        apply(false);
+      }
+      gesture.last = point;
+    });
+
+    function endPointer(event) {
+      if (!pointers.delete(event.pointerId)) return;
+      overlay.classList.remove("iv-dragging");
+      if (!gesture || gesture.kind === "pinch") {
+        if (!pointers.size) gesture = null;
+        return;
+      }
+      const point = local(event);
+      const dx = point[0] - gesture.start[0];
+      const dy = point[1] - gesture.start[1];
+      const tapped = !gesture.moved && event.type === "pointerup";
+      gesture = null;
+      if (tapped && !onPicture(point[0], point[1])) {
+        shut();
+      } else if (tapped) {
+        zoomTo(zoomed() ? fit : Math.max(fit * 2.5, 1), point[0], point[1], true);
+      } else if (!zoomed() && event.pointerType !== "mouse" && images.length > 1 && Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy)) {
+        show(index + (dx < 0 ? 1 : -1));
+      }
+    }
+
+    stage.addEventListener("pointerup", endPointer);
+    stage.addEventListener("pointercancel", endPointer);
+    stage.addEventListener(
+      "wheel",
+      (event) => {
+        event.preventDefault();
+        const point = local(event);
+        const delta = Math.max(-300, Math.min(300, event.deltaMode === 1 ? event.deltaY * 33 : event.deltaY));
+        zoomTo(scale * Math.exp(-delta * (event.ctrlKey ? 0.01 : 0.002)), point[0], point[1], false);
+      },
+      { passive: false },
+    );
+
+    zoomIn.addEventListener("click", () => zoomBy(1.5));
+    zoomOut.addEventListener("click", () => zoomBy(1 / 1.5));
+    level.addEventListener("click", () => fitToScreen(true));
+    close.addEventListener("click", shut);
+    prev.addEventListener("click", () => show(index - 1));
+    next.addEventListener("click", () => show(index + 1));
+    window.addEventListener("resize", () => {
+      if (overlay.isConnected) fitToScreen(false);
+    });
+
+    overlay.addEventListener("keydown", (event) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const key = event.key;
+      if (key === "Escape") shut();
+      else if (key === "ArrowLeft" && images.length > 1) show(index - 1);
+      else if (key === "ArrowRight" && images.length > 1) show(index + 1);
+      else if (key === "+" || key === "=") zoomBy(1.5);
+      else if (key === "-" || key === "_") zoomBy(1 / 1.5);
+      else if (key === "0") fitToScreen(true);
+      else if (key === "Tab") {
+        const items = Array.from(overlay.querySelectorAll("button:not([hidden])"));
+        const at = items.indexOf(document.activeElement);
+        items[(at + (event.shiftKey ? -1 : 1) + items.length) % items.length].focus();
+      } else return;
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    return { open };
+  }
+
+  function attachImages() {
+    const images = Array.from(document.querySelectorAll("img")).filter(
+      (image) => !image.closest("a, .vp, .iv, [data-no-zoom]"),
+    );
+    if (!images.length) return;
+    const viewer = makeViewer(images);
+    images.forEach((image, position) => {
+      image.classList.add("iv-zoomable");
+      if (image.tabIndex < 0) image.tabIndex = 0;
+      if (!image.title) image.title = "Open larger";
+      image.addEventListener("click", () => viewer.open(position));
+      image.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        viewer.open(position);
+      });
+    });
+  }
+
+  function init() {
+    if (!document.getElementById("vp-css")) {
+      const style = node("style");
+      style.id = "vp-css";
+      style.textContent = CSS;
+      document.head.appendChild(style);
+    }
+    const players = new Map();
+    document.querySelectorAll("video[controls]:not([data-native])").forEach((video) => {
+      if (video.closest(".vp")) return;
+      const player = makePlayer(video);
+      players.set(player.wrap, player);
+    });
+    attachChapters(players);
+    attachImages();
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
+</script>
+</body>
+</html>
