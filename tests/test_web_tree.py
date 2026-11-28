@@ -68,6 +68,21 @@ def test_web_tree_excludes_offscreen_nodes_and_clips_partial_nodes() -> None:
     assert tree.elements[0].bounds == (0, 20, 100, 70)
 
 
+def test_web_tree_reports_single_axis_scroll_containers_by_their_frame_id() -> None:
+    tree = web_tree.normalize(
+        _snapshot(
+            {"tag": "button", "text": "Above", "bounds": [0, -80, 100, -20]},
+            {"tag": "pre", "bounds": [0, 20, 300, 80], "scrollable": True, "scroll_axis": "x"},
+            {"tag": "ul", "bounds": [0, 100, 300, 300], "scrollable": True, "scroll_axis": "y"},
+            {"tag": "div", "bounds": [0, 320, 300, 600], "scrollable": True, "scroll_axis": None},
+        ),
+        (360, 640),
+    )
+
+    assert [element.type for element in tree.elements] == ["Pre", "Ul", "Div"]
+    assert tree.scroll_axis == {0: "x", 1: "y"}, "both axes is not an entry; ids skip dropped nodes"
+
+
 @pytest.mark.parametrize(
     ("by", "query", "expected"),
     [

@@ -25,6 +25,13 @@ notes, so you can check for a newer version — and read what changed — withou
   with no `meta.annotated_image`. The marked screenshot is now written on an unchanged screen
   too, on every platform. A later `analyze` without `--annotate` no longer repeats the path of an
   earlier call's annotated screenshot.
+- On the web, an up or down `scroll-to`, `scroll` or `swipe` was aimed at any block on screen
+  that scrolls sideways only, such as a `<pre>` with lines wider than the viewport. The page
+  moved a few pixels per call, and `scroll-to`, `scroll` and `swipe --verify` failed with
+  `movement-unverified ... evidence=container-unverified`. Such a block is no longer a target for
+  a vertical scroll, which now moves the page; a sideways swipe still scrolls the block.
+  Platform adapters report the axis through the optional `NormalizedTree.scroll_axis`; Android
+  and iOS report none and behave as before.
 
 ## [0.49.0] - 2026-11-27
 

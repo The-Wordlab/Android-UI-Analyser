@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, overload
 
@@ -53,6 +53,10 @@ class NormalizedTree:
     elements: list[Element]
     app_id: str | None = None
     surface_id: str | None = None
+    # Scroll containers that move along one axis only: element id -> "x" or "y", with ids
+    # from this same frame. A platform whose tree has a single `scrollable` flag leaves it
+    # empty, and every scroll container then counts for both axes.
+    scroll_axis: Mapping[int | str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

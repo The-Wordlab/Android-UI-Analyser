@@ -229,6 +229,12 @@ or virtualized content turnover. A flat tree without row ownership returns `move
 including for `to_end`; it cannot establish that the list reached an end. Preserve real ownership
 from the native tree rather than inventing parents from overlapping bounds.
 
+`NormalizedTree.scroll_axis` is optional. When the native tree says a scroll container moves along
+one axis only, map that element's ID from the same normalized frame to `"x"` or `"y"`. AUA then
+never aims a scroll along the other axis at it; with no other candidate the scroll goes to the
+screen. Leave the map empty when the platform reports a single scrollable flag: every scroll
+container then counts for both axes.
+
 ## Capability scopes
 
 Complete structural specifications live in `platforms/contracts.py` and

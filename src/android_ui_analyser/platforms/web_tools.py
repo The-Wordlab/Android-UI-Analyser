@@ -242,8 +242,9 @@ _DOM_SNAPSHOT_SCRIPT = r"""
       element.getAttribute('data-test-id') || element.getAttribute('data-test') || element.id || '');
     const overflowY = style.overflowY;
     const overflowX = style.overflowX;
-    const scrollable = ((overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight) ||
-      ((overflowX === 'auto' || overflowX === 'scroll') && element.scrollWidth > element.clientWidth);
+    const scrollsY = (overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight;
+    const scrollsX = (overflowX === 'auto' || overflowX === 'scroll') && element.scrollWidth > element.clientWidth;
+    const scrollable = scrollsY || scrollsX;
     // `cursor` is inherited: only the element the pointer starts on is the control, not the
     // icon and label inside it that show the same cursor.
     const parent = parentOf(element);
@@ -269,6 +270,7 @@ _DOM_SNAPSHOT_SCRIPT = r"""
       enabled: !element.disabled && element.getAttribute('aria-disabled') !== 'true',
       focused: document.activeElement === element, checkable: checkable ? true : null,
       checked, selected, scrollable: scrollable ? true : null,
+      scroll_axis: scrollsX === scrollsY ? null : (scrollsX ? 'x' : 'y'),
       password: tag === 'input' ? inputType === 'password' : null,
     });
   }

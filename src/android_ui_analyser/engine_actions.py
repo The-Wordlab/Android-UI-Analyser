@@ -1740,13 +1740,8 @@ def _dump(self: Engine) -> str:
     return self.platform.dump_tree(runtime)
 
 
-def _scroll_elements(self: Engine, raw_tree: str = "") -> list[Element]:
-    """Normalize one native hierarchy before shared scroll geometry inspects it."""
-
-    return _scroll_tree(self, raw_tree).elements
-
-
 def _scroll_tree(self: Engine, raw_tree: str = "") -> NormalizedTree:
+    """Normalize one native hierarchy before shared scroll geometry inspects it."""
     runtime = self.platform.runtime_capability("ui.tree", self.device)
     size = runtime.window_size()
     return self.platform.normalize_tree(
@@ -1763,6 +1758,7 @@ def _scroll_box(
     from_id: int | None = None,
     selector: dict[str, Any] | None = None,
     raw_tree: str = "",
+    direction: str | None = None,
 ) -> tuple[Box, bool]:
     """``(box, is_real_container)`` — where a directional swipe should actually happen.
 
@@ -1770,11 +1766,20 @@ def _scroll_box(
         list occupies a sub-rectangle (a sheet, a tab body, a pane under a fixed header) the
         gesture lands outside the scrollable and gets thrown away. So aim at the scrollable
         container: the one under the anchor element when given, else the biggest on screen.
+
+        A container the platform reports as moving along the other axis only is not a
+        candidate for *direction*: a sideways strip must not catch a scroll down the page.
+        A container with no reported axis can move either way.
         """
     device = self.device
     w, h = device.window_size()
     screen: Box = (0, 0, w, h)
-    boxes = scrollable_boxes(self._scroll_elements(raw_tree), (w, h))
+    tree = _scroll_tree(self, raw_tree)
+    candidates = tree.elements
+    if direction is not None:
+        axis = "x" if direction.lower() in ("left", "right") else "y"
+        candidates = [el for el in candidates if tree.scroll_axis.get(el.id, axis) == axis]
+    boxes = scrollable_boxes(candidates, (w, h))
     if not boxes:
         return screen, False
     anchor = None
@@ -1911,7 +1916,7 @@ def swipe(
             "swipe needs a direction or --coords", hint="e.g. `aua swipe-and-analyze up`"
         )
     d = direction.lower()
-    box, real = self._scroll_box(from_id=from_id, selector=selector)
+    box, real = self._scroll_box(from_id=from_id, selector=selector, direction=d)
     x1, y1, x2, y2 = self._swipe_path(box, d, percent)
     step = self._step("swipe", arg=d)
     if not verify:
@@ -1991,7 +1996,7 @@ def scroll(
     if d not in ("up", "down", "left", "right"):
         raise UsageError(f"unknown scroll direction '{direction}'", hint="up|down|left|right")
     limit = max_steps if (to_end or to_start) else max(1, pages)
-    box, real = self._scroll_box(from_id=from_id, selector=selector)
+    box, real = self._scroll_box(from_id=from_id, selector=selector, direction=d)
     step = self._step("scroll", arg=d)
     travelled = 0
     steps = 0
@@ -2105,7 +2110,7 @@ def scroll_to(
             observe,
             with_image,
         )
-    box, real = self._scroll_box()
+    box, real = self._scroll_box(direction=direction)
     travelled = 0
     steps = 0
     evidence: str | None = None

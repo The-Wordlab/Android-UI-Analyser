@@ -171,15 +171,21 @@ def normalize(
         )
 
     elements: list[Element] = []
-    for new_id, (_source_index, element, parent_source) in enumerate(collected):
+    scroll_axis: dict[int | str, str] = {}
+    for new_id, (source_index, element, parent_source) in enumerate(collected):
         parent_slot = source_to_slot.get(parent_source) if parent_source is not None else None
         elements.append(element.model_copy(update={"id": new_id, "parent": parent_slot}))
+        axis = payload["nodes"][source_index].get("scroll_axis")
+        if axis in ("x", "y"):
+            scroll_axis[new_id] = axis
     elements = attach_stable_keys(elements)
     url = _text(payload.get("url"))
     current = app_id(url)
     if current and current.casefold() in ignored:
         current = None
-    return NormalizedTree(elements=elements, app_id=current, surface_id=surface_id(url))
+    return NormalizedTree(
+        elements=elements, app_id=current, surface_id=surface_id(url), scroll_axis=scroll_axis
+    )
 
 
 def find_bounds(

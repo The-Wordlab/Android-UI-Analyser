@@ -2515,7 +2515,6 @@ class Engine:
     _typed_text_landed = engine_actions._typed_text_landed
     clear = engine_actions.clear
     _dump = engine_actions._dump
-    _scroll_elements = engine_actions._scroll_elements
     _scroll_box = engine_actions._scroll_box
     _swipe_path = engine_actions._swipe_path
     _settle_after_swipe = engine_actions._settle_after_swipe

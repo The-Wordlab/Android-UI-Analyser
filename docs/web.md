@@ -291,6 +291,9 @@ features are not required, so the core contract also works with Firefox and WebK
   produces the same stable `rid:…` identities used on Android and iOS.
 - Visible text, form values/placeholders, associated labels, `aria-label`, roles, enabled/focused,
   checked/selected, password, and scrollable state map into the canonical element schema.
+- A container that overflows along one axis only is a scroll target for that axis only. A wide
+  `<pre>` or table that scrolls sideways does not catch a `scroll`, `scroll-to` or `swipe` going
+  up or down the page; a sideways swipe still scrolls it.
 - Open shadow roots and iframe documents are traversed. Frame elements are reported with their
   page-viewport bounds, and `browser pages` reports the frame URL/name alongside each tab.
 - Screenshots use the browser viewport at device scale factor 1, so DOM bounds and screenshot
