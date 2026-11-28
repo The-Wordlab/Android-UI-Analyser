@@ -16,6 +16,8 @@ notes, so you can check for a newer version — and read what changed — withou
 - AUA is listed in the official MCP Registry as `io.github.The-Wordlab/aua`, so MCP clients and
   directories that read the registry can find it and start it with `uvx aua mcp`. Every release
   from this one on is listed by the release workflow.
+- `llms-install.md` gives an AI agent the steps to set AUA up as an MCP server: what must be on
+  the computer, the client configuration, and how to check that it works.
 
 ### Changed
 
