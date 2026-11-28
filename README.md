@@ -1871,6 +1871,9 @@ user data; query only the rows needed and handle backups accordingly.
 
 ## MCP server
 
+<!-- The MCP Registry reads the next line from the PyPI page to confirm the package is ours. -->
+<!-- mcp-name: io.github.The-Wordlab/aua -->
+
 `aua mcp` runs an MCP server over stdio, exposing the same tools as the CLI. It is a thin adapter over the engine — no separate perception logic.
 
 For web tasks, `aua --platform web mcp --tool-profile web` advertises a smaller catalogue of

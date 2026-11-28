@@ -32,7 +32,7 @@ you exactly what to fix.
 
 ## Where the version lives
 
-Seven release surfaces, and they must agree:
+Eight release surfaces, and they must agree:
 
 | file | who reads it |
 |---|---|
@@ -42,6 +42,7 @@ Seven release surfaces, and they must agree:
 | `.claude-plugin/marketplace.json` → `plugins[].version` | what `/plugin update` compares against |
 | `.codex-plugin/plugin.json` → `version` | the installed Codex plugin |
 | `.mcp.json` → pinned `@vX.Y.Z` source (`env.AUA_SPEC`) | the exact AUA release both plugins start through `uvx` |
+| `server.json` → `version` and `packages[0].version` | the MCP Registry listing: the PyPI release an MCP client starts from it |
 | `README.md` → pinned install examples | the exact release users copy into `uvx` and clone commands |
 
 `tests/test_the_version_is_the_same_everywhere.py` fails if any of them drift apart, because a
@@ -62,18 +63,18 @@ lock would otherwise disagree with `pyproject.toml` silently and forever.
    time produces a list nobody reads. One line per user-visible change, in the release, or it did
    not happen.
 2. `scripts/bump-version.sh --minor` (or `--major` / `--patch`, or an explicit `0.14.0`). It moves
-   all seven release surfaces, refreshes `uv.lock`, and promotes `## [Unreleased]` to
+   all eight release surfaces, refreshes `uv.lock`, and promotes `## [Unreleased]` to
    `## [0.14.0] - 2026-08-28`.
-3. **Read the diff.** It should be exactly the seven release surfaces, `uv.lock`, and the changelog
+3. **Read the diff.** It should be exactly the eight release surfaces, `uv.lock`, and the changelog
    heading. Anything else means the script picked up an edit you did not intend to release.
 4. `git commit -m "release: v0.14.0"`
 5. `git tag -a v0.14.0 -m "v0.14.0" && git push origin main --follow-tags`
-6. The `release` workflow fires on the `v*` tag. It re-checks that the tag matches all seven release
+6. The `release` workflow fires on the `v*` tag. It re-checks that the tag matches all eight release
    files, runs ruff, mypy and the suite (the ordinary CI workflow does **not** run on tags, so the
    release workflow runs them itself — a tag that publishes untested code is the one failure mode
    worth spending a few minutes of CI on), builds the wheel and sdist, and publishes the GitHub
-   Release with the notes for that version lifted out of `CHANGELOG.md`. Its last job uploads the
-   same wheel and sdist to PyPI.
+   Release with the notes for that version lifted out of `CHANGELOG.md`. The next job uploads the
+   same wheel and sdist to PyPI, and the last one lists the version in the MCP Registry.
 
 **Dry run first if you are unsure.** The workflow also accepts `workflow_dispatch`: run it from the
 Actions tab against a ref and it does everything except create the tag and the release, so you can
@@ -112,6 +113,26 @@ environment can use it.
   the job in `release.yml`.
 
 Releases before 0.48.0 were never uploaded and install from their Git tag only.
+
+## MCP Registry
+
+The `mcp-registry` job in `release.yml` publishes `server.json` to the official registry at
+<https://registry.modelcontextprotocol.io> as `io.github.The-Wordlab/aua`. MCP clients and other
+directories read that registry, so one entry reaches several of them. The entry tells a client to
+start the server with `uvx aua mcp` at the released version.
+
+- **It needs no secret.** The job signs in with its GitHub OIDC token, and the registry lets a
+  repository owned by The-Wordlab publish names under `io.github.The-Wordlab/`.
+- **The registry checks PyPI.** It opens the page of the `aua` version named in `server.json` and
+  looks for the line `<!-- mcp-name: io.github.The-Wordlab/aua -->` in the README uploaded with
+  it. That line lives in the README's MCP server section, and a test fails if it goes missing.
+- **If the job fails, re-run it** (`gh run rerun <run-id> --failed`), for example when PyPI has not
+  caught up yet. GitHub and PyPI already have the release and are unaffected.
+- **A version can be listed once**, and its entry cannot be edited afterwards. To change the
+  title or description, edit `server.json` and let the next release carry it.
+- **Check a change to `server.json` before tagging** with the registry's own tool:
+  `mcp-publisher validate` (from the registry's
+  [releases](https://github.com/modelcontextprotocol/registry/releases)).
 
 ## Consuming a release
 

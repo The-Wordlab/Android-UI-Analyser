@@ -135,6 +135,7 @@ paths = {
     ".claude-plugin/marketplace.json": root / ".claude-plugin/marketplace.json",
     ".codex-plugin/plugin.json": root / ".codex-plugin/plugin.json",
     ".mcp.json": root / ".mcp.json",
+    "server.json": root / "server.json",
 }
 
 pyproject = paths["pyproject.toml"].read_text(encoding="utf-8")
@@ -143,6 +144,7 @@ plugin = json.loads(paths[".claude-plugin/plugin.json"].read_text(encoding="utf-
 marketplace = json.loads(paths[".claude-plugin/marketplace.json"].read_text(encoding="utf-8"))
 codex_plugin = json.loads(paths[".codex-plugin/plugin.json"].read_text(encoding="utf-8"))
 mcp = json.loads(paths[".mcp.json"].read_text(encoding="utf-8"))
+registry = json.loads(paths["server.json"].read_text(encoding="utf-8"))
 readme_path = root / "README.md"
 readme = readme_path.read_text(encoding="utf-8")
 mcp_source = mcp["mcpServers"]["android-ui-analyser"]["env"]["AUA_SPEC"]
@@ -156,6 +158,8 @@ found = {
     ".claude-plugin/marketplace.json": marketplace.get("plugins", [{}])[0].get("version"),
     ".codex-plugin/plugin.json": codex_plugin.get("version"),
     ".mcp.json": mcp_tag.group(1) if mcp_tag else None,
+    "server.json": registry.get("version"),
+    "server.json PyPI package": registry.get("packages", [{}])[0].get("version"),
 }
 drift = {path: version for path, version in found.items() if version != current}
 if drift:
@@ -195,6 +199,8 @@ codex_plugin["version"] = target
 mcp["mcpServers"]["android-ui-analyser"]["env"]["AUA_SPEC"] = re.sub(
     r"@v[^@\s]+$", f"@v{target}", mcp_source
 )
+registry["version"] = target
+registry["packages"][0]["version"] = target
 readme = readme.replace(f"@v{current}", f"@v{target}")
 readme = readme.replace(f"`v{current}`", f"`v{target}`")
 readme = readme.replace(f"git checkout v{current}", f"git checkout v{target}")
@@ -221,6 +227,9 @@ paths[".codex-plugin/plugin.json"].write_text(
 )
 paths[".mcp.json"].write_text(
     json.dumps(mcp, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+)
+paths["server.json"].write_text(
+    json.dumps(registry, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
 )
 readme_path.write_text(readme, encoding="utf-8")
 changelog_path.write_text(changelog, encoding="utf-8")

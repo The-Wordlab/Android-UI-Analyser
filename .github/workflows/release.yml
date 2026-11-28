@@ -5,7 +5,7 @@ name: Release
 # --follow-tags` the whole release: it refuses a tag whose version disagrees with any package or
 # plugin surface or has no changelog entry, re-runs the full suite at the tagged commit, and only
 # then publishes a GitHub Release with notes lifted straight out of CHANGELOG.md, followed by
-# the same wheel and sdist on PyPI.
+# the same wheel and sdist on PyPI and the version's entry in the MCP Registry.
 on:
   push:
     tags: ['v*.*.*']
@@ -53,7 +53,7 @@ jobs:
           set -euo pipefail
 
           # On a tag push the tag is the source of truth. A manual dry run has no tag, so
-          # pyproject supplies the version and the same six-way comparison still runs.
+          # pyproject supplies the version and the same comparison still runs.
           if [ "${{ github.event_name }}" = "push" ]; then
             version="${GITHUB_REF_NAME#v}"
           else
@@ -62,9 +62,9 @@ jobs:
           fi
           echo "Releasing version: $version"
 
-          # Six release surfaces must agree: package, runtime, both plugin manifests, Claude's
-          # marketplace listing, and the git tag uvx starts for the bundled MCP server. Name the
-          # one that is wrong rather than failing with a bare mismatch.
+          # Seven release surfaces must agree: package, runtime, both plugin manifests, Claude's
+          # marketplace listing, the git tag uvx starts for the bundled MCP server, and the MCP
+          # Registry listing. Name the one that is wrong rather than failing with a bare mismatch.
           python3 - "$version" <<'PY'
           import json, pathlib, re, sys, tomllib
 
@@ -74,6 +74,7 @@ jobs:
           mcp = json.loads(pathlib.Path(".mcp.json").read_text())
           mcp_source = mcp["mcpServers"]["android-ui-analyser"]["env"]["AUA_SPEC"]
           mcp_match = re.search(r"@v([^@\s]+)$", mcp_source)
+          registry = json.loads(pathlib.Path("server.json").read_text())
 
           found = {
               "pyproject.toml": tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"],
@@ -82,6 +83,8 @@ jobs:
               ".claude-plugin/marketplace.json": json.loads(pathlib.Path(".claude-plugin/marketplace.json").read_text())["plugins"][0]["version"],
               ".codex-plugin/plugin.json": json.loads(pathlib.Path(".codex-plugin/plugin.json").read_text())["version"],
               ".mcp.json pinned git tag": mcp_match.group(1) if mcp_match else "<no vX.Y.Z source tag>",
+              "server.json": registry["version"],
+              "server.json PyPI package": registry["packages"][0]["version"],
           }
 
           disagree = {path: got for path, got in found.items() if got != want}
@@ -91,7 +94,7 @@ jobs:
               print(f"Release version {want} does not match: {', '.join(disagree)}", file=sys.stderr)
               print("Fix with: scripts/bump-version.sh " + want, file=sys.stderr)
               sys.exit(1)
-          print(f"All six release surfaces agree on {want}.")
+          print(f"All seven release surfaces agree on {want}.")
           PY
 
           # The whole point of the release is telling people what changed, so an entry is
@@ -270,3 +273,45 @@ jobs:
           skip-existing: true
           # Attestations need Trusted Publishing; with a token the action only warns about them.
           attestations: false
+
+  # ---------------------------------------------------------------------------------------
+  # List this version in the official MCP Registry (registry.modelcontextprotocol.io), which
+  # MCP clients and other directories read. It goes last because the registry opens the PyPI
+  # page of the `aua` version named in server.json and looks for the `mcp-name:` line of the
+  # README there, so the files must already be on PyPI.
+  #
+  # No secret: the registry accepts this job's GitHub OIDC token and lets a repository of
+  # The-Wordlab publish names under `io.github.The-Wordlab/`. If PyPI has not caught up when
+  # this runs, re-run the job; a version already listed is refused, never overwritten.
+  # ---------------------------------------------------------------------------------------
+  mcp-registry:
+    name: publish to the MCP Registry
+    needs: pypi
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # Raise this on purpose, never to `latest`: the download below is checked against the
+      # signature made by this exact release of the registry's own workflow.
+      MCP_PUBLISHER_VERSION: v1.8.21
+    steps:
+      - uses: actions/checkout@v5
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+      - run: ./mcp-publisher login github-oidc
+      - run: ./mcp-publisher publish

@@ -1,7 +1,7 @@
 """A release cannot have different answers to "which version is this?".
 
-The CLI, Python package, Claude/Codex plugins, marketplace, uvx MCP source, and README install
-commands travel through different paths. A stale plugin manifest or copy-paste command fails
+The CLI, Python package, Claude/Codex plugins, marketplace, uvx MCP source, MCP Registry listing,
+and README install commands travel through different paths. A stale plugin manifest or copy-paste command fails
 silently: an update may never appear or may start an older server. Name every disagreement so a
 maintainer fixes the source instead of the consumer.
 """
@@ -39,6 +39,7 @@ def _published_versions() -> dict[str, str]:
     mcp = json.loads((REPO / ".mcp.json").read_text(encoding="utf-8"))
     source = mcp["mcpServers"]["android-ui-analyser"]["env"]["AUA_SPEC"]
     tag = re.search(r"@v([^@\s]+)$", source)
+    registry = json.loads((REPO / "server.json").read_text(encoding="utf-8"))
     return {
         "src/android_ui_analyser/__init__.py": __version__,
         "pyproject.toml": project["project"]["version"],
@@ -46,6 +47,8 @@ def _published_versions() -> dict[str, str]:
         ".claude-plugin/marketplace.json": marketplace["plugins"][0]["version"],
         ".codex-plugin/plugin.json": codex_plugin["version"],
         ".mcp.json pinned git tag": tag.group(1) if tag else "<no vX.Y.Z source tag>",
+        "server.json": registry["version"],
+        "server.json PyPI package": registry["packages"][0]["version"],
     }
 
 
@@ -99,3 +102,12 @@ def test_both_plugins_share_the_pinned_uvx_mcp_server() -> None:
     assert "command -v uvx" in server["args"][1]
     assert server["args"][1].endswith('exec uvx --quiet --from "$AUA_SPEC" aua mcp')
     assert "@v" in server["env"]["AUA_SPEC"], "the plugin must never follow moving main"
+
+
+def test_the_readme_proves_the_registry_listing_is_ours() -> None:
+    # The MCP Registry accepts a PyPI package only when the README uploaded with it names the
+    # listing. Without this line the release's last job fails after PyPI already has the files.
+    registry = json.loads((REPO / "server.json").read_text(encoding="utf-8"))
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+
+    assert f"<!-- mcp-name: {registry['name']} -->" in readme

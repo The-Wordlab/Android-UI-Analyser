@@ -66,8 +66,8 @@ Requirements: **Python 3.11+**, **`adb` on PATH** (Android SDK platform-tools), 
   regenerates and stages all three from `guide.py` on every commit. To regenerate by hand use
   `aua guide --emit-skill <path>` / `aua guide --emit-codex-metadata <path>`.
 - **Release every user-visible change deliberately.** The package/runtime version, both plugin
-  manifests, Claude marketplace listing, the Git tag pinned by `.mcp.json` (its `AUA_SPEC`), and README install
-  examples must agree;
+  manifests, Claude marketplace listing, the Git tag pinned by `.mcp.json` (its `AUA_SPEC`), the
+  MCP Registry listing in `server.json`, and README install examples must agree;
   `tests/test_the_version_is_the_same_everywhere.py` fails if they drift. Add the user-visible note
   under `## [Unreleased]` in `CHANGELOG.md` in the same commit. Cut the version with
   `scripts/bump-version.sh`, then create the annotated tag;

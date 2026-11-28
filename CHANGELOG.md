@@ -11,6 +11,12 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Added
+
+- AUA is listed in the official MCP Registry as `io.github.The-Wordlab/aua`, so MCP clients and
+  directories that read the registry can find it and start it with `uvx aua mcp`. Every release
+  from this one on is listed by the release workflow.
+
 ### Changed
 
 - `LICENSE` is now the plain MIT text, so GitHub labels the repository MIT. The statement that the
