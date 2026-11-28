@@ -106,8 +106,10 @@ environment can use it.
 - **Each release adds about 64 MB** (30 MB wheel, 33 MB sdist) against PyPI's 10 GB per-project
   quota, which is roughly 150 releases. Nearly all of it is the bundled FunctionGemma adapter.
 - **The wheel is not MIT throughout.** That adapter is distributed under the Gemma Terms of Use,
-  and its directory carries the terms, prohibited-use policy and notices. Publishing it to PyPI
-  was decided on 2026-11-17; the reasoning sits above the job in `release.yml`.
+  and its directory carries the terms, prohibited-use policy and notices. `LICENSE` is the plain
+  MIT text for the code, `NOTICE` names the adapter's directory and terms, and both ship in the
+  wheel and the sdist. Publishing it to PyPI was decided on 2026-11-17; the reasoning sits above
+  the job in `release.yml`.
 
 Releases before 0.48.0 were never uploaded and install from their Git tag only.
 

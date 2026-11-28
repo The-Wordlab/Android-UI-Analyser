@@ -11,6 +11,13 @@ notes, so you can check for a newer version — and read what changed — withou
 
 ## [Unreleased]
 
+### Changed
+
+- `LICENSE` is now the plain MIT text, so GitHub labels the repository MIT. The statement that the
+  bundled FunctionGemma adapter has its own terms moved to a new `NOTICE` file, which ships next
+  to `LICENSE` in the wheel and the sdist. The package's license field is now
+  `MIT AND LicenseRef-Gemma-Terms-of-Use`. Nothing about the terms themselves changed.
+
 ## [0.49.0] - 2026-11-27
 
 ### Added

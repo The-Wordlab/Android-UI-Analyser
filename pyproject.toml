@@ -8,7 +8,9 @@ version = "0.49.0"
 description = "Give AI agents eyes on Android, iOS-simulator and web UIs: structured elements with stable IDs, not pixels. CLI + MCP server."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+# The code is MIT. The bundled FunctionGemma adapter is not: NOTICE names its directory and terms.
+license = "MIT AND LicenseRef-Gemma-Terms-of-Use"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Eiliya" }]
 maintainers = [{ name = "Eiliya" }]
 keywords = ["android", "ios", "web", "ui-testing", "mcp", "ai-agents", "uiautomator2", "set-of-marks", "accessibility", "ocr", "agent"]

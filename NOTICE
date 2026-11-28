@@ -1,0 +1,9 @@
+Android UI Analyser
+Copyright (c) 2026 The Wordlab
+
+The Android UI Analyser software, documentation, and training tools are licensed under the MIT
+License; see the LICENSE file.
+
+The MIT License does not apply to the modified FunctionGemma model derivative under
+`src/android_ui_analyser/resources/functiongemma/`. That directory is distributed under its
+included Gemma Terms of Use, prohibited-use policy, and notices.

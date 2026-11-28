@@ -120,11 +120,15 @@ def test_bundled_adapter_includes_exact_notice_and_complete_terms() -> None:
 def test_project_package_metadata_points_to_the_mixed_license_notice() -> None:
     project_root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
-    mixed_license = (project_root / "LICENSE").read_text(encoding="utf-8")
+    notice = (project_root / "NOTICE").read_text(encoding="utf-8")
 
-    assert project["project"]["license"] == {"file": "LICENSE"}
-    assert "does not apply to the modified FunctionGemma model derivative" in mixed_license
-    assert "resources/functiongemma" in mixed_license
+    # LICENSE stays the plain MIT text so GitHub labels the repository MIT; the model's separate
+    # terms are named in NOTICE, which ships next to LICENSE in the wheel and the sdist.
+    assert project["project"]["license"] == "MIT AND LicenseRef-Gemma-Terms-of-Use"
+    assert project["project"]["license-files"] == ["LICENSE", "NOTICE"]
+    assert "does not apply to the modified FunctionGemma model derivative" in notice
+    assert "resources/functiongemma" in notice
+    assert "FunctionGemma" not in (project_root / "LICENSE").read_text(encoding="utf-8")
     plugin = json.loads(
         (project_root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
     )

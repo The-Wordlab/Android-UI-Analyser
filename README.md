@@ -1113,9 +1113,10 @@ The fast LLM behind `--assist` and `aua navigate` (see [Optional: LLM assist](#o
 |---|---|---|---|---|
 | `functiongemma` | `functiongemma` | Apple silicon | Gemma Terms (adapter); MLX runtime under its own licenses | Bundled ~29 MB v10 LoRA + external pinned MLX base; inert until `policy.enabled: true` |
 
-The repository's code, docs, and training tools remain MIT-licensed. The modified FunctionGemma
-adapter under `src/android_ui_analyser/resources/functiongemma/` is a separate model derivative
-distributed under the included Gemma terms, prohibited-use policy, and notices.
+The repository's code, docs, and training tools remain MIT-licensed ([`LICENSE`](LICENSE)). The
+modified FunctionGemma adapter under `src/android_ui_analyser/resources/functiongemma/` is a
+separate model derivative distributed under the included Gemma terms, prohibited-use policy, and
+notices; [`NOTICE`](NOTICE) says so at the top level.
 
 **Default config remains commercially licensable and model-free at runtime.** No AGPL provider,
 remote model, planner, or policy model is active out of the box. OmniParser requires explicit
